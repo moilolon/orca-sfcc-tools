@@ -46,8 +46,12 @@ export type SandboxStatus = {
     codeVersion: string | null
     /** Why the upload failed: an error code. */
     reason: string | null
-    /** When the last full deploy ended well. */
+    /** When the last full deploy of this workspace ended well. */
     lastDeployAt: number | null
+    /** Whether its last full deploy ended well: only then is its version reloaded or watched. */
+    deployed: boolean
+    /** The watcher was started again after a restart, with no deploy since. */
+    restored: boolean
     /** When `code watch` last sent files, and how many since it started. */
     lastUploadAt: number | null
     files: number
@@ -56,6 +60,11 @@ export type SandboxStatus = {
   workspaces: SandboxWorkspace[]
   /** Code versions of removed workspaces still to be deleted, once none of them is active. */
   pendingDeletes: number
+  /**
+   * Stored versions of workspaces a complete list no longer holds (removed while the plugin was
+   * not listening): a person may delete them. Empty when the list is not whole.
+   */
+  leftovers: { workspaceId: string; codeVersion: string }[]
   /** The last side action that failed, with its error code; cleared when it next works. */
   problem: { action: SandboxAction; code: string } | null
 }
@@ -72,6 +81,8 @@ declare module 'orca' {
     'sandbox.release': { input: Record<string, never> | undefined; output: SandboxStatus }
     /** Deploys the uploading workspace again, whole, and activates it. */
     'sandbox.deploy': { input: Record<string, never> | undefined; output: SandboxStatus }
+    /** Deletes, by hand, the version of a workspace that is no longer listed (`leftovers`). */
+    'sandbox.forget': { input: { workspaceId: string }; output: SandboxStatus }
     /** Reloads the active code version (`code activate --reload`). */
     'sandbox.reload': { input: Record<string, never> | undefined; output: SandboxStatus }
     'sandbox.start': { input: Record<string, never> | undefined; output: SandboxStatus }

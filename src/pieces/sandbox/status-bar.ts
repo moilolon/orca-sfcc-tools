@@ -54,7 +54,15 @@ export function statusBarUpdates(t: Translator, current: SandboxStatus): [Status
   const version = upload.codeVersion ?? ''
   let second: StatusBarUpdate
   if (upload.state === 'failed') {
-    second = { id: UPLOAD_ITEM, text: t(messages, 'barFailed'), tone: 'danger', icon: 'error', tooltip: wordCode(t, upload.reason ?? 'action_failed'), visible: true }
+    const needed = upload.reason === 'deploy_needed'
+    second = {
+      id: UPLOAD_ITEM,
+      text: t(messages, needed ? 'barDeployNeeded' : 'barFailed'),
+      tone: needed ? 'warning' : 'danger',
+      icon: 'error',
+      tooltip: wordCode(t, upload.reason ?? 'action_failed'),
+      visible: true
+    }
   } else if (upload.state === 'deploying' || upload.state === 'uploading') {
     second = {
       id: UPLOAD_ITEM,

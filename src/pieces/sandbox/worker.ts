@@ -4,9 +4,10 @@
 // used, and only once dw.json makes it `ready`: otherwise every command answers why, and runs
 // nothing.
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
+import { isLocal, listWorkspaces } from '../../core/workspaces'
 import { DEFAULT_PREFIX, prefixOf } from './code-version'
 import { messages } from './i18n'
-import { Ownership, type Notice } from './ownership'
+import { Ownership, type Listing, type Notice } from './ownership'
 import type { SandboxAction, SandboxStatus } from './protocol'
 import { codeOf, REAL_TIMERS, SandboxError, SandboxWatch, type Timers } from './status'
 import { sandboxWord, statusBarUpdates, wordCode } from './status-bar'
@@ -41,8 +42,13 @@ export type SandboxHandle = Disposable & {
 
 const NO_ROLES = { sandbox: 'absent', development: 'absent', staging: 'absent', production: 'absent' } as const
 
-export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS): SandboxHandle {
+/**
+ * `listing` replaces how the workspace list and its completeness are read (tests); by default,
+ * Orca's `workspace.list`.
+ */
+export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, listing?: () => Promise<Listing>): SandboxHandle {
   const { orca, b2c, workspaces, t } = ctx
+  const list = listing ?? (() => listWorkspaces(orca.host))
   let problem: SandboxStatus['problem'] = null
   let disposed = false
 
@@ -65,6 +71,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS): S
     b2c,
     store: ctx.store,
     workspaces,
+    listing: list,
     timers,
     async prefix() {
       try {
@@ -98,21 +105,29 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS): S
   }
 
   async function status(): Promise<SandboxStatus> {
-    const [{ config, instances }, listed] = await Promise.all([roles(), workspaces.list().catch(() => [])])
+    const [{ config, instances }, listed] = await Promise.all([roles(), list().catch((): Listing => ({ workspaces: [], complete: false }))])
     const upload = ownership.snapshot()
+    const ids = new Set(listed.workspaces.map((workspace) => workspace.id))
+    // Only a whole list says a workspace is gone; even then only a person deletes its version.
+    const leftovers = listed.complete
+      ? Object.entries(ownership.storedVersions())
+          .filter(([id]) => !ids.has(id) && id !== upload.workspaceId)
+          .map(([workspaceId, codeVersion]) => ({ workspaceId, codeVersion }))
+      : []
     return {
       role: instances.sandbox,
       config,
       sandbox: sandbox.snapshot(),
       upload,
-      workspaces: listed.map((workspace) => ({
+      workspaces: listed.workspaces.map((workspace) => ({
         id: workspace.id,
         name: workspace.name,
-        local: workspace.hostId === null || workspace.hostId === 'local',
+        local: isLocal(workspace),
         codeVersion: ownership.versionOf(workspace.id),
         owner: workspace.id === upload.workspaceId
       })),
       pendingDeletes: ownership.pendingCount(),
+      leftovers,
       problem
     }
   }
@@ -203,6 +218,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS): S
     orca.panels.handle('sandbox.refresh', () => answer(refresh)),
     orca.panels.handle('sandbox.pick', (input) => answer(() => actions.pick(String(input?.workspaceId ?? '')))),
     orca.panels.handle('sandbox.release', () => answer(actions.release)),
+    orca.panels.handle('sandbox.forget', (input) => answer(() => ownership.forget(String(input?.workspaceId ?? '')))),
     orca.panels.handle('sandbox.deploy', () => answer(actions.deploy)),
     orca.panels.handle('sandbox.reload', () => answer(actions.reload)),
     orca.panels.handle('sandbox.start', () => answer(actions.start)),

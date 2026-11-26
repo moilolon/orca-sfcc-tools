@@ -76,7 +76,7 @@ async function start(options: { b2c?: FakeB2c; settings?: Record<string, unknown
     t: translator(() => options.locale ?? 'en'),
     log: () => {}
   }
-  const sandbox = startSandbox(ctx, timers)
+  const sandbox = startSandbox(ctx, timers, host.listing)
   await sandbox.ready
   await settle()
   return { b2c, host, fake, timers, sandbox }
@@ -250,5 +250,25 @@ test('a deploy notifies when it ends, well or not', async () => {
     { title: 'Deployed ws-shop', body: 'The changes of Shop are uploaded as they are saved.' },
     { title: 'The deploy failed', body: 'Shop: b2c ended with an error.' }
   ])
+  sandbox.dispose()
+})
+
+test('a stored version whose workspace a whole list no longer holds is offered for deletion, by hand only', async () => {
+  const { b2c, fake, host, sandbox } = await start()
+  await fake.request('sandbox.pick', { workspaceId: FIX.id })
+  await settle()
+  await fake.request('sandbox.pick', { workspaceId: SHOP.id })
+  await settle()
+  host.state.listed = [SHOP, REMOTE]
+  host.state.truncated = true
+  assert.deepEqual((await fake.request('sandbox.status')).leftovers, [], 'a short list offers nothing')
+  host.state.truncated = false
+  const status = await fake.request('sandbox.status')
+  assert.deepEqual(status.leftovers, [{ workspaceId: FIX.id, codeVersion: 'ws-checkout-fix' }])
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code delete')), 'listing it deletes nothing')
+  await fake.request('sandbox.forget', { workspaceId: FIX.id })
+  await settle()
+  assert.ok(b2c.commands().includes('code delete ws-checkout-fix --force'))
+  assert.deepEqual((await fake.request('sandbox.status')).leftovers, [])
   sandbox.dispose()
 })

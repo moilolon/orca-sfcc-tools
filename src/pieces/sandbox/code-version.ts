@@ -30,12 +30,13 @@ export function slugOf(name: string): string {
 
 /**
  * The prefix as the setting gives it, kept to letters, digits, `-` and `_` (nothing a shell or a
- * URL reads), at most `MAX_PREFIX` of them. A value that is not a text means the default; an
- * empty one, no prefix.
+ * URL reads), at most `MAX_PREFIX` of them. Never empty: a value that is not a text, or holds none
+ * of those characters, means the default, so a workspace name alone never names a version that
+ * someone else created.
  */
 export function prefixOf(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_PREFIX
-  return value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_PREFIX)
+  return value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_PREFIX) || DEFAULT_PREFIX
 }
 
 /**

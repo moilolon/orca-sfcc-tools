@@ -1,6 +1,7 @@
-// The ownership state machine with the runner faked: every transition, a failed deploy, a pick
-// while another deploy runs, deletion on removal (deferred while active), restore after a worker
-// restart, and the code version kept across a rename.
+// The ownership state machine with the runner faked: every transition, a failed deploy, picks
+// that overlap a deploy, a restore or each other, deletion only on removal (deferred while
+// active), restore after a worker restart (whole, short or failing list; interrupted deploy), and
+// the code version kept across a rename.
 import { assert, test } from 'orca/testing'
 import { Ownership, type Notice } from './ownership'
 import type { SandboxAction } from './protocol'
@@ -13,24 +14,35 @@ function setup(options: { listed?: Listed[]; storage?: ReturnType<typeof memoryS
   const timers = new FakeTimers()
   const problems: { action: SandboxAction; code: string | null }[] = []
   const notices: Notice[] = []
-  let changes = 0
-  const make = () =>
-    new Ownership({
-      b2c,
-      store: pieceStore(storage),
-      workspaces: host.workspaces,
-      timers,
-      prefix: async () => 'ws-',
-      onChange: () => void changes++,
-      onProblem: (action, code) => void problems.push({ action, code }),
-      onNotice: (notice) => void notices.push(notice),
-      log: () => {}
-    })
-  const ownership = make()
-  return { b2c, storage, host, timers, problems, notices, ownership, make, changes: () => changes }
+  const ownership = new Ownership({
+    b2c,
+    store: pieceStore(storage),
+    workspaces: host.workspaces,
+    listing: host.listing,
+    timers,
+    prefix: async () => 'ws-',
+    onChange: () => {},
+    onProblem: (action, code) => void problems.push({ action, code }),
+    onNotice: (notice) => void notices.push(notice),
+    log: () => {}
+  })
+  return { b2c, storage, host, timers, problems, notices, ownership }
 }
 
 const stateOf = (ownership: Ownership) => ownership.snapshot().state
+
+/** The `code watch` processes still running. */
+const alive = (b2c: FakeB2c) => b2c.watchers.filter((watcher) => !watcher.stopped)
+
+/** Stores Shop as the owner, deployed and watched, as a first run of the worker leaves it. */
+async function firstRun(storage: ReturnType<typeof memoryStorage>, finish = true) {
+  const first = setup({ storage })
+  if (!finish) first.b2c.hold.add('code deploy')
+  await first.ownership.pick(SHOP.id)
+  await settle()
+  first.ownership.dispose()
+  return first
+}
 
 test('none → deploying → watching: the whole workspace is deployed to its own version, activated, then watched', async () => {
   const { b2c, ownership, host, notices, timers } = setup()
@@ -38,10 +50,11 @@ test('none → deploying → watching: the whole workspace is deployed to its ow
   b2c.hold.add('code deploy')
   await ownership.pick(SHOP.id)
   assert.equal(stateOf(ownership), 'deploying')
-  assert.deepEqual(b2c.runs.at(-1)?.args, ['code', 'deploy', '--code-version', 'ws-shop', '--activate'])
+  assert.deepEqual(b2c.commands(), ['code list', 'code deploy --code-version ws-shop --activate'], 'a new name is checked against the sandbox first')
   assert.equal(b2c.runs.at(-1)?.options.role, 'sandbox')
   assert.equal(b2c.runs.at(-1)?.options.cwd, SHOP.path, 'b2c runs in the workspace, the path is never an argument')
   assert.deepEqual(await host.workspaces.upload(), { workspace: { ...SHOP }, codeVersion: 'ws-shop' }, 'other pieces see the upload')
+  assert.equal(ownership.snapshot().deployed, false)
 
   b2c.release()
   await settle()
@@ -51,6 +64,8 @@ test('none → deploying → watching: the whole workspace is deployed to its ow
   assert.equal(watcher.options.jsonl, true)
   assert.equal(watcher.options.cwd, SHOP.path)
   assert.equal(ownership.snapshot().lastDeployAt, timers.now())
+  assert.equal(ownership.snapshot().deployed, true)
+  assert.equal(ownership.snapshot().restored, false, 'a fresh deploy is not a restored watcher')
   assert.deepEqual(notices, [{ kind: 'deployed', workspace: 'Shop', codeVersion: 'ws-shop' }])
 })
 
@@ -80,6 +95,7 @@ test('deploying → failed when the deploy fails; deploying again recovers', asy
   await settle()
   assert.equal(stateOf(ownership), 'failed')
   assert.equal(ownership.snapshot().reason, 'b2c_failed')
+  assert.equal(ownership.snapshot().deployed, false)
   assert.equal(b2c.watchers.length, 0, 'nothing is watched after a failed deploy')
   assert.deepEqual(notices, [{ kind: 'deployFailed', workspace: 'Shop', code: 'b2c_failed' }])
   b2c.fail.clear()
@@ -122,6 +138,40 @@ test('a pick while another deploy runs abandons it: its late end starts no watch
   assert.equal(b2c.watchers[0].options.cwd, FIX.path)
 })
 
+test('two picks at once both keep their version name, and one watcher runs', async () => {
+  const { b2c, ownership } = setup()
+  await Promise.all([ownership.pick(SHOP.id), ownership.pick(FIX.id)])
+  await settle()
+  assert.equal(ownership.versionOf(SHOP.id), 'ws-shop', 'the first pick’s name is not lost')
+  assert.equal(ownership.versionOf(FIX.id), 'ws-checkout-fix')
+  assert.equal(ownership.current()?.workspaceId, FIX.id, 'the last pick wins')
+  assert.equal(alive(b2c).length, 1)
+  assert.equal(ownership.watching(), 1)
+
+  // Two workspaces whose names give one slug never share a version, even picked together.
+  const twins = setup({ listed: [SHOP, { ...FIX, name: 'shop' }] })
+  await Promise.all([twins.ownership.pick(SHOP.id), twins.ownership.pick(FIX.id)])
+  await settle()
+  assert.equal(twins.ownership.versionOf(SHOP.id), 'ws-shop')
+  assert.equal(twins.ownership.versionOf(FIX.id), 'ws-shop-2')
+})
+
+test('a new name never takes a version that is already on the sandbox', async () => {
+  const b2c = new FakeB2c()
+  b2c.codeVersions = [{ id: 'ws-shop', active: true }]
+  const { ownership } = setup({ b2c })
+  await ownership.pick(SHOP.id)
+  await settle()
+  assert.equal(ownership.versionOf(SHOP.id), 'ws-shop-2')
+  assert.ok(b2c.codeVersions.some((v) => v.id === 'ws-shop'), 'the existing one is left alone')
+
+  const refused = setup()
+  refused.b2c.fail.set('code list', 'b2c_failed')
+  await assert.rejects(refused.ownership.pick(SHOP.id), coded('b2c_failed'))
+  assert.equal(refused.ownership.current(), null, 'no name without the sandbox’s list')
+  assert.equal(await refused.host.workspaces.upload(), null)
+})
+
 test('picking another workspace stops the first one’s watcher and activates the second one’s version', async () => {
   const { b2c, ownership, host } = setup()
   await ownership.pick(SHOP.id)
@@ -130,8 +180,7 @@ test('picking another workspace stops the first one’s watcher and activates th
   await ownership.pick(FIX.id)
   assert.ok(first.stopped, 'the previous owner stops uploading at once')
   await settle()
-  assert.equal(b2c.watchers.length, 2)
-  assert.ok(!b2c.watchers[1].stopped)
+  assert.equal(alive(b2c).length, 1)
   assert.deepEqual(
     b2c.codeVersions.filter((v) => v.active).map((v) => v.id),
     ['ws-checkout-fix']
@@ -244,24 +293,12 @@ test('removing the owner clears ownership; its active version is deleted after t
   )
 })
 
-test('a queued version is also deleted after a reload, and forgotten when no longer listed', async () => {
+test('removing a workspace with no version deletes nothing', async () => {
   const { b2c, ownership } = setup()
-  await ownership.pick(SHOP.id)
-  await settle()
-  await ownership.removed(SHOP.id)
-  await settle()
-  // Someone activated another version by hand; the plugin reloads the new owner's.
-  await ownership.pick(FIX.id)
+  await ownership.removed('w-unknown')
   await settle()
   assert.equal(ownership.pendingCount(), 0)
-
-  const second = setup()
-  second.b2c.codeVersions = [{ id: 'ws-gone', active: false }]
-  await second.ownership.pick(SHOP.id)
-  await settle()
-  await second.ownership.removed('w-unknown')
-  await settle()
-  assert.equal(second.ownership.pendingCount(), 0, 'a workspace with no version deletes nothing')
+  assert.deepEqual(b2c.commands(), [])
 })
 
 test('a failed delete keeps the version queued and says so', async () => {
@@ -282,6 +319,26 @@ test('a failed delete keeps the version queued and says so', async () => {
   assert.deepEqual(problems.at(-1), { action: 'delete', code: null })
 })
 
+test('a version left by a workspace removed unheard is deleted only by hand, and only from a whole list', async () => {
+  const { b2c, ownership, host } = setup()
+  await ownership.pick(FIX.id)
+  await settle()
+  await ownership.pick(SHOP.id)
+  await settle()
+  host.state.listed = [SHOP, REMOTE]
+  await assert.rejects(ownership.forget(SHOP.id), coded('workspace_uploads'))
+  host.state.truncated = true
+  await assert.rejects(ownership.forget(FIX.id), coded('workspace_list_unavailable'))
+  host.state.truncated = false
+  host.state.listed = [SHOP, FIX]
+  await assert.rejects(ownership.forget(FIX.id), coded('workspace_listed'))
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code delete')), 'nothing deleted from a list')
+  host.state.listed = [SHOP]
+  await ownership.forget(FIX.id)
+  await settle()
+  assert.ok(b2c.commands().includes('code delete ws-checkout-fix --force'))
+})
+
 test('reload runs code activate --reload on the owner’s version, in the background', async () => {
   const { b2c, ownership, problems } = setup()
   await assert.rejects(ownership.reload(), coded('no_owner'))
@@ -298,19 +355,29 @@ test('reload runs code activate --reload on the owner’s version, in the backgr
   assert.deepEqual(problems.at(-1), { action: 'reload', code: 'b2c_failed' })
 })
 
+test('reload is refused for a version whose last deploy failed: nothing is activated', async () => {
+  const { b2c, ownership } = setup()
+  await ownership.pick(SHOP.id)
+  await settle()
+  b2c.fail.set('code deploy', 'b2c_failed')
+  await ownership.redeploy()
+  await settle()
+  assert.equal(stateOf(ownership), 'failed')
+  await assert.rejects(ownership.reload(), coded('deploy_needed'))
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code activate')))
+})
+
 test('after a worker restart the owner’s watcher starts again, with no redeploy', async () => {
   const storage = memoryStorage()
-  const first = setup({ storage })
-  await first.ownership.pick(SHOP.id)
-  await settle()
+  const first = await firstRun(storage)
   const deployedAt = first.ownership.snapshot().lastDeployAt
-  first.ownership.dispose()
 
   const b2c = new FakeB2c()
   const second = setup({ storage, b2c })
   await second.ownership.restore()
   await settle()
   assert.equal(stateOf(second.ownership), 'watching')
+  assert.equal(second.ownership.snapshot().restored, true)
   assert.equal(second.ownership.current()?.codeVersion, 'ws-shop')
   assert.equal(second.ownership.snapshot().lastDeployAt, deployedAt, 'the last full deploy is remembered')
   assert.deepEqual(b2c.commands(), ['code watch --code-version ws-shop'])
@@ -318,22 +385,109 @@ test('after a worker restart the owner’s watcher starts again, with no redeplo
   assert.equal(second.ownership.versionOf(SHOP.id), 'ws-shop')
 })
 
-test('a restart whose owner was removed meanwhile clears it and queues its version', async () => {
+test('a restart that cut a deploy short shows a deploy is needed: no watcher, no reload', async () => {
   const storage = memoryStorage()
-  const first = setup({ storage })
-  await first.ownership.pick(SHOP.id)
+  await firstRun(storage, false)
+
+  const b2c = new FakeB2c()
+  const second = setup({ storage, b2c })
+  await second.ownership.restore()
   await settle()
-  first.ownership.dispose()
+  assert.equal(stateOf(second.ownership), 'failed')
+  assert.equal(second.ownership.snapshot().reason, 'deploy_needed')
+  assert.equal(second.ownership.snapshot().deployed, false)
+  assert.equal(b2c.watchers.length, 0)
+  await assert.rejects(second.ownership.reload(), coded('deploy_needed'))
+  assert.deepEqual(b2c.commands(), [])
+  await second.ownership.redeploy()
+  await settle()
+  assert.equal(stateOf(second.ownership), 'watching')
+})
+
+test('a pick that lands while the restore awaits the list waits for it: one owner, one watcher', async () => {
+  const storage = memoryStorage()
+  await firstRun(storage)
+
+  const b2c = new FakeB2c()
+  const second = setup({ storage, b2c })
+  const letGo = second.host.holdList()
+  const restoring = second.ownership.restore()
+  await settle()
+  const picking = second.ownership.pick(FIX.id)
+  await settle()
+  letGo()
+  await Promise.all([restoring, picking])
+  await settle()
+  assert.equal(second.ownership.current()?.workspaceId, FIX.id, 'the pick is not undone')
+  assert.equal((await second.host.workspaces.upload())?.workspace.id, FIX.id)
+  assert.equal(alive(b2c).length, 1, 'never two watchers')
+  assert.equal(alive(b2c)[0].options.cwd, FIX.path)
+
+  // The next restart restores the pick, not the old owner.
+  second.ownership.dispose()
+  const third = setup({ storage })
+  await third.ownership.restore()
+  await settle()
+  assert.equal(third.ownership.current()?.workspaceId, FIX.id)
+})
+
+test('an owner missing from a whole list at restart is kept and shown as not found; nothing is deleted', async () => {
+  const storage = memoryStorage()
+  await firstRun(storage)
 
   const b2c = new FakeB2c()
   b2c.codeVersions = [{ id: 'ws-shop', active: true }]
   const second = setup({ storage, b2c, listed: [FIX] })
   await second.ownership.restore()
   await settle()
-  assert.equal(stateOf(second.ownership), 'none')
-  assert.equal(second.ownership.pendingCount(), 1, 'still active: it waits')
+  assert.equal(stateOf(second.ownership), 'failed')
+  assert.equal(second.ownership.snapshot().reason, 'workspace_not_found')
+  assert.equal(second.ownership.current()?.workspaceId, SHOP.id, 'kept until released or removed')
+  assert.equal(second.ownership.pendingCount(), 0)
   assert.equal(b2c.watchers.length, 0)
-  assert.equal(await second.host.workspaces.upload(), null)
+  // The list is whole again and another workspace is picked: Shop's version stays.
+  second.host.state.listed = [SHOP, FIX]
+  await second.ownership.pick(FIX.id)
+  await settle()
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code delete')))
+  assert.equal(second.ownership.versionOf(SHOP.id), 'ws-shop')
+})
+
+test('a short or failing list at restart never clears the owner', async () => {
+  for (const cut of ['truncated', 'fails'] as const) {
+    const storage = memoryStorage()
+    await firstRun(storage)
+    const b2c = new FakeB2c()
+    const second = setup({ storage, b2c, listed: [FIX] })
+    if (cut === 'truncated') second.host.state.truncated = true
+    else second.host.state.listFails = true
+    await second.ownership.restore()
+    await settle()
+    assert.equal(second.ownership.snapshot().reason, 'workspace_list_unavailable', cut)
+    assert.equal(second.ownership.current()?.workspaceId, SHOP.id, cut)
+    assert.equal(await second.storage.source.get('core.uploading'), SHOP.id, cut)
+    assert.deepEqual(b2c.commands(), [], cut)
+  }
+})
+
+test('restore never looks at the focused workspace, and never picks one', async () => {
+  const { b2c, ownership, host } = setup()
+  host.state.focused = FIX.id
+  await ownership.restore()
+  await settle()
+  assert.equal(host.state.focusReads, 0, 'the focus is never read')
+  assert.equal(ownership.current(), null)
+  assert.equal(stateOf(ownership), 'none')
+  assert.deepEqual(b2c.commands(), [])
+
+  const storage = memoryStorage()
+  await firstRun(storage)
+  const second = setup({ storage })
+  second.host.state.focused = FIX.id
+  await second.ownership.restore()
+  await settle()
+  assert.equal(second.host.state.focusReads, 0)
+  assert.equal(second.ownership.current()?.workspaceId, SHOP.id)
 })
 
 test('nothing here follows the focus: changing the focused workspace never changes the owner', async () => {
@@ -346,4 +500,5 @@ test('nothing here follows the focus: changing the focused workspace never chang
   assert.equal(ownership.current()?.workspaceId, SHOP.id)
   assert.equal((await host.workspaces.upload())?.workspace.id, SHOP.id)
   assert.equal(b2c.commands().length, commands)
+  assert.equal(host.state.focusReads, 0)
 })

@@ -28,12 +28,15 @@ export const IDLE: SandboxStatus = {
     codeVersion: null,
     reason: null,
     lastDeployAt: null,
+    deployed: false,
+    restored: false,
     lastUploadAt: null,
     files: 0,
     reloading: false
   },
   workspaces: WORKSPACES,
   pendingDeletes: 0,
+  leftovers: [],
   problem: null
 }
 
@@ -48,6 +51,7 @@ function owned(state: SandboxStatus['upload']['state'], extra: Partial<SandboxSt
       workspaceName: 'checkout-fix',
       codeVersion: 'ws-checkout-fix',
       lastDeployAt: state === 'deploying' ? null : NOW - 25 * MINUTE,
+      deployed: state === 'watching' || state === 'uploading',
       ...extra
     },
     workspaces: WORKSPACES.map((workspace) => (workspace.id === 'w-checkout' ? { ...workspace, owner: true, codeVersion: 'ws-checkout-fix' } : workspace))
@@ -87,5 +91,16 @@ export const scenarios: PieceScenarios = {
   /** A removed workspace's version waits until another one is active; its last delete failed. */
   sandboxPendingDelete: status({ ...WATCHING, pendingDeletes: 1, problem: { action: 'delete', code: 'b2c_failed' } }),
   /** No workspace is listed. */
-  sandboxNoWorkspaces: status({ ...IDLE, workspaces: [] })
+  sandboxNoWorkspaces: status({ ...IDLE, workspaces: [] }),
+  /** Watching again after a restart, with no deploy since: the hint that changes meanwhile wait. */
+  sandboxRestored: status({ ...WATCHING, upload: { ...WATCHING.upload, restored: true, files: 0, lastUploadAt: null } }),
+  /** A restart cut the last deploy short: the version is not watched or reloaded until deployed. */
+  sandboxDeployNeeded: status(owned('failed', { reason: 'deploy_needed', deployed: false })),
+  /** The uploading workspace is not in Orca's list any more: kept until released or removed. */
+  sandboxNotFound: status({
+    ...owned('failed', { reason: 'workspace_not_found', deployed: true }),
+    workspaces: WORKSPACES.filter((workspace) => workspace.id !== 'w-checkout')
+  }),
+  /** A version of a workspace removed while the plugin was not running, to delete by hand. */
+  sandboxLeftovers: status({ ...WATCHING, leftovers: [{ workspaceId: 'w-old', codeVersion: 'ws-old-promo' }] })
 }

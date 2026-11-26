@@ -6,7 +6,7 @@ import type { JsonValue } from 'orca'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { B2cError, type B2c, type B2cEvent, type Exit, type InstancesState, type RunOptions, type RunResult, type Running, type StartOptions } from '../../core/b2c'
 import { createStore, type Store } from '../../core/store'
-import { createWorkspaces } from '../../core/workspaces'
+import { createWorkspaces, listWorkspaces } from '../../core/workspaces'
 import type { Workspaces } from '../../core/piece'
 import type { Timers } from './status'
 
@@ -188,18 +188,48 @@ export const SHOP: Listed = { id: 'w-shop', kind: 'worktree', name: 'Shop', path
 export const FIX: Listed = { id: 'w-fix', kind: 'worktree', name: 'Checkout Fix', path: 'C:/work/checkout-fix', branch: 'fix', hostId: 'local' }
 export const REMOTE: Listed = { id: 'w-remote', kind: 'folder', name: 'Shop on a server', path: '/srv/shop', branch: null, hostId: 'ssh:build-01' }
 
-/** A workspace host whose list and focus a test changes, and the real core workspaces over it. */
+/**
+ * A workspace host whose list and focus a test changes, the real core workspaces over it, and the
+ * list with its completeness as the worker reads it. `truncated` cuts the list short, `listFails`
+ * makes it fail, and `holdList()` keeps the next list (only that one) waiting until the test lets
+ * it go.
+ * `focusReads` counts every time anything asked which workspace is focused.
+ */
 export function fakeWorkspaces(listed: Listed[] = [SHOP, FIX, REMOTE], storage = memoryStorage()) {
-  const state = { listed, focused: null as string | null }
+  const state = { listed, focused: null as string | null, truncated: false, listFails: false, focusReads: 0 }
+  let held: Promise<void> | null = null
   const host = {
     call: async (method: string) => {
-      if (method === 'workspace.list') return { workspaces: state.listed, truncated: false }
-      if (method === 'workspace.readContext') return state.focused ? { workspaceId: state.focused, branch: '', displayName: '', terminals: [] } : null
+      if (method === 'workspace.list') {
+        if (held) {
+          // Only the next list waits; the ones after it answer at once.
+          const wait = held
+          held = null
+          await wait
+        }
+        if (state.listFails) throw new Error('unavailable')
+        return { workspaces: state.listed, truncated: state.truncated }
+      }
+      if (method === 'workspace.readContext') {
+        state.focusReads++
+        return state.focused ? { workspaceId: state.focused, branch: '', displayName: '', terminals: [] } : null
+      }
       throw new Error(`unexpected host call: ${method}`)
     }
   } as unknown as OrcaWorkerApi['host']
   const workspaces: Workspaces = createWorkspaces(host, createStore(storage.source, 'core'))
-  return { state, workspaces, storage }
+  return {
+    state,
+    workspaces,
+    storage,
+    listing: () => listWorkspaces(host),
+    /** Holds the next list until the returned function is called. */
+    holdList(): () => void {
+      let release!: () => void
+      held = new Promise<void>((resolve) => (release = resolve))
+      return () => release()
+    }
+  }
 }
 
 export function pieceStore(storage = memoryStorage()): Store {

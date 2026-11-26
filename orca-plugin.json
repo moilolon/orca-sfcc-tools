@@ -71,7 +71,7 @@
       {
         "key": "codeVersionPrefix",
         "title": "Code version prefix",
-        "description": "Put before the workspace name to make the code version each workspace uploads to (ws-checkout-fix). Letters, digits, - and _. A workspace keeps the name it got first.",
+        "description": "Put before the workspace name to make the code version each workspace uploads to (ws-checkout-fix). Letters, digits, - and _; empty means ws-. A workspace keeps the name it got first, and a new name never takes a version already on the sandbox.",
         "type": "string",
         "default": "ws-",
         "maxLength": 16,

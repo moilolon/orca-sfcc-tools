@@ -26,6 +26,16 @@ export const messages = defineMessages(
     uploadWatching: 'Watching',
     uploadUploading: 'Uploading',
     uploadFailed: 'Failed',
+    uploadDeployNeeded: 'Deploy needed',
+    uploadNotFound: 'Not found',
+    noteDeploying: 'deploying',
+    noteUploading: 'uploading…',
+    noteFailed: 'failed',
+    groupLeftovers: 'Left behind',
+    leftoversGuidance: 'Versions of workspaces no longer in Orca, removed while the plugin was not running. Press one to delete it.',
+    noteNotListed: 'not listed',
+    deleteVersion: 'Delete this version',
+    barDeployNeeded: 'Deploy needed',
     from: 'From',
     codeVersion: 'Code version',
     lastDeploy: 'Last full deploy',
@@ -102,7 +112,12 @@ export const messages = defineMessages(
     'error.sandbox_follow_timeout': 'The sandbox did not settle in time. Refresh to see its state.',
     'error.watch_ended': 'b2c stopped watching the workspace.',
     'error.upload_failed': 'b2c could not upload a change.',
-    'error.upload_deploying': 'A deploy is running; wait for it to end.'
+    'error.upload_deploying': 'A deploy is running; wait for it to end.',
+    'error.deploy_needed': 'The last full deploy of this version did not finish. Deploy everything again before reloading or uploading.',
+    'error.workspace_not_found': 'The workspace that uploads is no longer listed in Orca. Stop uploading to release it; removing it in Orca deletes its version.',
+    'error.workspace_list_unavailable': 'Orca’s workspace list could not be read whole. Try again in a moment.',
+    'error.workspace_uploads': 'That workspace uploads now: stop uploading first.',
+    'error.workspace_listed': 'That workspace is still listed in Orca: its version stays.'
   },
   {
     title: 'Sandbox',
@@ -126,6 +141,16 @@ export const messages = defineMessages(
     uploadWatching: 'Vigilando',
     uploadUploading: 'Subiendo',
     uploadFailed: 'Ha fallado',
+    uploadDeployNeeded: 'Falta desplegar',
+    uploadNotFound: 'No encontrado',
+    noteDeploying: 'desplegando',
+    noteUploading: 'subiendo…',
+    noteFailed: 'ha fallado',
+    groupLeftovers: 'Sobrantes',
+    leftoversGuidance: 'Versiones de workspaces que ya no están en Orca, eliminados mientras el plugin no funcionaba. Pulsa una para borrarla.',
+    noteNotListed: 'no aparece',
+    deleteVersion: 'Borrar esta versión',
+    barDeployNeeded: 'Falta desplegar',
     from: 'Desde',
     codeVersion: 'Versión de código',
     lastDeploy: 'Último despliegue',
@@ -202,7 +227,12 @@ export const messages = defineMessages(
     'error.sandbox_follow_timeout': 'El sandbox no se ha estabilizado a tiempo. Actualiza para ver su estado.',
     'error.watch_ended': 'b2c ha dejado de vigilar el workspace.',
     'error.upload_failed': 'b2c no ha podido subir un cambio.',
-    'error.upload_deploying': 'Hay un despliegue en marcha; espera a que termine.'
+    'error.upload_deploying': 'Hay un despliegue en marcha; espera a que termine.',
+    'error.deploy_needed': 'El último despliegue completo de esta versión no terminó. Despliega todo de nuevo antes de recargar o subir.',
+    'error.workspace_not_found': 'El workspace que sube ya no aparece en Orca. Deja de subir para soltarlo; eliminarlo en Orca borra su versión.',
+    'error.workspace_list_unavailable': 'No se ha podido leer entera la lista de workspaces de Orca. Inténtalo dentro de un momento.',
+    'error.workspace_uploads': 'Ese workspace es el que sube ahora: deja de subir primero.',
+    'error.workspace_listed': 'Ese workspace sigue en Orca: su versión se queda.'
   }
 )
 
