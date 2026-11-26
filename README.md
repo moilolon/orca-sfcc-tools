@@ -24,7 +24,7 @@ one at a time.
 
 | | Piece | What it does |
 |---|---|---|
-| 🧩 | **ISML** | `.isml` templates in Orca's editor |
+| 🧩 | **ISML** | Colours `.isml` templates in Orca's editor: HTML, `<is…>` tags, `${…}` expressions, `<isscript>` and both kinds of comment |
 | ⬆️ | **Upload** | Uploads the cartridges to the sandbox on save, from one workspace at a time |
 | 🚦 | **Sandbox** | Its status and the active code version, in the status bar |
 | 🪵 | **Errors** | The new errors of the sandbox log, apart from the ones already seen |
