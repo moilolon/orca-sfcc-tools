@@ -3,7 +3,7 @@
 import { assert, test } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { createStore } from './store'
-import { createWorkspaces, isLocal } from './workspaces'
+import { createWorkspaces, isLocal, listWorkspaces } from './workspaces'
 
 type Listed = { id: string; kind: 'worktree' | 'folder'; name: string; path: string; branch: string | null; hostId: string | null }
 
@@ -64,4 +64,12 @@ test('dw.json is looked for in the uploading workspace, else the focused one, an
   assert.equal(await workspacesOver([LOCAL, REMOTE], 'w2', 'w1').configRoot(), '/work/shop', 'the uploading one wins')
   assert.equal(await workspacesOver([LOCAL, REMOTE], 'w1', 'w2').configRoot(), null, 'the uploading one is remote: never the focused one instead')
   assert.equal(await workspacesOver([LOCAL], null).configRoot(), null)
+})
+
+test('the list says whether it is whole: a truncated one is never complete', async () => {
+  const answering = (truncated: boolean | undefined) =>
+    ({ call: async () => ({ workspaces: [LOCAL], ...(truncated === undefined ? {} : { truncated }) }) }) as unknown as OrcaWorkerApi['host']
+  assert.deepEqual(await listWorkspaces(answering(false)), { workspaces: [LOCAL], complete: true })
+  assert.deepEqual(await listWorkspaces(answering(true)), { workspaces: [LOCAL], complete: false })
+  assert.equal((await listWorkspaces(answering(undefined))).complete, true)
 })

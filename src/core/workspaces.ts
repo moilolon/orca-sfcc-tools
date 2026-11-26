@@ -16,10 +16,21 @@ export function isLocal(workspace: Pick<Workspace, 'hostId'>): boolean {
   return workspace.hostId === null || workspace.hostId === 'local'
 }
 
+/**
+ * Every workspace Orca lists, and whether the list is whole. A list Orca cut short
+ * (`truncated`) says nothing about a workspace missing from it: never read that as removed.
+ */
+export async function listWorkspaces(host: OrcaWorkerApi['host']): Promise<{ workspaces: Workspace[]; complete: boolean }> {
+  const answer = await host.call('workspace.list')
+  return {
+    workspaces: answer.workspaces.map(({ id, name, path, branch, kind, hostId }) => ({ id, name, path, branch, kind, hostId: hostId ?? null })),
+    complete: answer.truncated !== true
+  }
+}
+
 export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store): Workspaces {
   async function list(): Promise<Workspace[]> {
-    const answer = await host.call('workspace.list')
-    return answer.workspaces.map(({ id, name, path, branch, kind, hostId }) => ({ id, name, path, branch, kind, hostId: hostId ?? null }))
+    return (await listWorkspaces(host)).workspaces
   }
   async function byId(id: string | null | undefined): Promise<Workspace | null> {
     if (!id) return null
