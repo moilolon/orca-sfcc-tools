@@ -24,7 +24,8 @@ Changing it needs the owner's yes.
       `b2c.ts` (the only module that starts `b2c`), `dw-config.ts` (the only module that
       reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
-      namespace per piece), `workspaces.ts`, `i18n.ts` (texts, English and Spanish),
+      namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
+      with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish),
       `open-file.ts` (opens a file of a workspace at a line through `orca file open`).
       `b2c.ts` and `open-file.ts` are the only modules that start a process: `open-file.ts`
       imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe` (or `orca`) directly,
@@ -54,6 +55,12 @@ Changing it needs the owner's yes.
       expect nothing of what the pieces are today: keep them that way, and test a piece beside
       its own files. A section whose `setup` throws is shown as not started until the panel is
       opened again.
+    - `src/pieces/sandbox/`: `ownership.ts` (who uploads: none, deploying, watching,
+      uploading, failed; deletes the version of a removed workspace, deferred while active),
+      `code-version.ts` (`<prefix><slug>`, kept per workspace id), `uploader.ts` (reads
+      `code watch --jsonl` lines), `status.ts` (the sandbox state from `sandbox list`, start and
+      stop followed on it), `status-bar.ts` (its two items' texts), `worker.ts` (requests,
+      commands, `workspace.removed`); `testing.ts` holds the fakes its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
       beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
       line; `frames.ts` finds which stack frames are files of a local cartridge. A read stores
@@ -156,6 +163,17 @@ Changing it needs the owner's yes.
       `b2c.isHost(role, value)`, never by holding the host.
     - One workspace uploads, the one picked by hand; it never follows the focused workspace. A
       workspace on another host (`hostId` other than `local`) is never read as a local folder.
+      Picking deploys it whole to its own code version with `--activate`, then runs `code watch`
+      in it, with the workspace as the working folder and never its path as an argument.
+      Releasing leaves the version active. Every change of ownership goes through one queue, so
+      there is never more than one watcher; every wait in it is bounded (host calls a few
+      seconds, b2c calls their own timeout), release stops the watcher without waiting its turn,
+      and after `dispose()` nothing queued starts and nothing is deployed. A version is deleted only on its workspace's
+      `workspace.removed` event (once another version is active) or by a person's hand, from a
+      whole list and never for a project hidden from the sidebar; a workspace missing from a
+      list is never taken as removed. A worker restart restarts the
+      watcher without a redeploy, but only for a version whose last full deploy ended; the
+      others show that a deploy is needed and are never reloaded.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
       or customer data, in code, tests, fixtures, commit messages or pull requests. Fixtures are
       invented, with hosts under `example.com`. Never open or copy a real `dw.json`.
