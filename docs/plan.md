@@ -469,16 +469,12 @@ measured in 7.2. Identical files in several cartridges make S3 ambiguous by natu
 ```mermaid
 graph TD
   PLAN[Plan approved] --> P0[0 Base]
-  PLAN --> S2 & S6 & S7
   P0 --> P1[1 ISML]
   P0 --> P2[2 Sandbox and upload]
   P0 --> P3[3 Errors]
   P0 --> P5[5 Debugger]
   P0 --> P61[6.1 dw index]
   P0 --> P62[6.2 Syntax]
-  S6 --> P2 & P3 & P61
-  S7 --> P2
-  S2 --> P3 & P5 & P65
   S1 --> P5
   S5 --> P61
   P3 --> P4[4 Bot]
@@ -498,7 +494,7 @@ approves, live check, merge, report.
 
 | Wave | In parallel (at most four workers) | Waits for the owner |
 | --- | --- | --- |
-| 1 | 0, S2, S6, S7 | approval of the spike plugin and of the plugin |
+| 1 | 0 | approval of the plugin |
 | 2 | 1, 2, 3, S1 | activation on the sandbox |
 | 3 | 5, 6.1, 6.2, S8 (and S5 before 6.1) | the workflow of 6.1 and the run S5 needs |
 | 4 | 4, 6.3, then 6.4, with S3, S4 and S9 alongside | the bot and its automation |
