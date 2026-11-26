@@ -3,7 +3,7 @@
 // adds a capture without touching a shared file. Only the checks and tests load this module;
 // Orca never does.
 import type { CheckScenario } from 'orca/testing'
-import type { PieceId } from '../core/piece'
+import type { PanelSection, PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import { SETUP_VIEW, VIEW_KEY } from './views'
 
@@ -20,8 +20,20 @@ export const READY_STATUS: CoreStatus = {
   pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor']
 }
 
-/** A piece as the merge needs it: its scenarios, and whether its section has a view of its own. */
-export type ScenarioSource = { id: PieceId; scenarios: PieceScenarios; hasView: boolean }
+/**
+ * A piece as the merge needs it: its scenarios, and whether they open its own view, which is
+ * `opensOwnView` of its section.
+ */
+export type ScenarioSource = { id: PieceId; scenarios: PieceScenarios; opensOwnView: boolean }
+
+/**
+ * Whether a piece's scenarios open its own view: only once its section is delivered and has a
+ * view, as the panel puts it in the bar only then. Before that they open the setup view, which is
+ * what the panel draws, so a phase can write its scenarios before it flips `delivered`.
+ */
+export function opensOwnView(sections: readonly PanelSection[], id: PieceId): boolean {
+  return sections.some((section) => section.id === id && section.delivered && section.hasView)
+}
 
 /** The view a scenario opens: the one it persists itself, else `view`. */
 function openingOn(scenario: CheckScenario, view: string): CheckScenario {
@@ -42,18 +54,19 @@ export function viewOf(scenario: CheckScenario): string | undefined {
  * order they land in. A name used twice, or one that breaks the rule, throws naming the piece.
  *
  * Every scenario names the view it draws, in `persisted.plugin.view`: core's open the setup view,
- * and a piece's open its own view (the setup view when its section has none), unless the scenario
- * persists another. A test mounts each one and fails when it draws a different view.
+ * and a piece's open its own view (the setup view until its section is delivered with a view),
+ * unless the scenario persists another. A test mounts each one and fails when it draws a
+ * different view.
  */
 export function mergeScenarios(core: PieceScenarios, pieces: readonly ScenarioSource[]): Record<string, CheckScenario> {
   const merged: Record<string, CheckScenario> = {}
   for (const [name, scenario] of Object.entries(core)) merged[name] = openingOn(scenario, SETUP_VIEW)
-  for (const { id, scenarios, hasView } of pieces) {
+  for (const { id, scenarios, opensOwnView: toOwnView } of pieces) {
     for (const [name, scenario] of Object.entries(scenarios)) {
-      const own = name === id || (name.startsWith(id) && /^[A-Z0-9]/.test(name.slice(id.length)))
-      if (!own) throw new Error(`${id}: the scenario "${name}" must be named ${id} or ${id}<Name>`)
+      const named = name === id || (name.startsWith(id) && /^[A-Z0-9]/.test(name.slice(id.length)))
+      if (!named) throw new Error(`${id}: the scenario "${name}" must be named ${id} or ${id}<Name>`)
       if (name in merged) throw new Error(`${id}: the scenario "${name}" already exists`)
-      merged[name] = openingOn({ ...scenario, requests: { 'core.status': () => READY_STATUS, ...scenario.requests } }, hasView ? id : SETUP_VIEW)
+      merged[name] = openingOn({ ...scenario, requests: { 'core.status': () => READY_STATUS, ...scenario.requests } }, toOwnView ? id : SETUP_VIEW)
     }
   }
   return merged

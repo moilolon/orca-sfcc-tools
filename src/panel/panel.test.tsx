@@ -12,7 +12,7 @@ import type { CoreStatus } from '../protocol'
 import * as panelModule from './panel'
 import { createPanel } from './panel'
 import { CHECKS } from './checks'
-import { mergeScenarios, READY_STATUS, viewOf as namedView } from './scenarios'
+import { mergeScenarios, opensOwnView, READY_STATUS, viewOf as namedView } from './scenarios'
 import { SECTIONS } from './sections'
 import { Actions, Group, ListRow, StateBadge } from './ui'
 import { SETUP_VIEW, viewBoxKey } from './views'
@@ -620,9 +620,9 @@ test('a piece adds check scenarios from its own folder: they are merged under it
   const core = { found: {}, missing: { settings: { b2cPath: 'x' } } }
   const answer = { state: 'watching' }
   const merged = mergeScenarios(core, [
-    { id: 'sandbox', hasView: true, scenarios: { sandbox: {}, sandboxWatching: { requests: { 'probe.status': answer }, settings: { b2cPath: 'y' } } } },
-    { id: 'errors', hasView: true, scenarios: { errorsNew: { requests: { 'core.status': MISSING } } } },
-    { id: 'isml', hasView: false, scenarios: {} }
+    { id: 'sandbox', opensOwnView: true, scenarios: { sandbox: {}, sandboxWatching: { requests: { 'probe.status': answer }, settings: { b2cPath: 'y' } } } },
+    { id: 'errors', opensOwnView: true, scenarios: { errorsNew: { requests: { 'core.status': MISSING } } } },
+    { id: 'isml', opensOwnView: false, scenarios: {} }
   ])
   assert.deepEqual(Object.keys(merged), ['found', 'missing', 'sandbox', 'sandboxWatching', 'errorsNew'])
   // Core's scenarios keep what they say, and open the setup view.
@@ -635,16 +635,16 @@ test('a piece adds check scenarios from its own folder: they are merged under it
   assert.equal(merged.errorsNew.requests?.['core.status'], MISSING)
 
   // Named after another piece, after none, or twice: refused, naming the piece.
-  assert.throws(() => mergeScenarios(core, [{ id: 'errors', hasView: true, scenarios: { sandboxBroken: {} } }]), /errors: the scenario "sandboxBroken" must be named errors or errors<Name>/)
-  assert.throws(() => mergeScenarios(core, [{ id: 'errors', hasView: true, scenarios: { found: {} } }]), /errors: the scenario "found" must be named/)
-  assert.throws(() => mergeScenarios(core, [{ id: 'errors', hasView: true, scenarios: { errorsx: {} } }]), /must be named/)
-  assert.throws(() => mergeScenarios({ errorsNew: {} }, [{ id: 'errors', hasView: true, scenarios: { errorsNew: {} } }]), /errors: the scenario "errorsNew" already exists/)
+  assert.throws(() => mergeScenarios(core, [{ id: 'errors', opensOwnView: true, scenarios: { sandboxBroken: {} } }]), /errors: the scenario "sandboxBroken" must be named errors or errors<Name>/)
+  assert.throws(() => mergeScenarios(core, [{ id: 'errors', opensOwnView: true, scenarios: { found: {} } }]), /errors: the scenario "found" must be named/)
+  assert.throws(() => mergeScenarios(core, [{ id: 'errors', opensOwnView: true, scenarios: { errorsx: {} } }]), /must be named/)
+  assert.throws(() => mergeScenarios({ errorsNew: {} }, [{ id: 'errors', opensOwnView: true, scenarios: { errorsNew: {} } }]), /errors: the scenario "errorsNew" already exists/)
 })
 
 test('every scenario names the view it draws: a piece’s its own, core’s the setup view, unless it says otherwise', () => {
   const merged = mergeScenarios({ found: {}, ownView: { persisted: { plugin: { view: 'sandbox', other: 1 } } } }, [
-    { id: 'sandbox', hasView: true, scenarios: { sandbox: {}, sandboxSetup: { persisted: { plugin: { view: 'setup' } } } } },
-    { id: 'isml', hasView: false, scenarios: { isml: { persisted: { workspace: { kept: true } } } } }
+    { id: 'sandbox', opensOwnView: true, scenarios: { sandbox: {}, sandboxSetup: { persisted: { plugin: { view: 'setup' } } } } },
+    { id: 'isml', opensOwnView: false, scenarios: { isml: { persisted: { workspace: { kept: true } } } } }
   ])
   assert.deepEqual(Object.fromEntries(Object.entries(merged).map(([name, scenario]) => [name, namedView(scenario)])), {
     found: 'setup',
@@ -673,13 +673,33 @@ test('a scenario that names a view it cannot open is caught', async () => {
   // Over VIEWS, a scenario naming a piece that is not delivered draws the setup view instead.
   const [debuggerScenario, errorsScenario] = Object.values(
     mergeScenarios({}, [
-      { id: 'debugger', hasView: true, scenarios: { debugger: {} } },
-      { id: 'errors', hasView: true, scenarios: { errors: {} } }
+      { id: 'debugger', opensOwnView: true, scenarios: { debugger: {} } },
+      { id: 'errors', opensOwnView: true, scenarios: { errors: {} } }
     ])
   )
   assert.equal(namedView(debuggerScenario), 'debugger')
   assert.equal(await viewDrawnBy(VIEWS, debuggerScenario), 'setup')
   assert.equal(await viewDrawnBy(VIEWS, errorsScenario), 'errors')
+})
+
+test('a piece that has scenarios before it is delivered opens and draws the setup view, then its own', async () => {
+  // A phase writes its scenarios first and flips `delivered` last: both states must pass.
+  for (const delivered of [false, true]) {
+    const sections = [{ ...viewOf('sandbox', 'Sandbox', 'Sandbox'), delivered }, viewOf('errors', 'Errors', 'Errores')]
+    const merged = mergeScenarios({}, [
+      { id: 'sandbox', opensOwnView: opensOwnView(sections, 'sandbox'), scenarios: { sandbox: {}, sandboxBusy: {} } },
+      { id: 'errors', opensOwnView: opensOwnView(sections, 'errors'), scenarios: { errors: {} } }
+    ])
+    const own = delivered ? 'sandbox' : 'setup'
+    assert.deepEqual(Object.fromEntries(Object.entries(merged).map(([name, scenario]) => [name, namedView(scenario)])), { sandbox: own, sandboxBusy: own, errors: 'errors' })
+    for (const [name, scenario] of Object.entries(merged)) {
+      assert.equal(await viewDrawnBy(panelOver(sections), scenario), namedView(scenario), `${name} with sandbox delivered: ${delivered}`)
+    }
+  }
+  // A piece with no view, delivered or not, never opens its own.
+  const isml = { ...stub('isml', 'ISML', 'ISML'), delivered: true, hasView: false }
+  assert.equal(opensOwnView([isml], 'isml'), false)
+  assert.equal(opensOwnView([], 'isml'), false)
 })
 
 test('every check scenario of the plugin draws the view it names', async () => {

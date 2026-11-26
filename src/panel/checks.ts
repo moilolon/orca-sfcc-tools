@@ -9,9 +9,8 @@ import { scenarios as engine } from '../pieces/engine/scenarios'
 import { scenarios as errors } from '../pieces/errors/scenarios'
 import { scenarios as isml } from '../pieces/isml/scenarios'
 import { scenarios as sandbox } from '../pieces/sandbox/scenarios'
-import type { PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
-import { mergeScenarios, READY_STATUS, type PieceScenarios } from './scenarios'
+import { mergeScenarios, opensOwnView, READY_STATUS, type PieceScenarios } from './scenarios'
 import { SECTIONS } from './sections'
 
 const NO_INSTANCES: CoreStatus['instances'] = { sandbox: 'absent', development: 'absent', staging: 'absent', production: 'absent' }
@@ -55,16 +54,11 @@ const CORE_SCENARIOS: PieceScenarios = {
   }
 }
 
-/** Whether a piece's section has a view, so its scenarios open it. */
-function hasView(id: PieceId): boolean {
-  return SECTIONS.some((section) => section.id === id && section.hasView)
-}
-
 export const CHECKS = mergeScenarios(CORE_SCENARIOS, [
-  { id: 'isml', scenarios: isml, hasView: hasView('isml') },
-  { id: 'sandbox', scenarios: sandbox, hasView: hasView('sandbox') },
-  { id: 'errors', scenarios: errors, hasView: hasView('errors') },
-  { id: 'debugger', scenarios: debuggerScenarios, hasView: hasView('debugger') },
-  { id: 'engine', scenarios: engine, hasView: hasView('engine') },
-  { id: 'editor', scenarios: editor, hasView: hasView('editor') }
+  { id: 'isml', scenarios: isml, opensOwnView: opensOwnView(SECTIONS, 'isml') },
+  { id: 'sandbox', scenarios: sandbox, opensOwnView: opensOwnView(SECTIONS, 'sandbox') },
+  { id: 'errors', scenarios: errors, opensOwnView: opensOwnView(SECTIONS, 'errors') },
+  { id: 'debugger', scenarios: debuggerScenarios, opensOwnView: opensOwnView(SECTIONS, 'debugger') },
+  { id: 'engine', scenarios: engine, opensOwnView: opensOwnView(SECTIONS, 'engine') },
+  { id: 'editor', scenarios: editor, opensOwnView: opensOwnView(SECTIONS, 'editor') }
 ])

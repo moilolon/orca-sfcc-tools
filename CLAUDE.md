@@ -174,7 +174,7 @@ text characters (no `●`, `→` as a control, ASCII boxes).
   shows of `b2c`'s output goes through `b2c.mask(text)` first.
 - **Check it** at a narrow width (`orca plugin shot … --width 300`) as well as the default one.
 - **Scenarios name their view:** each one opens the view in its `persisted.plugin.view`. A
-  piece's scenarios open its own view (*Setup* when its section has none) and core's open
+  piece's scenarios open its own view (*Setup* until it is delivered with a view) and core's open
   *Setup*, unless the scenario persists another (`persisted: { plugin: { view: 'setup' } }`). A
   test mounts every scenario and fails when it draws a view other than the one it names.
 

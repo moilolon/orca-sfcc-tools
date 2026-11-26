@@ -134,11 +134,6 @@ function RefreshButton({ busy }: { busy: boolean }) {
 }
 
 /**
- * The line under the bar: each environment by tone, the b2c version, and, when something needs
- * attention, what in a few words and a button to the setup view (Orca's buttons take no warning
- * tone, so the words go in a badge).
- */
-/**
  * One fact of the status line as a small button that opens the setup view: an icon and a short
  * name, with the whole state in its tooltip (`Development: Not configured`). The icon says the
  * state without colour; the tone adds it where Orca draws one.
@@ -151,6 +146,11 @@ function StatusChip({ name, tooltip, icon, tone, onPress }: { name: string; tool
   )
 }
 
+/**
+ * The line under the bar: each environment as a `StatusChip`, the b2c version, and, when something
+ * needs attention, what in a few words and a button to the setup view (Orca's buttons take no
+ * warning tone, so the words go in a badge).
+ */
 function StatusLine({ current, failure, busy, attention, onAttention }: { current: CoreStatus | null; failure: string | null; busy: boolean; attention: Attention | null; onAttention?: () => void }) {
   const toSetup = () => set(lastView, SETUP_VIEW)
   let state: OrcaNode = null
