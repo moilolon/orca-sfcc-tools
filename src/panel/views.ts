@@ -11,6 +11,12 @@ export const VIEW_KEY = 'view'
 /** The persisted atom holding the view whose `render` threw last, so the next open avoids it. */
 export const FAILED_VIEW_KEY = 'viewFailed'
 
+/**
+ * The key of the bar's own container. Tests find the bar by it, never by the look of its buttons:
+ * a view may draw solid and ghost buttons of its own.
+ */
+export const BAR_KEY = 'sfcc-panel-bar'
+
 /** The key of the box that holds the open view: `view-setup`, `view-sandbox`. Tests find it. */
 export function viewBoxKey(view: string): string {
   return `view-${view}`
