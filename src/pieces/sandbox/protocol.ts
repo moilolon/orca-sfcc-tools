@@ -62,9 +62,11 @@ export type SandboxStatus = {
   pendingDeletes: number
   /**
    * Stored versions of workspaces a complete list no longer holds (removed while the plugin was
-   * not listening): a person may delete them. Empty when the list is not whole.
+   * not listening): a person may delete them. Empty when the list is not whole. `checkable` is
+   * false for one whose project is hidden from the sidebar (or may be): the list may leave its
+   * workspace out, so it is shown but cannot be deleted from here.
    */
-  leftovers: { workspaceId: string; codeVersion: string }[]
+  leftovers: { workspaceId: string; codeVersion: string; checkable: boolean }[]
   /** The last side action that failed, with its error code; cleared when it next works. */
   problem: { action: SandboxAction; code: string } | null
 }

@@ -8,6 +8,7 @@ import { B2cError, type B2c, type B2cEvent, type Exit, type InstancesState, type
 import { createStore, type Store } from '../../core/store'
 import { createWorkspaces, listWorkspaces } from '../../core/workspaces'
 import type { Workspaces } from '../../core/piece'
+import type { Listing } from './ownership'
 import type { Timers } from './status'
 
 export const SANDBOX_HOST = 'sandbox-01.example.com'
@@ -182,7 +183,7 @@ export function memoryStorage(initial: Record<string, JsonValue> = {}) {
   }
 }
 
-export type Listed = { id: string; kind: 'worktree' | 'folder'; name: string; path: string; branch: string | null; hostId: string | null }
+export type Listed = { id: string; kind: 'worktree' | 'folder'; name: string; path: string; branch: string | null; hostId: string | null; projectId?: string | null }
 
 export const SHOP: Listed = { id: 'w-shop', kind: 'worktree', name: 'Shop', path: 'C:/work/shop', branch: 'main', hostId: 'local' }
 export const FIX: Listed = { id: 'w-fix', kind: 'worktree', name: 'Checkout Fix', path: 'C:/work/checkout-fix', branch: 'fix', hostId: 'local' }
@@ -191,12 +192,13 @@ export const REMOTE: Listed = { id: 'w-remote', kind: 'folder', name: 'Shop on a
 /**
  * A workspace host whose list and focus a test changes, the real core workspaces over it, and the
  * list with its completeness as the worker reads it. `truncated` cuts the list short, `listFails`
- * makes it fail, and `holdList()` keeps the next list (only that one) waiting until the test lets
+ * makes it fail, `listHangs` makes it never answer, `hidden` names the hidden projects, and
+ * `holdList()` keeps the next list (only that one) waiting until the test lets
  * it go.
  * `focusReads` counts every time anything asked which workspace is focused.
  */
 export function fakeWorkspaces(listed: Listed[] = [SHOP, FIX, REMOTE], storage = memoryStorage()) {
-  const state = { listed, focused: null as string | null, truncated: false, listFails: false, focusReads: 0 }
+  const state = { listed, focused: null as string | null, truncated: false, listFails: false, listHangs: false, hidden: [] as string[] | null, focusReads: 0 }
   let held: Promise<void> | null = null
   const host = {
     call: async (method: string) => {
@@ -207,6 +209,7 @@ export function fakeWorkspaces(listed: Listed[] = [SHOP, FIX, REMOTE], storage =
           held = null
           await wait
         }
+        if (state.listHangs) await new Promise<never>(() => {})
         if (state.listFails) throw new Error('unavailable')
         return { workspaces: state.listed, truncated: state.truncated }
       }
@@ -222,7 +225,8 @@ export function fakeWorkspaces(listed: Listed[] = [SHOP, FIX, REMOTE], storage =
     state,
     workspaces,
     storage,
-    listing: () => listWorkspaces(host),
+    /** The list as the worker reads it, with the hidden projects of `state.hidden`. */
+    listing: async (signal?: AbortSignal): Promise<Listing> => ({ ...(await listWorkspaces(host, { signal })), hidden: state.hidden }),
     /** Holds the next list until the returned function is called. */
     holdList(): () => void {
       let release!: () => void

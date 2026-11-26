@@ -101,6 +101,12 @@ export const scenarios: PieceScenarios = {
     ...owned('failed', { reason: 'workspace_not_found', deployed: true }),
     workspaces: WORKSPACES.filter((workspace) => workspace.id !== 'w-checkout')
   }),
-  /** A version of a workspace removed while the plugin was not running, to delete by hand. */
-  sandboxLeftovers: status({ ...WATCHING, leftovers: [{ workspaceId: 'w-old', codeVersion: 'ws-old-promo' }] })
+  /**
+   * Versions of workspaces removed while the plugin was not running: one to delete by hand, one in
+   * a hidden project that cannot be checked.
+   */
+  sandboxLeftovers: status({ ...WATCHING, leftovers: [
+      { workspaceId: 'w-old', codeVersion: 'ws-old-promo', checkable: true },
+      { workspaceId: 'w-hidden', codeVersion: 'ws-archived-site', checkable: false }
+    ] })
 }

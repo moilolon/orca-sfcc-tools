@@ -34,6 +34,8 @@ export const messages = defineMessages(
     groupLeftovers: 'Left behind',
     leftoversGuidance: 'Versions of workspaces no longer in Orca, removed while the plugin was not running. Press one to delete it.',
     noteNotListed: 'not listed',
+    noteHiddenProject: 'hidden project',
+    hiddenLeftoversGuidance: 'Marked “hidden project”: its project is hidden from Orca’s sidebar (or Orca cannot say), so its workspace may still exist. Show the project in Orca to check and delete it here.',
     deleteVersion: 'Delete this version',
     barDeployNeeded: 'Deploy needed',
     from: 'From',
@@ -114,7 +116,11 @@ export const messages = defineMessages(
     'error.workspace_not_found': 'The workspace that uploads is no longer listed in Orca. Stop uploading to release it; removing it in Orca deletes its version.',
     'error.workspace_list_unavailable': 'Orca’s workspace list could not be read whole. Try again in a moment.',
     'error.workspace_uploads': 'That workspace uploads now: stop uploading first.',
-    'error.workspace_listed': 'That workspace is still listed in Orca: its version stays.'
+    'error.workspace_listed': 'That workspace is still listed in Orca: its version stays.',
+    'error.workspace_hidden': 'That workspace may be in a project hidden from Orca’s sidebar: its version stays until it can be checked.',
+    'error.host_timeout': 'Orca did not answer in time. Try again in a moment.',
+    'error.disposed': 'The plugin is stopping: nothing more is done.',
+    'error.superseded': 'Cancelled: uploading was stopped.'
   },
   {
     title: 'Sandbox',
@@ -146,6 +152,8 @@ export const messages = defineMessages(
     groupLeftovers: 'Sobrantes',
     leftoversGuidance: 'Versiones de workspaces que ya no están en Orca, eliminados mientras el plugin no funcionaba. Pulsa una para borrarla.',
     noteNotListed: 'no aparece',
+    noteHiddenProject: 'proyecto oculto',
+    hiddenLeftoversGuidance: 'Marcadas «proyecto oculto»: su proyecto está oculto en la barra lateral de Orca (o Orca no puede decirlo), así que su workspace puede seguir existiendo. Muestra el proyecto en Orca para comprobarlo y borrarla aquí.',
     deleteVersion: 'Borrar esta versión',
     barDeployNeeded: 'Falta desplegar',
     from: 'Desde',
@@ -226,7 +234,11 @@ export const messages = defineMessages(
     'error.workspace_not_found': 'El workspace que sube ya no aparece en Orca. Deja de subir para soltarlo; eliminarlo en Orca borra su versión.',
     'error.workspace_list_unavailable': 'No se ha podido leer entera la lista de workspaces de Orca. Inténtalo dentro de un momento.',
     'error.workspace_uploads': 'Ese workspace es el que sube ahora: deja de subir primero.',
-    'error.workspace_listed': 'Ese workspace sigue en Orca: su versión se queda.'
+    'error.workspace_listed': 'Ese workspace sigue en Orca: su versión se queda.',
+    'error.workspace_hidden': 'Ese workspace puede estar en un proyecto oculto en la barra lateral de Orca: su versión se queda hasta que se pueda comprobar.',
+    'error.host_timeout': 'Orca no ha respondido a tiempo. Inténtalo dentro de un momento.',
+    'error.disposed': 'El plugin se está deteniendo: no se hace nada más.',
+    'error.superseded': 'Cancelado: se ha dejado de subir.'
   }
 )
 

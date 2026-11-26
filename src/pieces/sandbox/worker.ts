@@ -4,10 +4,10 @@
 // used, and only once dw.json makes it `ready`: otherwise every command answers why, and runs
 // nothing.
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
-import { isLocal, listWorkspaces } from '../../core/workspaces'
+import { hiddenProjects, isLocal, listWorkspaces } from '../../core/workspaces'
 import { DEFAULT_PREFIX, prefixOf } from './code-version'
 import { messages } from './i18n'
-import { Ownership, type Listing, type Notice } from './ownership'
+import { checkable, HOST_TIMEOUT_MS, Ownership, type Listing, type Notice } from './ownership'
 import type { SandboxAction, SandboxStatus } from './protocol'
 import { codeOf, REAL_TIMERS, SandboxError, SandboxWatch, type Timers } from './status'
 import { sandboxWord, statusBarUpdates, wordCode } from './status-bar'
@@ -46,9 +46,14 @@ const NO_ROLES = { sandbox: 'absent', development: 'absent', staging: 'absent', 
  * `listing` replaces how the workspace list and its completeness are read (tests); by default,
  * Orca's `workspace.list`.
  */
-export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, listing?: () => Promise<Listing>): SandboxHandle {
+export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, listing?: (signal?: AbortSignal) => Promise<Listing>): SandboxHandle {
   const { orca, b2c, workspaces, t } = ctx
-  const list = listing ?? (() => listWorkspaces(orca.host))
+  const list =
+    listing ??
+    (async (signal?: AbortSignal): Promise<Listing> => {
+      const [listed, hidden] = await Promise.all([listWorkspaces(orca.host, { signal }), hiddenProjects(orca.host, { signal })])
+      return { ...listed, hidden }
+    })
   let problem: SandboxStatus['problem'] = null
   let disposed = false
 
@@ -105,14 +110,29 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
   }
 
   async function status(): Promise<SandboxStatus> {
-    const [{ config, instances }, listed] = await Promise.all([roles(), list().catch((): Listing => ({ workspaces: [], complete: false }))])
+    // Never held by a host that does not answer: an unread list shows nothing to delete.
+    const unread: Listing = { workspaces: [], complete: false, hidden: null }
+    const listed = await new Promise<Listing>((resolve) => {
+      const controller = new AbortController()
+      const timer = timers.setTimeout(() => {
+        controller.abort()
+        resolve(unread)
+      }, HOST_TIMEOUT_MS)
+      list(controller.signal).then(
+        (value) => (timers.clearTimeout(timer), resolve(value)),
+        () => (timers.clearTimeout(timer), resolve(unread))
+      )
+    })
+    const { config, instances } = await roles()
     const upload = ownership.snapshot()
     const ids = new Set(listed.workspaces.map((workspace) => workspace.id))
     // Only a whole list says a workspace is gone; even then only a person deletes its version.
+    // Only a whole list says a workspace is gone, and not for a project hidden from the sidebar;
+    // even then only a person deletes its version.
     const leftovers = listed.complete
       ? Object.entries(ownership.storedVersions())
           .filter(([id]) => !ids.has(id) && id !== upload.workspaceId)
-          .map(([workspaceId, codeVersion]) => ({ workspaceId, codeVersion }))
+          .map(([workspaceId, codeVersion]) => ({ workspaceId, codeVersion, checkable: checkable(listed, ownership.projectOf(workspaceId)) }))
       : []
     return {
       role: instances.sandbox,

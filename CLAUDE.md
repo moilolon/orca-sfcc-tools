@@ -129,9 +129,12 @@ Changing it needs the owner's yes.
       Picking deploys it whole to its own code version with `--activate`, then runs `code watch`
       in it, with the workspace as the working folder and never its path as an argument.
       Releasing leaves the version active. Every change of ownership goes through one queue, so
-      there is never more than one watcher. A version is deleted only on its workspace's
-      `workspace.removed` event (once another version is active) or by a person's hand; a
-      workspace missing from a list is never taken as removed. A worker restart restarts the
+      there is never more than one watcher; every wait in it is bounded (host calls a few
+      seconds, b2c calls their own timeout), release stops the watcher without waiting its turn,
+      and after `dispose()` nothing queued starts and nothing is deployed. A version is deleted only on its workspace's
+      `workspace.removed` event (once another version is active) or by a person's hand, from a
+      whole list and never for a project hidden from the sidebar; a workspace missing from a
+      list is never taken as removed. A worker restart restarts the
       watcher without a redeploy, but only for a version whose last full deploy ended; the
       others show that a deploy is needed and are never reloaded.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials

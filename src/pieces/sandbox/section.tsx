@@ -153,7 +153,6 @@ function UploadGroup({ current, locale, ready, busy }: { current: SandboxStatus;
           size="sm"
           variant={failed && !lost ? 'solid' : 'outline'}
           icon="upload"
-         
           disabled={busy || deploying || lost || !ready}
           onPress={() => void act('sandbox.deploy')}
         >
@@ -247,35 +246,49 @@ function WorkspacesGroup({ current, locale, ready, busy }: { current: SandboxSta
   )
 }
 
-/** Versions of workspaces no longer listed: deleted only when a person presses one, then the button. */
+/**
+ * Versions of workspaces no longer listed: deleted only when a person presses one, then the
+ * button. One whose project is hidden from the sidebar (or may be) is shown but cannot be pressed:
+ * the list may leave its workspace out.
+ */
 function LeftoversGroup({ current, locale, ready, busy }: { current: SandboxStatus; locale: string; ready: boolean; busy: boolean }) {
   const w = (key: SandboxMessageKey) => t(messages, locale, key)
   if (current.leftovers.length === 0) return null
   const picked = read(chosenLeftover)
-  const candidate = current.leftovers.find((leftover) => leftover.workspaceId === picked) ?? null
+  const candidate = current.leftovers.find((leftover) => leftover.checkable && leftover.workspaceId === picked) ?? null
+  const unseen = current.leftovers.some((leftover) => !leftover.checkable)
   return (
     <Group title={w('groupLeftovers')}>
-      {current.leftovers.map((leftover) => (
-        <ListRow
-          key={leftover.workspaceId}
-          tone={leftover.workspaceId === candidate?.workspaceId ? 'attention' : 'off'}
-          title={leftover.codeVersion}
-          note={w('noteNotListed')}
-          current={leftover.workspaceId === candidate?.workspaceId}
-          onPress={() => set(chosenLeftover, leftover.workspaceId === picked ? null : leftover.workspaceId)}
-        />
-      ))}
+      {current.leftovers.map((leftover) =>
+        leftover.checkable ? (
+          <ListRow
+            key={leftover.workspaceId}
+            tone={leftover.workspaceId === candidate?.workspaceId ? 'attention' : 'off'}
+            title={leftover.codeVersion}
+            note={w('noteNotListed')}
+            current={leftover.workspaceId === candidate?.workspaceId}
+            onPress={() => set(chosenLeftover, leftover.workspaceId === picked ? null : leftover.workspaceId)}
+          />
+        ) : (
+          <ListRow key={leftover.workspaceId} tone="off" title={leftover.codeVersion} note={w('noteHiddenProject')} />
+        )
+      )}
       {candidate ? (
         <Actions>
           <Button size="sm" variant="outline" icon="delete" disabled={busy || !ready} onPress={() => void act('sandbox.forget', candidate.workspaceId)}>
             {w('deleteVersion')}
           </Button>
         </Actions>
-      ) : (
+      ) : current.leftovers.some((leftover) => leftover.checkable) ? (
         <Text size="sm" muted>
           {w('leftoversGuidance')}
         </Text>
-      )}
+      ) : null}
+      {unseen ? (
+        <Text size="sm" muted>
+          {w('hiddenLeftoversGuidance')}
+        </Text>
+      ) : null}
     </Group>
   )
 }

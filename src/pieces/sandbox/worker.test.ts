@@ -9,6 +9,7 @@ import { plainSettings } from '../../core/test-support'
 import type { SandboxStatus } from './protocol'
 import { STATUS_ITEM, UPLOAD_ITEM } from './status-bar'
 import { coded, FakeB2c, FakeTimers, FIX, fakeWorkspaces, memoryStorage, pieceStore, REMOTE, settle, SHOP } from './testing'
+import { HOST_TIMEOUT_MS } from './ownership'
 import { COMMANDS, startSandbox } from './worker'
 
 type Handler = (input: unknown) => Promise<unknown>
@@ -264,11 +265,42 @@ test('a stored version whose workspace a whole list no longer holds is offered f
   assert.deepEqual((await fake.request('sandbox.status')).leftovers, [], 'a short list offers nothing')
   host.state.truncated = false
   const status = await fake.request('sandbox.status')
-  assert.deepEqual(status.leftovers, [{ workspaceId: FIX.id, codeVersion: 'ws-checkout-fix' }])
+  assert.deepEqual(status.leftovers, [{ workspaceId: FIX.id, codeVersion: 'ws-checkout-fix', checkable: true }])
   assert.ok(!b2c.commands().some((c) => c.startsWith('code delete')), 'listing it deletes nothing')
   await fake.request('sandbox.forget', { workspaceId: FIX.id })
   await settle()
   assert.ok(b2c.commands().includes('code delete ws-checkout-fix --force'))
   assert.deepEqual((await fake.request('sandbox.status')).leftovers, [])
+  sandbox.dispose()
+})
+
+test('a leftover in a hidden project, or one Orca cannot vouch for, is shown but cannot be deleted', async () => {
+  const { b2c, fake, host, sandbox } = await start()
+  host.state.listed = [{ ...SHOP, projectId: 'p-shop' }, { ...FIX, projectId: 'p-hidden' }, REMOTE]
+  await fake.request('sandbox.pick', { workspaceId: FIX.id })
+  await settle()
+  await fake.request('sandbox.pick', { workspaceId: SHOP.id })
+  await settle()
+  host.state.listed = [{ ...SHOP, projectId: 'p-shop' }, REMOTE]
+  host.state.hidden = ['p-hidden']
+  assert.deepEqual((await fake.request('sandbox.status')).leftovers, [{ workspaceId: FIX.id, codeVersion: 'ws-checkout-fix', checkable: false }])
+  await assert.rejects(fake.request('sandbox.forget', { workspaceId: FIX.id }), coded('workspace_hidden'))
+  host.state.hidden = null
+  assert.equal((await fake.request('sandbox.status')).leftovers[0].checkable, false, 'Orca cannot say which projects are hidden')
+  await assert.rejects(fake.request('sandbox.forget', { workspaceId: FIX.id }), coded('workspace_hidden'))
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code delete')))
+  host.state.hidden = []
+  assert.equal((await fake.request('sandbox.status')).leftovers[0].checkable, true)
+  sandbox.dispose()
+})
+
+test('the view’s state is answered even when the workspace list never comes', async () => {
+  const { fake, host, timers, sandbox } = await start()
+  host.state.listHangs = true
+  const answer = fake.request('sandbox.status')
+  await timers.advance(HOST_TIMEOUT_MS)
+  const status = await answer
+  assert.deepEqual(status.workspaces, [])
+  assert.deepEqual(status.leftovers, [])
   sandbox.dispose()
 })

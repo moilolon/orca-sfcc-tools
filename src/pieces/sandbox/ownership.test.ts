@@ -3,7 +3,7 @@
 // active), restore after a worker restart (whole, short or failing list; interrupted deploy), and
 // the code version kept across a rename.
 import { assert, test } from 'orca/testing'
-import { Ownership, type Notice } from './ownership'
+import { HOST_TIMEOUT_MS, LIST_TIMEOUT_MS, Ownership, type Notice } from './ownership'
 import type { SandboxAction } from './protocol'
 import { coded, FakeB2c, FakeTimers, FIX, fakeWorkspaces, memoryStorage, pieceStore, REMOTE, settle, SHOP, type Listed } from './testing'
 
@@ -501,4 +501,97 @@ test('nothing here follows the focus: changing the focused workspace never chang
   assert.equal((await host.workspaces.upload())?.workspace.id, SHOP.id)
   assert.equal(b2c.commands().length, commands)
   assert.equal(host.state.focusReads, 0)
+})
+
+test('a workspace list that never answers fails the step with a worded reason, and the queue moves on', async () => {
+  const { b2c, ownership, host, timers } = setup()
+  host.state.listHangs = true
+  const hung = ownership.pick(SHOP.id)
+  const after = ownership.pick(FIX.id)
+  await settle()
+  await timers.advance(HOST_TIMEOUT_MS)
+  await assert.rejects(hung, coded('workspace_list_unavailable'))
+  // The pick queued behind it runs once the first one gave up; its list hangs too, and it fails alike.
+  await settle()
+  await timers.advance(HOST_TIMEOUT_MS)
+  await assert.rejects(after, coded('workspace_list_unavailable'))
+  host.state.listHangs = false
+  await ownership.pick(FIX.id)
+  await settle()
+  assert.equal(ownership.current()?.workspaceId, FIX.id)
+  assert.equal(stateOf(ownership), 'watching')
+  assert.ok(b2c.commands().includes('code deploy --code-version ws-checkout-fix --activate'))
+})
+
+test('a b2c that never exits fails the step with a worded reason, and the queue moves on', async () => {
+  const { b2c, ownership, host, timers } = setup()
+  b2c.hold.add('code list')
+  const hung = ownership.pick(SHOP.id)
+  await settle()
+  await timers.advance(LIST_TIMEOUT_MS)
+  await assert.rejects(hung, coded('b2c_timeout'))
+  assert.equal(ownership.current(), null, 'nothing taken over')
+  assert.equal(await host.workspaces.upload(), null)
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code deploy')))
+  b2c.hold.clear()
+  await ownership.pick(SHOP.id)
+  await settle()
+  assert.equal(stateOf(ownership), 'watching')
+})
+
+test('release while a pick hangs stops the watcher at once and cancels the pick', async () => {
+  const { b2c, ownership, host, storage, timers } = setup()
+  await ownership.pick(SHOP.id)
+  await settle()
+  host.state.listHangs = true
+  const hung = ownership.pick(FIX.id)
+  await settle()
+  const released = ownership.release()
+  // At once, before the hanging pick has given up.
+  assert.ok(b2c.watchers[0].stopped, 'the watcher stops without waiting on the queue')
+  assert.equal(stateOf(ownership), 'none')
+  assert.equal(ownership.current(), null)
+  await timers.advance(HOST_TIMEOUT_MS)
+  await assert.rejects(hung)
+  await released
+  assert.equal(await storage.source.get('sandbox.owner'), null, 'the stored owner is cleared once its turn comes')
+  assert.equal(await host.workspaces.upload(), null)
+  assert.ok(!b2c.commands().includes('code deploy --code-version ws-checkout-fix --activate'), 'the cancelled pick deploys nothing')
+  assert.equal(alive(b2c).length, 0)
+})
+
+test('dispose: a running pick stops at its next wait and a queued one never starts; nothing is deployed', async () => {
+  const { b2c, ownership } = setup()
+  b2c.hold.add('code list')
+  const running = ownership.pick(SHOP.id)
+  await settle()
+  const queued = ownership.pick(FIX.id)
+  ownership.dispose()
+  b2c.release()
+  await assert.rejects(running, coded('disposed'))
+  await assert.rejects(queued, coded('disposed'))
+  await settle()
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code deploy') || c.startsWith('code activate')), b2c.commands().join(', '))
+  assert.equal(b2c.watchers.length, 0)
+  await assert.rejects(ownership.redeploy(), coded('disposed'))
+})
+
+test('the deploy record is written before the owner, so a crash between them never shows a stale version as deployed', async () => {
+  const storage = memoryStorage()
+  const writes: string[] = []
+  const set = storage.source.set
+  storage.source.set = async (key, value) => {
+    writes.push(key)
+    await set(key, value)
+  }
+  const { ownership } = setup({ storage })
+  await ownership.pick(SHOP.id)
+  await settle()
+  await ownership.pick(FIX.id)
+  await settle()
+  writes.length = 0
+  await ownership.pick(SHOP.id)
+  const deploys = writes.indexOf('sandbox.deploys')
+  const owner = writes.indexOf('sandbox.owner')
+  assert.ok(deploys !== -1 && owner !== -1 && deploys < owner, writes.join(', '))
 })

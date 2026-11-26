@@ -171,7 +171,7 @@ test('an owner Orca no longer lists is shown as not found, kept, and can be rele
 
 test('a version left behind is deleted only after pressing it and then the button', async () => {
   const forgets: unknown[] = []
-  const { panel } = await show({ ...WATCHING, leftovers: [{ workspaceId: 'w-old', codeVersion: 'ws-old-promo' }] }, {
+  const { panel } = await show({ ...WATCHING, leftovers: [{ workspaceId: 'w-old', codeVersion: 'ws-old-promo', checkable: true }] }, {
     'sandbox.forget': (input: { workspaceId: string }) => {
       forgets.push(input)
       return WATCHING
@@ -182,4 +182,13 @@ test('a version left behind is deleted only after pressing it and then the butto
   assert.deepEqual(forgets, [])
   await panel.press({ type: 'Button', text: 'Delete this version' })
   assert.deepEqual(forgets, [{ workspaceId: 'w-old' }])
+})
+
+test('a version left behind in a hidden project is shown, cannot be pressed, and the view says why', async () => {
+  const { panel } = await show({ ...WATCHING, leftovers: [{ workspaceId: 'w-hidden', codeVersion: 'ws-archived-site', checkable: false }] })
+  assert.ok(panel.find({ text: 'ws-archived-site' }))
+  assert.equal(panel.find({ type: 'Link', text: 'ws-archived-site' }), null)
+  assert.ok(panel.find({ text: 'hidden project' }))
+  assert.ok(panel.find({ text: /hidden from Orca’s sidebar/ }))
+  assert.equal(button(panel, 'Delete this version'), null)
 })
