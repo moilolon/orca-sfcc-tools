@@ -69,6 +69,7 @@ src/pieces/<piece>/
   protocol.ts               its requests and panel events
   worker.ts                 its worker half
   section.tsx               its panel section
+  scenarios.ts              its states for `plugin check` and for captures
   i18n.ts                   its English and Spanish texts
   *.test.ts                 tests beside each module
 data/dw-api.json            the committed dw.* index
@@ -89,10 +90,10 @@ the script again.
 
 | Module | Promise |
 | --- | --- |
-| `piece.ts` | `WorkerPiece { id; activate(ctx): Disposable \| void }` and `PanelSection { id; title; icon; render() }`. `ctx` carries the worker API, the `b2c` runner, settings, the store, the translator and a logger. |
-| `b2c.ts` | The only place that starts `b2c`. `run(args, { role, cwd, signal, timeoutMs })` for one-shot commands (adds `--json`), `start(args, …)` for long-lived ones. It puts the role's host and credentials in the environment of the process (`SFCC_SERVER`, `SFCC_CLIENT_ID`, …), never in its arguments, tells `b2c` to load no configuration or `.env` file of its own, and pins the authentication methods. It starts no instance command for a role without credentials, sets the working folder itself, and takes only exit 0 as success. |
+| `piece.ts` | `WorkerPiece { id; activate(ctx): Disposable \| void }` and `PanelSection { id; title; icon; delivered; setup?(ctx); render() }`. `ctx` carries the worker API, the `b2c` runner, settings, the store, the translator and a logger. A section listens to its own events in `setup`, says itself whether its piece is delivered, and brings its own scenarios, so delivering a piece changes nothing outside its folder but the generated manifest. |
+| `b2c.ts` | The only place that starts `b2c`. `run(args, { role, cwd, signal, timeoutMs })` for one-shot commands (adds `--json`), `start(args, …)` for long-lived ones. It puts the role's host and credentials in the environment of the process (`SFCC_SERVER`, `SFCC_CLIENT_ID`, …), never in its arguments, tells `b2c` to load no configuration or `.env` file of its own, and pins the authentication methods. It starts no instance command for a role without credentials, sets the working folder itself, and takes only exit 0 as success. It runs only the commands and flags on its own lists, and refuses an argument a command shim could turn into another command. `start()` hands its caller the error stream line by line, the output stream as raw chunks, and the input stream. What the runner hands out or logs has every value read from `dw.json` masked; `mask(text)` does the same for whatever a piece wants to show, and `isHost(role, value)` lets a piece find its own instance in a list without holding the host. |
 | `dw-config.ts` | The only place that reads `dw.json`: the one at the root of the workspace, or of the project's main checkout when a worktree has none; a setting can name another file. It answers `resolve(role)` with what `b2c.ts` needs and exposes nothing else: other modules learn only whether a role is configured. |
-| `instances.ts` | Four roles: `sandbox`, `development`, `staging`, `production`. The sandbox uses the plain keys of `dw.json` (`hostname`, `client-id`, …); each other role uses the same keys with a suffix, a setting per role (`-dev`, `-stg` and `-prd` by default). A guard in the runner allows `code`, `debug` and sandbox commands on the `sandbox` role only; the other roles accept `logs` and nothing else. The guard is tested with a fake process. |
+| `instances.ts` | Four roles: `sandbox`, `development`, `staging`, `production`. The sandbox uses the plain keys of `dw.json` (`hostname`, `client-id`, …); each other role uses the same keys with a suffix, a setting per role (`-dev`, `-stg` and `-prd` by default). A guard in the runner is a list of whole commands per role: on the sandbox, `code list`, `deploy`, `watch`, `activate` and `delete`, `logs get`, `list` and `tail`, `sandbox list`, `start` and `stop`, and `debug`; on the other roles the three `logs` commands and nothing else. The guard is tested against every command `b2c` has. |
 | `settings.ts` | Typed reads of the plugin's settings and change notifications. |
 | `store.ts` | Typed access to the plugin's own storage, one namespace per piece. |
 | `workspaces.ts` | The workspace list, and the workspace that uploads (read by `sandbox`, `debugger` and `engine`). |
@@ -236,6 +237,7 @@ expressions, `<isscript>` blocks, ISML and HTML comments; and the language confi
 comes from the engine in phase 7).
 
 **Files.** `src/pieces/isml/{manifest.json,isml.tmLanguage.json,language-configuration.json}`,
+`src/pieces/isml/{section.tsx,scenarios.ts,i18n.ts}` (to show the piece as delivered),
 `src/pieces/isml/grammar.test.ts`, `src/pieces/isml/fixtures/*.isml`.
 
 **Contract.** Language id `isml`, scope `text.html.isml`. Nothing else depends on it.
