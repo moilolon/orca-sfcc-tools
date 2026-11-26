@@ -46,7 +46,7 @@ async function until(check: () => boolean, what: string, limitMs = 2000): Promis
 
 function setup(config: FakeConfig = CONFIG, unclean = false) {
   const adapter = new FakeAdapter(config)
-  const flag = { value: unclean, writes: [] as boolean[] }
+  const flag = { value: unclean, writes: [] as boolean[], reads: 0 }
   const logs: string[] = []
   const states: SessionSnapshot['status'][] = []
   const session = createSession({
@@ -55,7 +55,10 @@ function setup(config: FakeConfig = CONFIG, unclean = false) {
     platform: 'linux',
     timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 },
     unclean: {
-      get: async () => flag.value,
+      get: async () => {
+        flag.reads += 1
+        return flag.value
+      },
       set: async (value) => {
         flag.value = value
         flag.writes.push(value)
@@ -593,4 +596,59 @@ test('on Windows the adapter gets backslashed paths and a frame in another lette
   await until(() => session.snapshot().frames.length > 0, 'the stack')
   assert.equal(session.snapshot().frames[0].path, PAGE)
   await session.stop()
+})
+
+// ---------------------------------------------------------------------------------------------
+// Guards each pinned by a test of its own
+
+test('a disconnect waits for a launch still in flight, so it can never reach the adapter first', async () => {
+  const { adapter, session, flag, held } = gatedSession(POINTS.find((point) => point.name === 'launch') as Point)
+  let launchAnswered = false
+  let disconnectBeforeLaunchAnswer = false
+  const answerLaunch = adapter.handlers.launch
+  adapter.handlers.launch = (request, process) => {
+    // Noted the moment the answer is written, before the session can react to it.
+    const respond = process.respond.bind(process)
+    process.respond = (answered, reply) => {
+      if (answered.command === 'launch') launchAnswered = true
+      respond(answered, reply)
+    }
+    return answerLaunch ? answerLaunch(request, process) : {}
+  }
+  const answerDisconnect = adapter.handlers.disconnect
+  adapter.handlers.disconnect = (request, process) => {
+    if (!launchAnswered) disconnectBeforeLaunchAnswer = true
+    return answerDisconnect ? answerDisconnect(request, process) : {}
+  }
+  const started = session.start(FAKE_ROOT, BREAKPOINTS)
+  await held.reached
+  const stopping = session.stop()
+  // Held a while, so a disconnect that did not wait would have gone out already.
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.ok(!adapter.last.commands.includes('disconnect'), 'nothing is written while the launch is unanswered')
+  held.release()
+  await stopping
+  await started
+  assert.ok(!disconnectBeforeLaunchAnswer, 'the disconnect came after the launch was answered')
+  assert.deepEqual(adapter.last.commands, ['initialize', 'launch', 'disconnect'])
+  assert.equal(flag.value, false, 'the answered disconnect cleared the flag')
+})
+
+test('after dispose a start is refused at once: no state change, no flag read, no adapter', async () => {
+  const { adapter, session, flag } = await attached()
+  // Ended first, so nothing but the disposal itself can refuse the start.
+  await session.stop()
+  assert.equal(session.snapshot().status, 'ended')
+  await session.dispose()
+  const before = session.snapshot()
+  const processes = adapter.processes.length
+  const reads = flag.reads
+  const answer = await session.start(FAKE_ROOT, BREAKPOINTS)
+  assert.notEqual(answer.status, 'connecting', 'it never says it is connecting')
+  assert.equal(session.snapshot(), before, 'the state did not change')
+  assert.equal(flag.reads, reads, 'the flag was not even read')
+  assert.equal(adapter.processes.length, processes)
+  // A refused start is not left behind half way either: a stop after it has nothing to wait for.
+  const stopped = await Promise.race([session.stop().then(() => 'stopped'), new Promise((resolve) => setTimeout(() => resolve('hung'), 500))])
+  assert.equal(stopped, 'stopped')
 })
