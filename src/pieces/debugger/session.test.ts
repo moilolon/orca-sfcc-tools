@@ -652,3 +652,21 @@ test('after dispose a start is refused at once: no state change, no flag read, n
   const stopped = await Promise.race([session.stop().then(() => 'stopped'), new Promise((resolve) => setTimeout(() => resolve('hung'), 500))])
   assert.equal(stopped, 'stopped')
 })
+
+test('a crashed adapter leaves the open set when its exit is seen; the flag stays until a cleanup or an answered disconnect clears it', async () => {
+  const { adapter, session, flag } = await attached()
+  adapter.last.exit(1)
+  await until(() => session.snapshot().status === 'failed', 'failed')
+  assert.equal(flag.value, true, 'the crash leaves the flag set')
+  // A stop now has no adapter left to close: it asks nothing of anyone and keeps the flag.
+  const after = await session.stop()
+  assert.equal(after.status, 'failed', 'nothing was open, so nothing ended')
+  assert.equal(flag.value, true)
+  // The next start's cleanup clears it, and the session's own answered disconnect keeps it clear.
+  flag.writes.length = 0
+  await session.start(FAKE_ROOT, BREAKPOINTS)
+  assert.deepEqual(adapter.processes[1].commands, ['initialize', 'launch', 'disconnect'])
+  assert.deepEqual(flag.writes, [false, true], 'cleared by the cleanup, set again by the new launch')
+  const stopped = await session.stop()
+  assert.deepEqual([stopped.status, stopped.reason, flag.value], ['ended', null, false])
+})

@@ -237,9 +237,14 @@ export function createSession(deps: SessionDeps) {
     for (const chunk of early.splice(0)) client.receive(chunk)
     opened.add(connection)
     const self = connection
+    // An adapter that exited, crashed or closed, is no longer open: it can be neither disconnected
+    // nor waited for, and left in the set it would keep a later answered disconnect from clearing
+    // the flag. Leaving the set does not touch the flag: what the crash left on the instance is
+    // cleared only by an answered disconnect or a cleanup session.
     void running.exited.then(() => {
       self.alive = false
       self.client.close()
+      opened.delete(self)
     })
     return connection
   }
