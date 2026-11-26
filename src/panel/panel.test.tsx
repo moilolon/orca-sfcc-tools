@@ -93,9 +93,11 @@ test('with no piece delivered, the setup view is the whole panel and there is no
   assert.equal(panel.findAll({ text: 'Ready' }).length, 2)
   assert.equal(panel.findAll({ text: 'Incomplete' }).length, 1)
   assert.equal(panel.findAll({ text: 'Not configured' }).length, 1)
-  // An incomplete and an absent environment are explained.
-  assert.ok(panel.find({ text: /^Incomplete: dw\.json has the host/ }))
-  assert.ok(panel.find({ text: /^Not configured: dw\.json has no host for it/ }))
+  // An incomplete and an absent environment each say why, in a few words, under their name.
+  assert.ok(panel.find({ text: 'No usable credentials' }))
+  assert.ok(panel.find({ text: 'No host in dw.json' }))
+  // And one button checks again once dw.json is fixed.
+  assert.ok(panel.find({ type: 'Button', text: 'Check again' }))
   for (const name of ['Sandbox', 'Development', 'Staging', 'Production']) assert.ok(panel.find({ text: name }), name)
   // A piece not delivered is not shown at all, and the empty list of pieces is not drawn.
   for (const name of ['Errors', 'Debugger', 'Pieces', 'Coming']) assert.equal(panel.find({ text: name }), null, name)
@@ -112,17 +114,17 @@ test('asks the worker in the panel’s language', async () => {
   assert.deepEqual(host.calls.filter((call) => call.method === 'plugin.request').map((call) => call.params), [{ name: 'core.status', input: { locale: 'es-ES' }, timeoutMs: 60_000 }])
 })
 
-test('says where the configuration file is read from, and never its path', async () => {
+test('says where the configuration file is read from in a word, and never its path', async () => {
   panel = await mount(CORE, { host: hostAnswering(FOUND), locale: 'en' })
-  assert.ok(panel.find({ text: 'Workspace dw.json' }))
-  assert.ok(panel.find({ text: /^dw\.json at the root of the workspace that uploads/ }))
-  assert.ok(panel.find({ text: /Hosts and credentials are never shown\.$/ }))
+  assert.ok(panel.find({ text: 'Source' }))
+  assert.ok(panel.find({ text: 'Workspace' }))
   assert.ok(panel.find({ text: 'Read' }))
+  // Where the paths are changed, in one line: no paragraph.
+  assert.ok(panel.find({ text: 'Paths and key suffixes: Settings, SFCC Tools.' }))
   panel.unmount()
   const path = 'C:\\work\\shop\\config\\other-dw.json'
   panel = await mount(CORE, { host: hostAnswering(FOUND, { configFile: path }), locale: 'en' })
-  assert.ok(panel.find({ text: 'File in Settings' }))
-  assert.ok(panel.find({ text: /^The file named in Settings → SFCC Tools → Configuration file\./ }))
+  assert.ok(panel.find({ text: 'Settings file' }))
   assert.equal(panel.find({ text: /other-dw|work\\shop/ }), null)
   panel.unmount()
   panel = await mount(CORE, { host: hostAnswering(FOUND, { configFile: path }), locale: 'es' })
@@ -134,34 +136,36 @@ test('says when b2c is missing, and why, pointing at the setting; and that there
   panel = await mount(CORE, { host: hostAnswering(MISSING), locale: 'en' })
   // b2c and the file are both not found.
   assert.equal(panel.findAll({ text: 'Not found' }).length, 2)
-  assert.match(panel.summary().join('\n'), /The b2c CLI is not available/)
-  assert.ok(panel.find({ text: 'The b2c CLI was not found.' }))
-  assert.ok(panel.find({ text: /b2c path/ }))
+  assert.match(panel.summary().join('\n'), /b2c not found/)
+  assert.ok(panel.find({ text: 'The b2c CLI was not found. Install it, or set b2c path in Settings.' }))
   assert.match(panel.summary().join('\n'), /No dw\.json/)
-  assert.ok(panel.find({ text: /^No dw\.json was found for the workspace/ }))
+  assert.ok(panel.find({ text: 'Add one at the workspace root.' }))
   assert.equal(panel.findAll({ text: 'Not configured' }).length, 4)
-  // Without a file, four absences need no explanation of their keys.
-  assert.equal(panel.find({ text: /^Incomplete:/ }), null)
-  assert.equal(panel.find({ text: /^Not configured:/ }), null)
+  // Each problem is a compact notice with one button: no paragraph.
+  assert.equal(panel.findAll({ type: 'Callout' }).length, 2)
+  assert.equal(panel.findAll({ type: 'Button', text: 'Check again' }).length, 3)
+  // Without a file, four absences need no reason of their own.
+  assert.equal(panel.find({ text: 'No host in dw.json' }), null)
+  assert.equal(panel.find({ text: 'No usable credentials' }), null)
 })
 
 test('says a dw.json that is not JSON cannot be read, instead of four silent absences', async () => {
   panel = await mount(CORE, { host: hostAnswering({ ...MISSING, b2c: FOUND.b2c, config: 'invalid' }), locale: 'en' })
   assert.match(panel.summary().join('\n'), /dw\.json cannot be read/)
-  assert.ok(panel.find({ text: 'The file is not valid JSON, so no environment can be read from it.' }))
+  assert.ok(panel.find({ text: 'It is not valid JSON.' }))
   assert.ok(panel.find({ text: 'Not valid JSON' }))
-  assert.equal(panel.find({ text: /^No dw\.json was found/ }), null)
+  assert.equal(panel.find({ text: 'Add one at the workspace root.' }), null)
   panel.unmount()
   panel = await mount(CORE, { host: hostAnswering({ ...MISSING, config: 'invalid' }), locale: 'es' })
   assert.match(panel.summary().join('\n'), /No se puede leer dw\.json/)
-  assert.ok(panel.find({ text: /^El fichero no es JSON válido/ }))
+  assert.ok(panel.find({ text: 'No es JSON válido.' }))
 })
 
 test('in Spanish', async () => {
   panel = await mount(CORE, { host: hostAnswering(MISSING), locale: 'es' })
   assert.ok(panel.find({ type: 'Heading', text: 'Configuración' }))
   assert.equal(panel.findAll({ text: 'No encontrado' }).length, 2)
-  assert.ok(panel.find({ text: 'No se ha encontrado el CLI b2c.' }))
+  assert.ok(panel.find({ text: /^No se ha encontrado el CLI b2c\. Instálalo/ }))
   assert.equal(panel.findAll({ text: 'Sin configurar' }).length, 4)
   assert.match(panel.summary().join('\n'), /No hay dw\.json/)
   assert.ok(panel.find({ text: 'Desarrollo' }))
@@ -170,9 +174,10 @@ test('in Spanish', async () => {
   assert.equal(panel.findAll({ text: 'Listo' }).length, 2)
   assert.equal(panel.findAll({ text: 'Incompleto' }).length, 1)
   assert.equal(panel.findAll({ text: 'Sin configurar' }).length, 1)
-  assert.ok(panel.find({ text: /^Incompleto: dw\.json tiene el host/ }))
-  assert.ok(panel.find({ text: /^Sin configurar: dw\.json no tiene host/ }))
-  assert.ok(panel.find({ text: 'dw.json del workspace' }))
+  assert.ok(panel.find({ text: 'Sin credenciales válidas' }))
+  assert.ok(panel.find({ text: 'Sin host en dw.json' }))
+  assert.ok(panel.find({ text: 'Origen' }))
+  assert.ok(panel.find({ type: 'Button', text: 'Comprobar' }))
 })
 
 test('words a host error, a timeout included, and offers to try again', async () => {
@@ -260,9 +265,9 @@ test('the setup view lists the delivered pieces discreetly, those with no view i
   for (const name of ['ISML', 'Sandbox and upload', 'Errors']) assert.ok(panel.find({ text: name }), name)
   assert.equal(panel.findAll({ text: 'Available' }).length, 3)
   assert.equal(panel.find({ text: 'Debugger' }), null)
-  // The setup itself is there, and the status line too.
+  // The setup itself is there, b2c's version with it; the status line does not repeat the version.
   assert.ok(panel.find({ text: 'Found, version 9.8.7' }))
-  assert.ok(panel.find({ text: 'b2c 9.8.7' }))
+  assert.equal(panel.find({ text: 'b2c 9.8.7' }), null)
 })
 
 test('the last view is remembered, and one that no longer exists falls back to the setup view', async () => {
@@ -332,7 +337,7 @@ test('a view whose render throws shows an error state with a retry, keeping the 
     assert.deepEqual(panel.errors, [], label)
     assert.equal(openView(panel), 'errors', label)
     assert.match(panel.summary().join('\n'), /Errors could not be drawn/, label)
-    assert.ok(panel.find({ text: 'Its view failed while drawing. Try again, or open another view.' }), label)
+    assert.ok(panel.find({ text: 'Try again, or open another view.' }), label)
     // The bar and the status line are still there, so the person can go elsewhere.
     assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'], label)
     assert.ok(panel.find({ role: 'button', label: 'Refresh' }), label)
@@ -424,7 +429,8 @@ test('the status line says each environment’s state by icon and in words, not 
   ])
   // Every state has an icon of its own.
   assert.equal(new Set(chipsOf(panel).map(([, icon]) => icon)).size, 3)
-  assert.ok(panel.find({ text: 'b2c 9.8.7' }))
+  // b2c found is said in the setup view, never beside the environments.
+  assert.equal(panel.find({ text: /^b2c/ }), null)
   assert.ok(panel.find({ role: 'button', label: 'Refresh' }))
   // A fact leads to the setup view, where it is explained.
   await panel.press({ type: 'Button', text: 'PRD' })
@@ -540,7 +546,7 @@ test('a section whose setup throws shows as not started until the panel is reope
     assert.deepEqual(barOf(panel), ['Errors', 'Sandbox and upload', 'Setup'])
     await pick(panel, 'errors')
     assert.match(panel.summary().join('\n'), /Errors could not start/)
-    assert.ok(panel.find({ text: /^Its part of this panel failed to start/ }))
+    assert.ok(panel.find({ text: 'Close the panel and open it again.' }))
     assert.equal(panel.find({ text: 'errors body' }), null)
     assert.equal(attentionOf(panel), 'Piece failed')
     // The other section started and draws its body.

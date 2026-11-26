@@ -6,7 +6,8 @@
 import type { RoleState } from '../../core/instances'
 import type { Disposable, PieceContext, Workspace, WorkerPiece } from '../../core/piece'
 import { createBreakpoints, BreakpointsError, normalizePath, type BreakpointFile } from './breakpoints'
-import { matchFiles, scriptFiles, type ReadDir } from './files'
+import { byCartridge, matchFiles, scriptFiles, type ReadDir } from './files'
+import { readSource, SourceError, type SourceFileSystem } from './source'
 import { messages } from './i18n'
 import type { DebuggerState, DebugWorkspaceState, StepKind } from './protocol'
 import { createSession, SessionError, type SessionSnapshot } from './session'
@@ -35,12 +36,14 @@ export type DebuggerOptions = {
   readDir?: ReadDir
   /** How a file is opened at a line; default src/core/open-file.ts. */
   openFile?: OpenFile
+  /** How a script's lines are read for its source view; default the local disk. */
+  sourceFs?: SourceFileSystem
 }
 
 const STEP_KINDS: readonly StepKind[] = ['continue', 'over', 'in', 'out']
 
 function codeOf(error: unknown): string {
-  if (error instanceof DebuggerError || error instanceof SessionError || error instanceof BreakpointsError || error instanceof DapError) return error.code
+  if (error instanceof DebuggerError || error instanceof SessionError || error instanceof BreakpointsError || error instanceof DapError || error instanceof SourceError) return error.code
   if (error && typeof error === 'object' && 'code' in error && typeof (error as { code: unknown }).code === 'string') return (error as { code: string }).code
   return 'action_failed'
 }
@@ -64,7 +67,7 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   let lastPosted: DebuggerState | null = null
   /** The workspace the running session debugs; the breakpoints shown are its own while it runs. */
   let sessionWorkspace: Workspace | null = null
-  let filesCache: { root: string; at: number; files: Promise<{ files: string[]; truncated: boolean }> } | null = null
+  let filesCache: { root: string; at: number; files: Promise<{ files: string[]; truncated: boolean; cartridges: string[] }> } | null = null
 
   const session = createSession({
     b2c: ctx.b2c,
@@ -166,6 +169,14 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     if (session.root && sessionWorkspace?.id === workspaceId) await session.syncFile(file)
   }
 
+  /** The scripts of a workspace's cartridges, read again once they are older than FILES_TTL_MS. */
+  function scriptsOf(workspace: Workspace): Promise<{ files: string[]; truncated: boolean; cartridges: string[] }> {
+    if (!filesCache || filesCache.root !== workspace.path || Date.now() - filesCache.at > FILES_TTL_MS) {
+      filesCache = { root: workspace.path, at: Date.now(), files: scriptFiles(workspace.path, options.readDir) }
+    }
+    return filesCache.files
+  }
+
   const word = (key: keyof (typeof messages)['en']) => ctx.t(messages, key)
 
   const disposables: Disposable[] = [
@@ -193,6 +204,20 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
         return current()
       })
     ),
+    ctx.orca.panels.handle('debugger.breakpoint', (input) =>
+      guarded(async () => {
+        const workspace = await localWorkspace()
+        const path = normalizePath(input?.path)
+        const line = input?.line
+        if (!path) throw new DebuggerError('invalid_path')
+        if (typeof line !== 'number' || !Number.isInteger(line) || line < 1) throw new DebuggerError('invalid_input')
+        const existing = (await breakpoints.list(workspace.id)).find((file) => file.path === path)?.lines ?? []
+        const lines = input?.on === true ? [...existing, line] : existing.filter((each) => each !== line)
+        const files = await breakpoints.set(workspace.id, path, lines)
+        await synced(workspace.id, files.find((file) => file.path === path) ?? { path, lines: [] })
+        return current()
+      })
+    ),
     ctx.orca.panels.handle('debugger.clearBreakpoints', () =>
       guarded(async () => {
         const workspace = await localWorkspace()
@@ -205,12 +230,33 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     ctx.orca.panels.handle('debugger.files', (input) =>
       guarded(async () => {
         const workspace = await localWorkspace()
-        if (!filesCache || filesCache.root !== workspace.path || Date.now() - filesCache.at > FILES_TTL_MS) {
-          filesCache = { root: workspace.path, at: Date.now(), files: scriptFiles(workspace.path, options.readDir) }
-        }
-        const all = await filesCache.files
+        const all = await scriptsOf(workspace)
         const found = matchFiles(all.files, typeof input?.query === 'string' ? input.query.slice(0, 200) : '')
         return { files: found.files, truncated: found.truncated || (all.truncated && found.files.length > 0) }
+      })
+    ),
+    ctx.orca.panels.handle('debugger.scripts', () =>
+      guarded(async () => {
+        const workspace = await localWorkspace()
+        const all = await scriptsOf(workspace)
+        return {
+          cartridges: byCartridge(all.files, all.cartridges).map(({ path, files }) => ({ name: path.slice(path.lastIndexOf('/') + 1) || workspace.name, path, files })),
+          truncated: all.truncated
+        }
+      })
+    ),
+    ctx.orca.panels.handle('debugger.source', (input) =>
+      guarded(async () => {
+        const workspace = await localWorkspace()
+        const path = normalizePath(input?.path)
+        // Only a script the walk of the cartridges found: never any other file of the workspace.
+        if (!path || !(await scriptsOf(workspace)).files.includes(path)) throw new DebuggerError('invalid_path')
+        const { lines, truncated } = await readSource(workspace.path, path, options.sourceFs)
+        // Masked like anything else the panel shows, joined so it is masked once.
+        let masked = lines.length === 0 ? [] : (await ctx.b2c.mask(lines.join('\n'))).split('\n')
+        // Lines must keep their numbers: should masking ever join two, each is masked alone.
+        if (masked.length !== lines.length) masked = await Promise.all(lines.map((line) => ctx.b2c.mask(line)))
+        return { path, lines: masked, truncated }
       })
     ),
     ctx.orca.panels.handle('debugger.threads', () => guarded(() => session.threads())),

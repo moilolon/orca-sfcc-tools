@@ -47,6 +47,21 @@ export type DebuggerState = {
 /** Matching files of the debugged workspace's cartridges, relative to it, for a new breakpoint. */
 export type DebuggerFiles = { files: string[]; truncated: boolean }
 
+/**
+ * A cartridge of the debugged workspace: its folder's name, its folder relative to the workspace
+ * (`''` for the workspace itself) and its script files, relative to the workspace.
+ */
+export type ScriptCartridge = { name: string; path: string; files: string[] }
+
+/** Every script of the debugged workspace's cartridges, by cartridge; `truncated` when some were left out. */
+export type DebuggerScripts = { cartridges: ScriptCartridge[]; truncated: boolean }
+
+/**
+ * One script's lines, read when its source is opened in the view and never stored, cut to what a
+ * view can draw (`truncated` then), and masked like anything else the panel shows.
+ */
+export type DebuggerSource = { path: string; lines: string[]; truncated: boolean }
+
 declare module 'orca' {
   interface PluginRequests {
     /** The state as it is now. */
@@ -57,10 +72,19 @@ declare module 'orca' {
     'debugger.stop': { input: Record<string, never>; output: DebuggerState }
     /** Every line of one file (relative to the workspace); an empty list removes the file. */
     'debugger.setBreakpoints': { input: { path: string; lines: number[] }; output: DebuggerState }
+    /**
+     * Sets (`on`) or removes one line of one file, keeping the file's other lines: what pressing a
+     * line of a script, a frame of the call stack or a frame of an error does.
+     */
+    'debugger.breakpoint': { input: { path: string; line: number; on: boolean }; output: DebuggerState }
     /** Removes every breakpoint of the workspace. */
     'debugger.clearBreakpoints': { input: Record<string, never>; output: DebuggerState }
     /** Script files of the workspace's cartridges whose path holds every word of `query`. */
     'debugger.files': { input: { query: string }; output: DebuggerFiles }
+    /** Every script of the workspace's cartridges, by cartridge, for the view's list of scripts. */
+    'debugger.scripts': { input: Record<string, never>; output: DebuggerScripts }
+    /** The lines of one script of the workspace's cartridges; only that file, only now. */
+    'debugger.source': { input: { path: string }; output: DebuggerSource }
     'debugger.threads': { input: Record<string, never>; output: Thread[] }
     /** The call stack of a thread, which becomes the one shown. */
     'debugger.stack': { input: { threadId: number }; output: Frame[] }

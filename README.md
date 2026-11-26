@@ -17,18 +17,18 @@
 ## ✨ What this is
 
 What it takes to work on a Salesforce Commerce Cloud project from
-[Orca](https://github.com/stablyai/orca), in one plugin. Today it holds the base: an **SFCC**
-panel that shows whether `b2c` is installed and, for each environment of the workspace's
-`dw.json`, whether it is ready, incomplete or not configured. The pieces in the table are added
-one at a time.
+[Orca](https://github.com/stablyai/orca), in one plugin. An **SFCC** panel holds a view per
+piece, a line with whether each environment of the workspace's `dw.json` is ready, and a setup
+view that says what is missing and how to fix it. The pieces in the table are added one at a
+time.
 
 | | Piece | What it does |
 |---|---|---|
 | 🧩 | **ISML** | Colours `.isml` templates in Orca's editor: HTML, `<is…>` tags, `${…}` expressions, `<isscript>` and both kinds of comment |
 | ⬆️ | **Upload** | Deploys the workspace you pick to a code version of its own, activates it and uploads every change after that; removing the workspace deletes its version |
 | 🚦 | **Sandbox** | Started, stopped or busy, with start and stop, and which workspace uploads to which code version, in the status bar |
-| 🪵 | **Errors** | The new errors of each environment's log, one row per error however often it repeats, until marked as seen; the sandbox's count in the status bar |
-| 🐞 | **Debugger** | Breakpoints on the sandbox, and the threads, call stack and variables of a request halted on one, with continue and step |
+| 🪵 | **Errors** | The new errors of each environment's log, one row per error however often it repeats, until marked as seen; each with its detail, its stack trace and a breakpoint on any of its frames; the sandbox's count in the status bar |
+| 🐞 | **Debugger** | Breakpoints on the sandbox, set by clicking a line of a script, and the threads, call stack and variables of a request halted on one, with continue and step |
 
 ---
 

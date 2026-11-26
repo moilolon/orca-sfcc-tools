@@ -112,6 +112,9 @@ test('the stored sample is bounded and holds only its own fields', async () => {
   const huge = {
     message: 'm'.repeat(5000),
     logger: 'l'.repeat(5000),
+    pipeline: 'p'.repeat(5000),
+    level: 'ERROR',
+    site: 'Sites-Example-Site',
     frames: Array.from({ length: 40 }, (_, i) => ({ file: 'f'.repeat(5000), function: 'g'.repeat(5000), line: i + 1, raw: 'the whole entry' })),
     raw: 'the whole entry',
     message2: 'another field'
@@ -119,9 +122,13 @@ test('the stored sample is bounded and holds only its own fields', async () => {
   await seen.record('sandbox', [occurrence('a', 10, huge)])
   const stored = data.get(listKey('sandbox')) as Record<string, { sample: Sample }>
   const sample = stored.a.sample
-  assert.deepEqual(Object.keys(sample).sort(), ['frames', 'logger', 'message'])
+  // The pipeline and the level are kept, bounded; the site, which names the shop, never is.
+  assert.deepEqual(Object.keys(sample).sort(), ['frames', 'level', 'logger', 'message', 'pipeline'])
   assert.equal(sample.message.length, LIMITS.message)
   assert.equal(sample.logger?.length, LIMITS.logger)
+  assert.equal(sample.pipeline?.length, LIMITS.field)
+  assert.equal(sample.level, 'ERROR')
+  assert.ok(!JSON.stringify(stored).includes('Sites-Example-Site'))
   assert.equal(sample.frames.length, LIMITS.frames)
   for (const frame of sample.frames) {
     assert.deepEqual(Object.keys(frame).sort(), ['file', 'function', 'line'])

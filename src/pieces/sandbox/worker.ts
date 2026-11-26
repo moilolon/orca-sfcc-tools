@@ -126,6 +126,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     const { config, instances } = await roles()
     const upload = ownership.snapshot()
     const ids = new Set(listed.workspaces.map((workspace) => workspace.id))
+    const project = await anchorProject(listed, upload.workspaceId)
     // Only a whole list says a workspace is gone; even then only a person deletes its version.
     // Only a whole list says a workspace is gone, and not for a project hidden from the sidebar;
     // even then only a person deletes its version.
@@ -142,7 +143,9 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
       workspaces: listed.workspaces.map((workspace) => ({
         id: workspace.id,
         name: workspace.name,
+        branch: workspace.branch ?? null,
         local: isLocal(workspace),
+        inProject: project === null || workspace.id === upload.workspaceId || (workspace.projectId ?? null) === project,
         codeVersion: ownership.versionOf(workspace.id),
         owner: workspace.id === upload.workspaceId
       })),
@@ -150,6 +153,25 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
       leftovers,
       problem
     }
+  }
+
+  /**
+   * The project the view lists first: the uploading workspace's, else the focused one's (only to
+   * choose what is shown, never what uploads). Null when neither is listed with a project, and the
+   * view then lists every workspace as one.
+   */
+  async function anchorProject(listed: Listing, ownerId: string | null): Promise<string | null> {
+    const projectOf = (id: string | null | undefined) => (id ? (listed.workspaces.find((workspace) => workspace.id === id)?.projectId ?? null) : null)
+    const owner = projectOf(ownerId)
+    if (owner) return owner
+    const focused = await new Promise<string | null>((resolve) => {
+      const timer = timers.setTimeout(() => resolve(null), HOST_TIMEOUT_MS)
+      workspaces.focused().then(
+        (workspace) => (timers.clearTimeout(timer), resolve(workspace?.id ?? null)),
+        () => (timers.clearTimeout(timer), resolve(null))
+      )
+    })
+    return projectOf(focused)
   }
 
   async function refresh(): Promise<void> {

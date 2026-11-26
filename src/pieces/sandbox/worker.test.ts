@@ -116,6 +116,48 @@ test('the requests answer with the state; a refused one rejects with its code', 
   sandbox.dispose()
 })
 
+test('the workspaces of the project in use come first: the owner’s project, else the focused one’s, else all', async () => {
+  const { fake, host, sandbox } = await start()
+  host.state.listed = [
+    { ...SHOP, projectId: 'p-shop' },
+    { ...FIX, projectId: 'p-shop' },
+    { ...REMOTE, projectId: 'p-other' }
+  ]
+  // Nothing uploads and nothing is focused: every workspace is listed as one, with its branch.
+  let status = await fake.request('sandbox.status')
+  assert.deepEqual(
+    status.workspaces.map((w) => [w.id, w.branch, w.inProject]),
+    [
+      [SHOP.id, 'main', true],
+      [FIX.id, 'fix', true],
+      [REMOTE.id, null, true]
+    ]
+  )
+  // The focused workspace's project, only to choose what is shown.
+  host.state.focused = REMOTE.id
+  status = await fake.request('sandbox.status')
+  assert.deepEqual(
+    status.workspaces.map((w) => w.inProject),
+    [false, false, true]
+  )
+  assert.equal(status.upload.workspaceId, null, 'the focus never picks what uploads')
+  // Once one uploads, its project wins over the focus.
+  await fake.request('sandbox.pick', { workspaceId: FIX.id })
+  status = await fake.request('sandbox.status')
+  assert.deepEqual(
+    status.workspaces.map((w) => w.inProject),
+    [true, true, false]
+  )
+  // A workspace Orca names no project for is not taken as the project's.
+  host.state.listed = [{ ...SHOP, projectId: null }, { ...FIX, projectId: 'p-shop' }, REMOTE]
+  status = await fake.request('sandbox.status')
+  assert.deepEqual(
+    status.workspaces.map((w) => w.inProject),
+    [false, true, false]
+  )
+  sandbox.dispose()
+})
+
 test('the prefix setting names new code versions', async () => {
   const { fake, sandbox } = await start({ settings: { codeVersionPrefix: 'dev_' } })
   const picked = await fake.request('sandbox.pick', { workspaceId: FIX.id })
@@ -181,7 +223,7 @@ test('a sandbox role that is not ready shows as such, and every command answers 
   b2c.state = { config: 'ok', instances: { sandbox: 'incomplete', development: 'ready', staging: 'absent', production: 'absent' } }
   const { fake, host, sandbox } = await start({ b2c })
   host.state.focused = SHOP.id
-  const reason = 'The sandbox is not ready in dw.json: it needs a host and credentials b2c can use.'
+  const reason = 'The sandbox is not set up in dw.json.'
   for (const id of [COMMANDS.pick, COMMANDS.deploy, COMMANDS.reload, COMMANDS.refresh, COMMANDS.start, COMMANDS.stop]) {
     assert.equal(await fake.command(id), reason, id)
   }

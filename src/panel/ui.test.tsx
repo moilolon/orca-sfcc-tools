@@ -1,8 +1,8 @@
 // The building blocks of the panel: what each one draws, with Orca's own components only, and
 // that Orca would drop none of their props.
-import { Button, Text, type OrcaNode } from 'orca'
+import { Button, Code, RelativeTime, Text, type OrcaNode } from 'orca'
 import { afterEach, assert, mount, test, type TestPanel } from 'orca/testing'
-import { Actions, Empty, ErrorState, Group, LabelledRow, ListRow, StateBadge, StateMark, TONES, type StateTone } from './ui'
+import { Actions, Empty, ErrorState, Group, LabelledRow, ListRow, MaskedText, Notice, NOTICE_ICONS, NoticeLine, placeholderParts, StateBadge, StateMark, TONES, type StateTone } from './ui'
 
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
@@ -130,7 +130,7 @@ test('ListRow leads with a state mark and ends with a short note', async () => {
   // The spinner is named by the note, which says the same.
   assert.equal(shown.find({ type: 'Spinner' })?.props.label, 'uploading…')
   const name = shown.find({ text: 'feature-cart' })
-  assert.equal(name?.props.weight, 'medium')
+  assert.equal(name?.props.weight, 'semibold')
   assert.equal(name?.props.truncate, true)
   assert.equal(shown.find({ text: 'uploading…' })?.props.tone, 'accent')
   shown.unmount()
@@ -154,4 +154,88 @@ test('ListRow opens its item when given a press action, through a link on its na
   // Without one, the name is plain text.
   shown = await draw(() => <ListRow tone="failed" title="TypeError in a script" />)
   assert.equal(shown.find({ type: 'Link' }), null)
+})
+
+test('ListRow takes a second line, as a muted text or as given, and its own buttons after the note', async () => {
+  let pressed = 0
+  let shown = await draw(() => <ListRow tone="off" title="checkout-fix" detail="bugfix/checkout-total" note="idle" actions={<Button size="xs" onPress={() => pressed++}>Use</Button>} />)
+  const detail = shown.find({ text: 'bugfix/checkout-total' })
+  assert.equal(detail?.props.muted, true)
+  assert.equal(detail?.props.truncate, true)
+  await shown.press({ type: 'Button', text: 'Use' })
+  assert.equal(pressed, 1)
+  shown.unmount()
+  shown = await draw(() => (
+    <ListRow
+      tone="ok"
+      title="show()"
+      detail={
+        <Text size="sm" muted>
+          <Code>Page.js:11</Code>
+        </Text>
+      }
+    />
+  ))
+  assert.ok(shown.find({ type: 'Code', text: 'Page.js:11' }))
+  shown.unmount()
+  shown = await draw(() => (
+    <ListRow
+      tone="ok"
+      title="TypeError"
+      detail={
+        <Text size="sm" muted>
+          <RelativeTime at={Date.now() - 60_000} format="short" />
+        </Text>
+      }
+    />
+  ))
+  assert.ok(shown.find({ type: 'RelativeTime' }))
+})
+
+test('Notice is compact: an icon by its tone, a short title, one line, and one button', async () => {
+  let fixed = 0
+  let shown = await draw(() => <Notice tone="attention" title="No dw.json" detail="Add one at the workspace root." action={{ label: 'Check again', icon: 'refresh', onPress: () => fixed++ }} />)
+  const callout = shown.find({ type: 'Callout' })
+  assert.equal(callout?.props.tone, 'warning')
+  assert.equal(callout?.props.icon, 'warning')
+  assert.equal(callout?.props.title, 'No dw.json')
+  const line = shown.find({ text: 'Add one at the workspace root.' })
+  assert.equal(line?.props.truncate, true, 'one line, cut when it does not fit')
+  assert.equal(shown.findAll({ role: 'button' }).length, 1)
+  await shown.press({ type: 'Button', text: 'Check again' })
+  assert.equal(fixed, 1)
+  shown.unmount()
+  // Each tone has an icon of its own, so the tone is never told by colour alone.
+  const tones: StateTone[] = ['ok', 'busy', 'attention', 'failed', 'off']
+  assert.deepEqual(tones.map((tone) => NOTICE_ICONS[tone]), ['check', 'info', 'warning', 'error', 'info'])
+  // A title alone draws no empty row.
+  shown = await draw(() => <Notice tone="failed" title="Upload stopped" />)
+  assert.equal(shown.find({ type: 'Row' }), null)
+})
+
+test('NoticeLine is one line with a mark and at most a small button, never a callout', async () => {
+  let opened = 0
+  const shown = await draw(() => <NoticeLine tone="attention" text="Sandbox not set up" action={{ label: 'Open setup', icon: 'settings', onPress: () => opened++ }} />)
+  assert.equal(shown.find({ type: 'Callout' }), null)
+  assert.equal(shown.find({ text: 'Sandbox not set up' })?.props.truncate, true)
+  assert.equal(shown.find({ type: 'Button' })?.props.variant, 'ghost')
+  await shown.press({ type: 'Button', text: 'Open setup' })
+  assert.equal(opened, 1)
+})
+
+test('MaskedText draws what masking put in place of a value as code, the words around it as text', async () => {
+  assert.deepEqual(placeholderParts('order #, amount #.# EUR at <host> for ***'), [
+    { text: 'order ', placeholder: false },
+    { text: '#', placeholder: true },
+    { text: ', amount ', placeholder: false },
+    { text: '#.#', placeholder: true },
+    { text: ' EUR at ', placeholder: false },
+    { text: '<host>', placeholder: true },
+    { text: ' for ', placeholder: false },
+    { text: '***', placeholder: true }
+  ])
+  assert.deepEqual(placeholderParts('nothing masked'), [{ text: 'nothing masked', placeholder: false }])
+  const shown = await draw(() => <MaskedText text="Failed for <code> on <host>" />)
+  assert.deepEqual(shown.findAll({ type: 'Code' }).map((code) => code.text), ['<code>', '<host>'])
+  assert.equal(shown.find({ type: 'Text' })?.props.truncate, undefined, 'it wraps')
 })

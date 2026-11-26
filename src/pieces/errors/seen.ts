@@ -19,8 +19,12 @@ export type SeenJson = string | number | boolean | null | SeenJson[] | { [key: s
 
 export type SampleFrame = { file: string; function: string | null; line: number | null }
 
-/** One occurrence's identity, as kept: bounded by `boundSample`. */
-export type Sample = { message: string; logger: string | null; frames: SampleFrame[] }
+/**
+ * One occurrence's identity, as kept: bounded by `boundSample`. `pipeline` (the pipeline or
+ * controller) and `level` are fields of the entry's first line the view shows as labelled rows; a
+ * sample recorded before they were kept has neither. The site is never kept: it names the shop.
+ */
+export type Sample = { message: string; logger: string | null; frames: SampleFrame[]; pipeline?: string | null; level?: string | null }
 
 export type SeenRecord = {
   /** Milliseconds since the epoch, of the oldest and the newest occurrence read. */
@@ -44,6 +48,8 @@ export const LIMITS = {
   signatures: 500,
   message: 300,
   logger: 120,
+  /** The pipeline or controller of the entry. */
+  field: 120,
   frames: 5,
   file: 240,
   function: 120
@@ -56,9 +62,12 @@ function cut(text: unknown, max: number): string {
 /** A sample cut to `LIMITS`, holding only its own fields. */
 export function boundSample(sample: Sample): Sample {
   const frames = Array.isArray(sample.frames) ? sample.frames.slice(0, LIMITS.frames) : []
+  const field = (value: unknown) => (typeof value === 'string' && value ? cut(value, LIMITS.field) : null)
   return {
     message: cut(sample.message, LIMITS.message),
     logger: typeof sample.logger === 'string' ? cut(sample.logger, LIMITS.logger) : null,
+    pipeline: field(sample.pipeline),
+    level: typeof sample.level === 'string' && /^[A-Z]{1,10}$/.test(sample.level) ? sample.level : null,
     frames: frames.map((frame) => ({
       file: cut(frame.file, LIMITS.file),
       function: typeof frame.function === 'string' ? cut(frame.function, LIMITS.function) : null,

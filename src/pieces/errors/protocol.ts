@@ -10,6 +10,10 @@ export type ErrorFrame = {
   line: number | null
   /** Whether the script is a file of a cartridge of the workspace, so it can be opened. */
   openable: boolean
+  /** Its path in the workspace, `/` between its parts, when it is openable: where a breakpoint goes. */
+  path: string | null
+  /** A script of a cartridge (`.js`, `.ds`, `.isml`), as against a frame of the platform. */
+  script: boolean
 }
 
 /** One signature of an environment's seen list. */
@@ -24,6 +28,9 @@ export type ErrorRow = {
   /** The normalised first line of the newest occurrence, masked. */
   message: string
   logger: string | null
+  /** Fields of the entry's first line: the pipeline or controller, and the level. Never the site. */
+  pipeline: string | null
+  level: string | null
   frames: ErrorFrame[]
 }
 

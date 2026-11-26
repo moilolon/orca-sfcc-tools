@@ -1,7 +1,7 @@
 // The scripts a breakpoint can go in: inside a cartridge (a folder with a .project file), found
 // by name.
 import { assert, test } from 'orca/testing'
-import { matchFiles, MAX_MATCHES, scriptFiles, type ReadDir } from './files'
+import { byCartridge, matchFiles, MAX_MATCHES, scriptFiles, type ReadDir } from './files'
 
 type Tree = { [name: string]: Tree | string }
 
@@ -35,7 +35,9 @@ const WORKSPACE: Tree = {
 }
 
 test('lists the .js and .ds files of every cartridge, relative to the workspace, skipping what b2c skips', async () => {
-  const { files, truncated } = await scriptFiles('/root', fakeDir(WORKSPACE))
+  const { files, truncated, cartridges } = await scriptFiles('/root', fakeDir(WORKSPACE))
+  // The cartridges found, outermost only; not the ones in folders b2c skips.
+  assert.deepEqual(cartridges, ['cartridges/app_one', 'cartridges/app_two'])
   assert.deepEqual(files, [
     'cartridges/app_one/cartridge/controllers/Home.js',
     'cartridges/app_one/cartridge/controllers/Page.js',
@@ -54,4 +56,14 @@ test('finds files by every word typed, ignoring case, the file’s own name firs
   const found = matchFiles(many, 'f')
   assert.equal(found.files.length, MAX_MATCHES)
   assert.equal(found.truncated, true)
+})
+
+test('scripts are grouped by the cartridge that holds them, the longest cartridge path winning', () => {
+  const files = ['c/one/cartridge/a.js', 'c/one/cartridge/b.js', 'c/one-more/cartridge/x.js', 'loose.js']
+  assert.deepEqual(byCartridge(files, ['c/one', 'c/one-more', 'c/empty']), [
+    { path: 'c/one', files: ['c/one/cartridge/a.js', 'c/one/cartridge/b.js'] },
+    { path: 'c/one-more', files: ['c/one-more/cartridge/x.js'] }
+  ])
+  // A workspace that is itself a cartridge holds every file.
+  assert.deepEqual(byCartridge(['a.js', 'x/b.js'], ['']), [{ path: '', files: ['a.js', 'x/b.js'] }])
 })

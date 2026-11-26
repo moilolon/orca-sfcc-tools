@@ -42,7 +42,9 @@ Changing it needs the owner's yes.
       `src/panel/panel.tsx` draws a bar with one view per delivered piece of
       `src/panel/sections.ts` that has one, the status line and the setup view (the whole panel
       while no piece has a view), knowing no piece by name; `src/panel/ui.tsx` holds the blocks
-      every view is built from (see *Panel look*); `src/panel/checks.ts` merges core's check
+      every view is built from (see *Panel look*); `src/panel/navigation.ts` keeps the view
+      open and gives a view `openSetup()`, for a notice whose fix is in the setup view;
+      `src/panel/checks.ts` merges core's check
       scenarios with every piece's, and `src/panel/panel.check.ts` hands them to Orca.
     - `src/pieces/<piece>/`: `manifest.json`, `section.tsx` (its name, `delivered`, `hasView`,
       an optional `setup(ctx)` for its own events, the body of its view), `scenarios.ts` (its
@@ -60,12 +62,16 @@ Changing it needs the owner's yes.
       `code-version.ts` (`<prefix><slug>`, kept per workspace id), `uploader.ts` (reads
       `code watch --jsonl` lines), `status.ts` (the sandbox state from `sandbox list`, start and
       stop followed on it), `status-bar.ts` (its two items' texts), `worker.ts` (requests,
-      commands, `workspace.removed`); `testing.ts` holds the fakes its tests share.
+      commands, `workspace.removed`; its state gives each workspace's branch and whether it is
+      of the project in use, the uploading workspace's project, else the focused one's, which
+      only chooses what the view lists first); `testing.ts` holds the fakes its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
       beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
-      line; `frames.ts` finds which stack frames are files of a local cartridge. A read stores
-      per signature only its counters and a masked, bounded sample, never a raw entry; a
-      notification says how many, never what. The workspace whose cartridges a frame is looked
+      line; `frames.ts` finds which stack frames are files of a local cartridge (such a frame
+      of a row carries its path in the workspace, for a breakpoint). A read stores per signature
+      only its counters and a masked, bounded sample (the normalised first line, the logger, the
+      pipeline or controller, the level and the top frames; never the site, which names the
+      shop), never a raw entry; a notification says how many, never what. The workspace whose cartridges a frame is looked
       for in is chosen by `frameRoot()` in its `worker.ts`. A read passes `--level ERROR` and
       `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
       reduced to its path, its locale segment to `<locale>`, and a host written without a scheme
@@ -85,7 +91,12 @@ Changing it needs the owner's yes.
       adapter's events, never by its responses), `breakpoints.ts` (the single store of
       breakpoints, per workspace, paths relative to it; the editor phase reads and writes it
       too), `workspace.ts` (which workspace is debugged and how a file is opened, each in one
-      function), `files.ts`, and `fake-adapter.ts`, the scripted adapter its tests use. Every
+      function), `files.ts` (the scripts of the workspace's cartridges, and the cartridges),
+      `source.ts` (one script's lines for the view's source table: read only for a script
+      `files.ts` found and only inside the workspace's folder, cut to what a view draws, masked,
+      never stored), and `fake-adapter.ts`, the scripted adapter its tests use.
+      `debugger.breakpoint` sets or removes one line; the Errors view calls it too, for *Add
+      breakpoint here* on a frame. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
