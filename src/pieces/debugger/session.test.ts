@@ -670,3 +670,33 @@ test('a crashed adapter leaves the open set when its exit is seen; the flag stay
   const stopped = await session.stop()
   assert.deepEqual([stopped.status, stopped.reason, flag.value], ['ended', null, false])
 })
+
+test('a disposed session reads as ended at once, and nothing the adapter says afterwards changes it or reports a change', async () => {
+  const context = setup()
+  let changes = 0
+  const counted = createSession({
+    b2c: context.adapter.b2c,
+    log: () => {},
+    platform: 'linux',
+    timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 },
+    unclean: { get: async () => false, set: async () => {} },
+    onChange: () => (changes += 1)
+  })
+  await counted.start(FAKE_ROOT, BREAKPOINTS)
+  const process = context.adapter.last
+  process.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => counted.snapshot().frames.length > 0, 'the stack')
+  assert.equal(counted.snapshot().status, 'halted')
+  const disposing = counted.dispose()
+  assert.deepEqual(counted.snapshot(), { status: 'ended', reason: null, message: null, threads: [], threadId: null, frames: [], verified: {} }, 'ended at once')
+  const after = changes
+  // Late words from the adapter, a stop and a start: none of them changes the state or reports one.
+  process.event('stopped', { reason: 'breakpoint', threadId: 9 })
+  process.event('terminated')
+  await disposing
+  await counted.stop()
+  await counted.start(FAKE_ROOT, BREAKPOINTS)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(counted.snapshot().status, 'ended')
+  assert.equal(changes, after, 'no change was reported after dispose')
+})

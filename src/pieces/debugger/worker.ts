@@ -56,6 +56,8 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   const coalesceMs = options.coalesceMs ?? COALESCE_MS
   let timer: ReturnType<typeof setTimeout> | null = null
   let disposed = false
+  /** The last state posted, so the view can be told once that the session ended with the worker. */
+  let lastPosted: DebuggerState | null = null
   /** The workspace the running session debugs; the breakpoints shown are its own while it runs. */
   let sessionWorkspace: Workspace | null = null
   let filesCache: { root: string; at: number; files: Promise<{ files: string[]; truncated: boolean }> } | null = null
@@ -79,7 +81,9 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
       timer = null
       void current().then(
         (state) => {
-          if (!disposed) ctx.orca.panels.post('debugger.state', state)
+          if (disposed) return
+          lastPosted = state
+          ctx.orca.panels.post('debugger.state', state)
         },
         () => {}
       )
@@ -278,6 +282,27 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
       if (timer) clearTimeout(timer)
       timer = null
       const disconnected = session.dispose()
+      // One last post, so an open view never keeps showing a session that is gone; nothing after it.
+      if (lastPosted && lastPosted.status !== 'idle') {
+        const ended = session.snapshot()
+        try {
+          void Promise.resolve(
+            ctx.orca.panels.post('debugger.state', {
+              ...lastPosted,
+              status: ended.status,
+              reason: ended.reason,
+              message: ended.message,
+              threads: [],
+              threadId: null,
+              frames: [],
+              breakpoints: lastPosted.breakpoints.map((file) => ({ ...file, lines: file.lines.map((each) => ({ ...each, verified: null })) }))
+            })
+          ).catch(() => {})
+        } catch {
+          // The panel may be gone already.
+        }
+        lastPosted = null
+      }
       for (const disposable of disposables.reverse()) {
         try {
           await disposable.dispose()

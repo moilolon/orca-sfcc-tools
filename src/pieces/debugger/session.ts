@@ -152,7 +152,9 @@ export function createSession(deps: SessionDeps) {
     return { status, reason: null, message: null, threads: [], threadId: null, frames: [], verified: {} }
   }
 
+  /** Changes the state and says so; after `dispose()` nothing changes it any more. */
   function update(patch: Partial<SessionSnapshot>): void {
+    if (disposed) return
     state = { ...state, ...patch }
     deps.onChange()
   }
@@ -617,6 +619,11 @@ export function createSession(deps: SessionDeps) {
      * set and the next start cleans up.
      */
     dispose(): Promise<void> {
+      // The session is over from here, whatever the adapter still says: it reads as ended, with
+      // nothing halted, and no later event, answer or stop changes that or reports a change.
+      state = empty('ended')
+      halted.clear()
+      framePaths = new Map()
       disposed = true
       attempt += 1
       conn = null

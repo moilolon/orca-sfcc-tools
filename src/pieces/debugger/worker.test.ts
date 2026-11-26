@@ -242,6 +242,23 @@ test('core’s deactivation waits for the debugger’s disconnect answer, then t
   assert.ok(!JSON.stringify([worker.logs, logs]).includes(FAKE_HOST))
 })
 
+test('deactivating tells an open view once that the session ended, with nothing halted, and posts nothing after', async () => {
+  const { worker, adapter, states } = await mount()
+  await worker.request('debugger.start', {})
+  await until(() => states().some((state) => state.status === 'attached'), 'attached')
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => (states().at(-1)?.frames.length ?? 0) > 0, 'halted')
+  await worker.deactivate()
+  const last = states().at(-1) as DebuggerState
+  assert.equal(last.status, 'ended')
+  assert.deepEqual([last.frames, last.threads, last.threadId], [[], [], null])
+  assert.ok(last.breakpoints.every((file) => file.lines.every((each) => each.verified === null)), 'no line is said to be set any more')
+  const count = worker.posts.length
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(worker.posts.length, count, 'nothing is posted after it')
+})
+
 test('a session that did not end cleanly is cleaned up on the next start, from the flag in storage', async () => {
   const { worker, adapter, states } = await mount({ storage: { 'debugger.unclean': true } })
   await worker.request('debugger.start', {})
