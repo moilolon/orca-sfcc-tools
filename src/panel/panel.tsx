@@ -33,7 +33,7 @@ import type { PanelSection, PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import { SECTIONS } from './sections'
 import { ErrorState, Group, LabelledRow, ListRow, StateBadge, TONES, type StateTone } from './ui'
-import { FAILED_VIEW_KEY, SETUP_VIEW, VIEW_KEY, viewBoxKey } from './views'
+import { BAR_KEY, FAILED_VIEW_KEY, SETUP_VIEW, VIEW_KEY, viewBoxKey } from './views'
 
 const status = atom<CoreStatus | null>(null)
 const loading = atom(false)
@@ -464,7 +464,7 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
       const open = views.find((section) => section.id === active)
       return (
         <Stack gap="sm">
-          <Bar views={views} active={active} locale={locale} />
+          <Bar key={BAR_KEY} views={views} active={active} locale={locale} />
           <Separator />
           <StatusLine current={current} failure={failure} busy={busy} attention={attention} onAttention={open ? () => set(lastView, SETUP_VIEW) : undefined} />
           <Box key={viewBoxKey(active)} paddingY="xs">

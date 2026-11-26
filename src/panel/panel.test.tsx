@@ -15,7 +15,7 @@ import { CHECKS } from './checks'
 import { mergeScenarios, opensOwnView, READY_STATUS, viewOf as namedView } from './scenarios'
 import { SECTIONS } from './sections'
 import { Actions, Group, ListRow, StateBadge } from './ui'
-import { SETUP_VIEW, viewBoxKey } from './views'
+import { BAR_KEY, SETUP_VIEW, viewBoxKey } from './views'
 
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
@@ -201,11 +201,15 @@ test('words a failure that has no code as the panel’s own action_failed, in bo
 // The bar of views
 
 /**
- * The buttons of the bar: `Button`s drawn `solid` (the open view) or `ghost`, with no tooltip
- * (the status line's ghost buttons all have one).
+ * The buttons of the bar: those inside the bar's own container (`BAR_KEY`), found by their path.
+ * Never by their look: a view draws solid and ghost buttons of its own.
  */
 function barButtons(target: TestPanel) {
-  return target.findAll({ type: 'Button' }).filter((button) => (button.props.variant === 'solid' || button.props.variant === 'ghost') && !button.props.tooltip)
+  const bars = target.findAll({ testId: BAR_KEY })
+  assert.ok(bars.length <= 1, 'one bar at most')
+  if (bars.length === 0) return []
+  const inside = `${bars[0].path}/`
+  return target.findAll({ type: 'Button' }).filter((button) => button.path.startsWith(inside))
 }
 
 /** The names in the bar, in order. */
@@ -225,9 +229,11 @@ function openView(target: TestPanel): string | null {
   return drawn[0] ?? null
 }
 
-/** Opens a view from the bar. */
+/** Opens a view from the bar, pressing the bar's own button even if a view has one alike. */
 function pick(target: TestPanel, view: string): Promise<void> {
-  return target.press({ type: 'Button', text: VIEW_NAMES[view] })
+  const button = barButtons(target).find((item) => item.text === VIEW_NAMES[view])
+  assert.ok(button, `the bar has ${VIEW_NAMES[view]}`)
+  return target.press(button)
 }
 
 test('the bar holds one view per delivered piece that has one, then the setup view', async () => {
@@ -680,6 +686,59 @@ test('a scenario that names a view it cannot open is caught', async () => {
   assert.equal(namedView(debuggerScenario), 'debugger')
   assert.equal(await viewDrawnBy(VIEWS, debuggerScenario), 'setup')
   assert.equal(await viewDrawnBy(VIEWS, errorsScenario), 'errors')
+})
+
+/** A delivered section whose view has solid and ghost buttons with no tooltip, as views do. */
+function viewWithButtons(id: PanelSection['id'], name: string): PanelSection {
+  return {
+    ...viewOf(id, name, name),
+    render: () => (
+      <Group title={`${name} body`}>
+        <Actions>
+          <Button size="sm" variant="solid">
+            Deploy all
+          </Button>
+          <Button size="sm" variant="ghost">
+            Reload
+          </Button>
+          <Button size="sm" variant="ghost">
+            Setup
+          </Button>
+        </Actions>
+      </Group>
+    )
+  }
+}
+
+test('the bar is found by its container, whatever buttons a view draws', async () => {
+  const module = panelOver([viewWithButtons('sandbox', 'Sandbox and upload'), viewWithButtons('errors', 'Errors')])
+  panel = await mount(module, { host: hostAnswering(ALL_READY), locale: 'en' })
+  // The view's own solid and ghost buttons are drawn, and are not taken for the bar.
+  assert.equal(panel.findAll({ role: 'button', text: 'Deploy all' }).length, 1)
+  assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'])
+  assert.equal(openView(panel), 'sandbox')
+  // Picking a view presses the bar's button, not the view's one of the same name.
+  await pick(panel, 'setup')
+  assert.equal(openView(panel), 'setup')
+  await pick(panel, 'errors')
+  assert.equal(openView(panel), 'errors')
+  assert.ok(panel.find({ text: 'Errors body' }))
+})
+
+test('over views with buttons, a scenario draws the view it names, and a wrong one is caught', async () => {
+  const sections = [viewWithButtons('sandbox', 'Sandbox and upload'), viewWithButtons('errors', 'Errors')]
+  const merged = mergeScenarios({ found: {} }, [
+    { id: 'sandbox', opensOwnView: opensOwnView(sections, 'sandbox'), scenarios: { sandbox: {} } },
+    { id: 'errors', opensOwnView: opensOwnView(sections, 'errors'), scenarios: { errors: {}, errorsOnSandbox: { persisted: { plugin: { view: 'sandbox' } } } } },
+    // Names a view no section has: the panel draws the setup view instead.
+    { id: 'debugger', opensOwnView: true, scenarios: { debugger: {} } }
+  ])
+  const drawn: Record<string, string | null> = {}
+  for (const [name, scenario] of Object.entries(merged)) drawn[name] = await viewDrawnBy(panelOver(sections), scenario)
+  // What the plugin's scenario test compares: every name agrees but the wrong one.
+  const wrong = Object.entries(merged).filter(([name, scenario]) => drawn[name] !== namedView(scenario)).map(([name]) => name)
+  assert.deepEqual(drawn, { found: 'setup', sandbox: 'sandbox', errors: 'errors', errorsOnSandbox: 'sandbox', debugger: 'setup' })
+  assert.deepEqual(wrong, ['debugger'])
 })
 
 test('a piece that has scenarios before it is delivered opens and draws the setup view, then its own', async () => {
