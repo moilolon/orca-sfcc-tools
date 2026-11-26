@@ -8,10 +8,15 @@ export type { Workspace, Workspaces }
 
 const UPLOADING_KEY = 'uploading'
 
+/** Whether the workspace's folder is on this machine, so its `path` can be read here. */
+export function isLocal(workspace: Pick<Workspace, 'hostId'>): boolean {
+  return workspace.hostId === null || workspace.hostId === 'local'
+}
+
 export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store): Workspaces {
   async function list(): Promise<Workspace[]> {
     const answer = await host.call('workspace.list')
-    return answer.workspaces.map(({ id, name, path, branch, kind }) => ({ id, name, path, branch, kind }))
+    return answer.workspaces.map(({ id, name, path, branch, kind, hostId }) => ({ id, name, path, branch, kind, hostId: hostId ?? null }))
   }
   async function byId(id: string | null | undefined): Promise<Workspace | null> {
     if (!id) return null
@@ -33,7 +38,8 @@ export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store): Wor
       else await store.set(UPLOADING_KEY, workspaceId)
     },
     async configRoot() {
-      return ((await uploading()) ?? (await focused()))?.path ?? null
+      const workspace = (await uploading()) ?? (await focused())
+      return workspace && isLocal(workspace) ? workspace.path : null
     }
   }
 }

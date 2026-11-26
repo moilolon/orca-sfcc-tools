@@ -3,7 +3,6 @@
 import type { OrcaWorkerApi } from 'orca/worker'
 import { createB2c, B2cError, type B2cDeps } from '../core/b2c'
 import { translator } from '../core/i18n'
-import { ROLES, type Role } from '../core/instances'
 import { PIECE_IDS, type Disposable, type PieceContext } from '../core/piece'
 import { createSettings } from '../core/settings'
 import { createStore } from '../core/store'
@@ -12,7 +11,7 @@ import type { CoreStatus } from '../protocol'
 import { WORKER_PIECES } from './pieces'
 
 /** What tests replace: how processes start and what the machine looks like. */
-export type WorkerOverrides = Pick<B2cDeps, 'spawn' | 'platform' | 'env' | 'isFile' | 'killTree' | 'homedir'>
+export type WorkerOverrides = Pick<B2cDeps, 'spawn' | 'platform' | 'env' | 'isFile' | 'isDirectory' | 'killTree' | 'homedir'>
 
 let disposables: Disposable[] = []
 
@@ -49,9 +48,8 @@ export function createActivate(overrides: WorkerOverrides = {}) {
 
     async function status(): Promise<CoreStatus> {
       const found = await probe()
-      const instances = {} as Record<Role, boolean>
-      for (const role of ROLES) instances[role] = await b2c.configured(role)
-      return { b2c: found, instances, pieces: [...PIECE_IDS] }
+      const { config, instances } = await b2c.instances()
+      return { b2c: found, config, instances, pieces: [...PIECE_IDS] }
     }
 
     for (const piece of WORKER_PIECES) {

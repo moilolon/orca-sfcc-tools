@@ -18,8 +18,9 @@
 
 What it takes to work on a Salesforce Commerce Cloud project from
 [Orca](https://github.com/stablyai/orca), in one plugin. Today it holds the base: an **SFCC**
-panel that shows whether `b2c` is installed and which environments the workspace's `dw.json`
-configures. The pieces in the table are added one at a time.
+panel that shows whether `b2c` is installed and, for each environment of the workspace's
+`dw.json`, whether it is ready, incomplete or not configured. The pieces in the table are added
+one at a time.
 
 | | Piece | What it does |
 |---|---|---|
@@ -60,7 +61,7 @@ Install [`b2c`](https://developer.salesforce.com/docs/commerce/b2c-commerce/over
 
 ```bash
 npm install
-npm run types
+npm run typecheck
 npm test
 ```
 

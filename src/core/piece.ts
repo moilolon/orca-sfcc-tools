@@ -4,14 +4,19 @@
 //
 // `plugin validate` follows type imports too, so this file imports no module that calls a
 // worker-only host method: the workspace types live here and src/core/workspaces.ts uses them.
-import type { IconName, OrcaNode } from 'orca'
+import type { IconName, OrcaNode, PanelContext } from 'orca'
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { B2c } from './b2c'
 import type { Settings } from './settings'
 import type { Store } from './store'
 import type { Translator } from './i18n'
 
-export type Workspace = { id: string; name: string; path: string; branch: string | null; kind: 'worktree' | 'folder' }
+/**
+ * A workspace as Orca lists it. `hostId` says where its folder is: `local` (or null) on this
+ * machine, `ssh:…` or `runtime:…` elsewhere, where `path` is a path on that host and must
+ * never be read as a local one.
+ */
+export type Workspace = { id: string; name: string; path: string; branch: string | null; kind: 'worktree' | 'folder'; hostId: string | null }
 
 export type Workspaces = {
   list(): Promise<Workspace[]>
@@ -21,7 +26,8 @@ export type Workspaces = {
   setUploading(workspaceId: string | null): Promise<void>
   /**
    * Where to look for dw.json: the uploading workspace, else the focused one (so the panel can
-   * show which environments are configured before anything uploads), else null.
+   * show which environments are configured before anything uploads), else null. Null too when
+   * that workspace is on another host: its path is not a folder of this machine.
    */
   configRoot(): Promise<string | null>
 }
@@ -53,11 +59,23 @@ export type WorkerPiece = {
   activate(ctx: PieceContext): Disposable | void | Promise<Disposable | void>
 }
 
-/** A section of the panel. `render` returns null while the piece has nothing to show. */
+/**
+ * A piece's half of the panel. Everything the panel shows of a piece comes from here, so a phase
+ * that delivers one edits only its own folder.
+ */
 export type PanelSection = {
   readonly id: PieceId
-  /** Words the section's title in a locale. */
+  /** Words the piece's name in a locale. */
   title(locale: string): string
   readonly icon: IconName
+  /** Whether the piece does its job yet: the panel lists it as available, or as coming. */
+  readonly delivered: boolean
+  /**
+   * Runs once when the panel opens, before the first draw: the place to listen to the piece's
+   * own events (`plugin.on('sandbox.changed', …)`) and ask for its first state. What it pushes to
+   * `ctx.subscriptions`, and the function it may return, are disposed with the panel.
+   */
+  setup?(ctx: PanelContext): void | (() => void)
+  /** The section's body; null while the piece has nothing to show. */
   render(locale: string): OrcaNode
 }

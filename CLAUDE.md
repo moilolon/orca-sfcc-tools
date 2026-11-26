@@ -17,22 +17,28 @@ Changing it needs the owner's yes.
       (identity, engine, access list, core settings, the panel) with every
       `src/pieces/*/manifest.json`, pieces in alphabetical order. Never edit it by hand; a test
       fails when it differs from the merge. Two branches that both changed it conflict only
-      there: run `npm run manifest` again. A fragment may only hold `contributes`.
+      there: run `npm run manifest` again. A fragment may only hold `contributes`. Two pieces
+      may declare the same hook or event: it is emitted once, and fails when their options
+      differ.
     - `src/core/`: what every piece shares. `piece.ts` (the piece contracts and `PIECE_IDS`),
       `b2c.ts` (the only module that starts a process), `dw-config.ts` (the only module that
-      reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles and the role
-      guard), `settings.ts`, `store.ts` (storage, one namespace per piece), `workspaces.ts`,
-      `i18n.ts` (texts, English and Spanish). `test-support.ts` holds the invented `dw.json` and
-      the fake process the tests use.
+      reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
+      and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one namespace per piece),
+      `workspaces.ts`, `i18n.ts` (texts, English and Spanish). `test-support.ts` holds the
+      invented `dw.json` and the fake process the tests use.
     - `src/protocol.ts`: the panel–worker contract (`core.status`), importing each piece's
       `protocol.ts`. Request names start with the piece id.
     - `src/worker/worker.ts` builds core and starts every piece of `src/worker/pieces.ts`;
       `src/panel/panel.tsx` draws the setup and one section per piece of
-      `src/panel/sections.ts`; `src/panel/panel.check.ts` holds the check and capture scenarios.
-    - `src/pieces/<piece>/`: `manifest.json`, `protocol.ts`, `worker.ts`, `section.tsx`,
-      `i18n.ts`. Pieces: `isml` (only a manifest fragment), `sandbox`, `errors`, `debugger`,
-      `engine`, `editor`. A phase works inside its own piece folder; both registries already list
-      every piece.
+      `src/panel/sections.ts`, knowing no piece by name; `src/panel/checks.ts` merges core's
+      check scenarios with every piece's, and `src/panel/panel.check.ts` hands them to Orca.
+    - `src/pieces/<piece>/`: `manifest.json`, `section.tsx` (its name, `delivered`, an optional
+      `setup(ctx)` for its own events, its body), `scenarios.ts` (its check scenarios, each named
+      after the piece), `i18n.ts`, and `protocol.ts` and `worker.ts` unless it runs nothing
+      (`isml`). Pieces: `isml`, `sandbox`, `errors`, `debugger`, `engine`, `editor`. A phase works
+      inside its own piece folder: the three registries (`src/worker/pieces.ts`,
+      `src/panel/sections.ts`, `src/panel/checks.ts`) and `src/protocol.ts` already list every
+      piece, and a test fails when any other shared module imports one.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
@@ -42,13 +48,25 @@ Changing it needs the owner's yes.
       none; a setting can name another file) for one purpose: to hand `b2c` the host and
       credentials of each role, in the environment of the child process (`SFCC_SERVER`,
       `SFCC_CLIENT_ID`, …). Never in its arguments, never stored, logged, shown or put in an error
-      message. The rest of the plugin only learns whether a role is configured.
+      message. The rest of the plugin only learns the state of the file (`ok`, `missing`,
+      `invalid`) and of each role (`ready`, `incomplete`, `absent`).
     - Roles: `sandbox` reads the plain keys; `development`, `staging` and `production` the same
       keys with their suffix (`-dev`, `-stg`, `-prd` by default), with no fallback to the plain
-      ones. The guard in `b2c.ts` allows `code`, `debug` and `sandbox` only on the sandbox; the
-      other roles run `logs` and nothing else. A role with no usable credentials is never started:
-      `b2c` would open a browser sign-in.
-    - One workspace uploads, the one picked by hand; it never follows the focused workspace.
+      ones. The guard allows `code`, `debug` and `sandbox` only on the sandbox; the other roles
+      run `logs` and nothing else. Only a `ready` role is started: a host and a client id and
+      secret (on the sandbox a user and password also count), none of them with a control
+      character. Without usable credentials `b2c` would open a browser sign-in.
+    - Arguments: a flag passes only when it is in `ALLOWED_FLAGS` (`flag_not_allowed`
+      otherwise): nothing that names a host, a user, a credential, an instance, a configuration
+      or `.env` file, a project folder, a certificate or a sign-in method goes in it. No
+      argument may hold a value of `dw.json`, and when `b2c` is a `.cmd` or `.bat` none may hold
+      `" % ^ & | < > !` or a control character (`unsafe_argument`, with the position of the
+      argument): a version manager's shim would let it run another command.
+    - `run()` is for one-shot commands and adds `--json`. `start()` is for long-lived ones: it
+      hands over stderr line by line and stdout in raw chunks, takes `write()` and `end()` for
+      stdin, always reads both streams, and adds `--jsonl` only with `jsonl: true`.
+    - One workspace uploads, the one picked by hand; it never follows the focused workspace. A
+      workspace on another host (`hostId` other than `local`) is never read as a local folder.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
       or customer data, in code, tests, fixtures, commit messages or pull requests. Fixtures are
       invented, with hosts under `example.com`. Never open or copy a real `dw.json`.
@@ -62,8 +80,9 @@ Changing it needs the owner's yes.
 
 ## Development
 
-- `npm install`, then `npm run types` (writes `.orca/types`, ignored; `tsconfig.json` extends
-  it). Node 22.18 or later.
+- `npm install`. Node 22.18 or later. `tsconfig.json` extends `.orca/types`, which is ignored
+  and written by `orca plugin types .`: `npm run typecheck` runs it first, so a clean clone
+  needs no other step (`npm run types` writes them alone, for the editor).
 - `npm run typecheck`, `npm test` (`orca plugin test .`), `npm run check`
   (`orca plugin check .`), `npm run validate` (`orca plugin validate .`) and
   `npm run manifest -- --check`: all five must exit 0 before a pull request, with their output
@@ -72,7 +91,8 @@ Changing it needs the owner's yes.
   `settings:own`, `workspace:read`, `workspace:write`, `notifications:show`. A change to it, or
   to the commands, needs the owner's approval in Orca again; a phase that needs more stops.
 - **Captures:** `orca plugin shot . --scenario <name> --json` draws a scenario of
-  `src/panel/panel.check.ts` (`found`, `wrongPath`, `configured`, `missing`) with the worker on a
+  `src/panel/checks.ts` (core's `found`, `wrongPath`, `configured`, `missing` and
+  `invalidConfig`, plus each piece's, drawn over a ready setup) with the worker on a
   stand-in host, without loading the plugin, into `.orca/shots/`. It needs Orca's window hidden
   or minimized and fails otherwise: never bring the window forward or change what the owner
   sees; report the error. Open the PNG and say what it shows. Spanish needs Orca's own language

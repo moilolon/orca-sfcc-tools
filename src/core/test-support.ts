@@ -43,8 +43,22 @@ export function plainSettings(values: Record<string, JsonValue> = {}): Settings 
   return createSettings({ get: async () => values, onDidChange: () => ({ dispose() {} }) })
 }
 
+/** A fake stdin that keeps what it was given. */
+export class FakeStdin extends EventEmitter {
+  readonly written: (string | Uint8Array)[] = []
+  ended = false
+  write(data: string | Uint8Array): boolean {
+    this.written.push(data)
+    return true
+  }
+  end(): void {
+    this.ended = true
+  }
+}
+
 export class FakeChild extends EventEmitter implements ChildLike {
   readonly pid = 4242
+  readonly stdin = new FakeStdin()
   readonly stdout = new EventEmitter()
   readonly stderr = new EventEmitter()
   killed = false

@@ -34,7 +34,10 @@ export function translator(locale: () => string): Translator {
   return (messages, key, vars) => t(messages, locale(), key, vars)
 }
 
-/** Core's own texts: the panel's setup section and the worker errors the panel words. */
+/**
+ * Core's own texts: the panel's setup section, and the errors the panel words: the runner's
+ * codes, plus the two the host itself answers with (`timeout`, `action_failed`).
+ */
 export const CORE_MESSAGES = defineMessages(
   {
     setup: 'Setup',
@@ -47,21 +50,22 @@ export const CORE_MESSAGES = defineMessages(
     b2cMissingTitle: 'The b2c CLI is not available',
     b2cMissingBody: 'Install it, or set its path in Settings → SFCC Tools → b2c path.',
     instances: 'Environments',
-    configured: 'Configured',
-    notConfigured: 'Not configured',
+    roleReady: 'Ready',
+    roleIncomplete: 'Incomplete',
+    roleAbsent: 'Not configured',
     instancesHint: 'Read from the workspace’s dw.json. Hosts and credentials are never shown.',
+    incompleteHint: 'Incomplete: dw.json has the host, but no credentials b2c can use (a client id and secret; the sandbox may use a user and password).',
+    configMissingTitle: 'No dw.json',
+    configMissingBody: 'No dw.json was found for the workspace. Add one at its root, or set another file in Settings → SFCC Tools → Configuration file.',
+    configInvalidTitle: 'dw.json cannot be read',
+    configInvalidBody: 'The file is not valid JSON, so no environment can be read from it.',
     pieces: 'Pieces',
+    pieceDelivered: 'Available',
     pieceComing: 'Coming',
     roleSandbox: 'Sandbox',
     roleDevelopment: 'Development',
     roleStaging: 'Staging',
     roleProduction: 'Production',
-    pieceIsml: 'ISML',
-    pieceSandbox: 'Sandbox and upload',
-    pieceErrors: 'Errors',
-    pieceDebugger: 'Debugger',
-    pieceEngine: 'Analysis',
-    pieceEditor: 'Editor',
     errorTitle: 'Something went wrong',
     'error.b2c_not_found': 'The b2c CLI was not found.',
     'error.b2c_failed': 'b2c ended with an error.',
@@ -72,8 +76,13 @@ export const CORE_MESSAGES = defineMessages(
     'error.role_required': 'That command needs an environment.',
     'error.role_not_configured': 'That environment is not configured in dw.json.',
     'error.credentials_missing': 'dw.json has no client id and secret for that environment.',
+    'error.value_invalid': 'A value of dw.json for that environment holds a character that cannot be used.',
+    'error.flag_not_allowed': 'A command option was refused: it is not one the plugin may pass to b2c.',
     'error.unsafe_argument': 'A command argument was refused.',
+    'error.cwd_not_found': 'The folder to run b2c in does not exist.',
     'error.config_invalid': 'The dw.json file could not be read.',
+    'error.timeout': 'The plugin took too long to answer.',
+    'error.action_failed': 'The action could not be completed.',
     'error.unknown': 'Unexpected error ({code}).'
   },
   {
@@ -87,21 +96,22 @@ export const CORE_MESSAGES = defineMessages(
     b2cMissingTitle: 'El CLI b2c no está disponible',
     b2cMissingBody: 'Instálalo o indica su ruta en Ajustes → SFCC Tools → b2c path.',
     instances: 'Entornos',
-    configured: 'Configurado',
-    notConfigured: 'Sin configurar',
+    roleReady: 'Listo',
+    roleIncomplete: 'Incompleto',
+    roleAbsent: 'Sin configurar',
     instancesHint: 'Se lee del dw.json del workspace. Nunca se muestran hosts ni credenciales.',
+    incompleteHint: 'Incompleto: dw.json tiene el host, pero no credenciales que b2c pueda usar (client id y secret; el sandbox admite usuario y contraseña).',
+    configMissingTitle: 'No hay dw.json',
+    configMissingBody: 'No se ha encontrado un dw.json para el workspace. Añade uno en su raíz o indica otro fichero en Ajustes → SFCC Tools → Configuration file.',
+    configInvalidTitle: 'No se puede leer dw.json',
+    configInvalidBody: 'El fichero no es JSON válido, así que no se puede leer ningún entorno de él.',
     pieces: 'Piezas',
+    pieceDelivered: 'Disponible',
     pieceComing: 'Próximamente',
     roleSandbox: 'Sandbox',
     roleDevelopment: 'Desarrollo',
     roleStaging: 'Staging',
     roleProduction: 'Producción',
-    pieceIsml: 'ISML',
-    pieceSandbox: 'Sandbox y subida',
-    pieceErrors: 'Errores',
-    pieceDebugger: 'Depurador',
-    pieceEngine: 'Análisis',
-    pieceEditor: 'Editor',
     errorTitle: 'Algo ha fallado',
     'error.b2c_not_found': 'No se ha encontrado el CLI b2c.',
     'error.b2c_failed': 'b2c ha terminado con un error.',
@@ -112,8 +122,13 @@ export const CORE_MESSAGES = defineMessages(
     'error.role_required': 'Esa orden necesita un entorno.',
     'error.role_not_configured': 'Ese entorno no está configurado en dw.json.',
     'error.credentials_missing': 'dw.json no tiene client id y secret para ese entorno.',
+    'error.value_invalid': 'Un valor de dw.json para ese entorno contiene un carácter que no se puede usar.',
+    'error.flag_not_allowed': 'Se ha rechazado una opción de la orden: no es una de las que el plugin puede pasar a b2c.',
     'error.unsafe_argument': 'Se ha rechazado un argumento de la orden.',
+    'error.cwd_not_found': 'La carpeta donde ejecutar b2c no existe.',
     'error.config_invalid': 'No se ha podido leer el fichero dw.json.',
+    'error.timeout': 'El plugin ha tardado demasiado en responder.',
+    'error.action_failed': 'No se ha podido completar la acción.',
     'error.unknown': 'Error inesperado ({code}).'
   }
 )

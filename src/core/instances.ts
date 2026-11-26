@@ -54,3 +54,83 @@ export function guard(args: readonly string[], role: Role | undefined): GuardRes
   const allowed = role === 'sandbox' ? SANDBOX_TOPICS : READ_ONLY_TOPICS
   return allowed.has(topic) ? { ok: true, needsRole: true } : { ok: false, code: 'role_refused' }
 }
+
+/** What dw.json holds for a role: a host and credentials b2c can use, a host alone, or nothing. */
+export type RoleState = 'ready' | 'incomplete' | 'absent'
+/** The dw.json file itself: read, not found, or not a JSON object. */
+export type ConfigState = 'ok' | 'missing' | 'invalid'
+
+/**
+ * Every flag a command may carry: an allow list. None of them names a host, a user, a credential,
+ * an instance, a configuration or `.env` file, a project folder, a certificate or a sign-in
+ * method: those reach b2c through its environment (src/core/b2c.ts) and nowhere else. A short
+ * flag stands for a different long one per command (`-c` is `--cartridge`, `--columns` or
+ * `--category`), and none of its meanings is in that group.
+ */
+export const ALLOWED_FLAGS: ReadonlySet<string> = new Set([
+  '--json',
+  '--jsonl',
+  '--version',
+  '-v',
+  '--code-version',
+  '-c',
+  '--cartridge',
+  '-x',
+  '--exclude-cartridge',
+  '-a',
+  '--activate',
+  '-r',
+  '--reload',
+  '--delete',
+  '--cartridge-ignore-dirs',
+  '--cartridge-path',
+  '-f',
+  '--filter',
+  '--force',
+  '-n',
+  '--count',
+  '--since',
+  '--level',
+  '-g',
+  '--search',
+  '--no-normalize',
+  '--no-color',
+  '-l',
+  '--last',
+  '--limit',
+  '--list',
+  '--interval',
+  '--sort',
+  '-o',
+  '--order',
+  '--offset',
+  '--columns',
+  '--extended',
+  '--category',
+  '--raw',
+  '--topics',
+  '--workspace',
+  '--realm',
+  '--show-deleted',
+  '--poll-interval',
+  '--timeout'
+])
+
+/** The flag an argument names (`--level` for `--level=ERROR`), or null for a plain value. */
+export function flagOf(arg: string): string | null {
+  if (!arg.startsWith('-')) return null
+  const equals = arg.indexOf('=')
+  return equals === -1 ? arg : arg.slice(0, equals)
+}
+
+/**
+ * The position of the first argument that starts with `-` and is not an allowed flag, or -1.
+ * The whole name must match, so `-s x`, `-s=x`, `--server x` and `--server=x` are all refused,
+ * and so are grouped short flags (`-ar`), a value glued to one (`-shost`) and a bare `--`.
+ */
+export function refusedFlag(args: readonly string[]): number {
+  return args.findIndex((arg) => {
+    const flag = flagOf(arg)
+    return flag !== null && !ALLOWED_FLAGS.has(flag)
+  })
+}

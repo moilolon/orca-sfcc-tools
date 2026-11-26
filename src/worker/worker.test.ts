@@ -2,19 +2,26 @@
 // the panel, storage and the log.
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { rmSync } from 'node:fs'
-import { assertNoSecrets, fakeSpawner, makeWorkspace, type SpawnCall } from '../core/test-support'
+import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, type SpawnCall } from '../core/test-support'
 import { createActivate, deactivate } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
-const MACHINE = { platform: 'linux', env: { PATH: '/fake/bin' }, homedir: '/home/someone', isFile: async (path: string) => path === '/fake/bin/b2c' }
+const MACHINE = {
+  platform: 'linux',
+  env: { PATH: '/fake/bin' },
+  homedir: '/home/someone',
+  isFile: async (path: string) => path === '/fake/bin/b2c',
+  isDirectory: async () => true
+}
+const ABSENT = { sandbox: 'absent', development: 'absent', staging: 'absent', production: 'absent' }
 
-function hostFor(root: string | null, settings: Record<string, string> = {}) {
+function hostFor(root: string | null, settings: Record<string, string> = {}, hostId: string | null = 'local') {
   return mockHost({
     capabilities: CAPABILITIES,
     settings,
     results: {
       'workspace.list': {
-        workspaces: root ? [{ id: 'w1', kind: 'folder', name: 'shop', path: root, branch: null, hostId: 'local' }] : [],
+        workspaces: root ? [{ id: 'w1', kind: 'folder', name: 'shop', path: root, branch: null, hostId }] : [],
         truncated: false
       },
       'workspace.readContext': root ? { workspaceId: 'w1', branch: '', displayName: 'shop', terminals: [] } : null
@@ -22,22 +29,24 @@ function hostFor(root: string | null, settings: Record<string, string> = {}) {
   })
 }
 
-async function mount(root: string | null, script: (call: SpawnCall) => void, settings: Record<string, string> = {}) {
+async function mount(root: string | null, script: (call: SpawnCall) => void, settings: Record<string, string> = {}, hostId: string | null = 'local') {
   const spawn = fakeSpawner(script)
-  const worker = await mountWorker({ default: createActivate({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill() }), deactivate }, { host: hostFor(root, settings) })
+  const worker = await mountWorker({ default: createActivate({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill() }), deactivate }, { host: hostFor(root, settings, hostId) })
   return { worker, calls: spawn.calls }
 }
 
 const VERSION = '@salesforce/b2c-cli/9.8.7 linux-x64 node-v24.0.0\n'
 
-test('core.status: b2c found, the roles dw.json configures, every piece', async () => {
+test('core.status: b2c found, the state of dw.json and of each role, every piece', async () => {
   const root = makeWorkspace()
   try {
     const { worker, calls } = await mount(root, (call) => call.child.finish(0, VERSION))
     const status = await worker.request('core.status', { locale: 'es-ES' })
     assert.deepEqual(status, {
       b2c: { found: true, version: '9.8.7' },
-      instances: { sandbox: true, development: true, staging: true, production: false },
+      config: 'ok',
+      // Staging has a host and a client id but no secret; production has no host.
+      instances: { sandbox: 'ready', development: 'ready', staging: 'incomplete', production: 'absent' },
       pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor']
     })
     assert.equal(calls.length, 1, 'only b2c --version ran')
@@ -63,8 +72,24 @@ test('core.status never throws: a missing or failing b2c is not found, with a re
     const { worker } = await mount(null, script, settings)
     const status = await worker.request('core.status', {})
     assert.deepEqual(status.b2c, { found: false, version: null, reason }, name)
-    assert.deepEqual(status.instances, { sandbox: false, development: false, staging: false, production: false }, name)
+    assert.equal(status.config, 'missing', name)
+    assert.deepEqual(status.instances, ABSENT, name)
     await worker.deactivate()
+  }
+})
+
+test('core.status says a dw.json that is not JSON is invalid, not that four roles are absent', async () => {
+  const root = makeWorkspace(`{ "hostname": "${INVENTED_DW.hostname}", "password": "${INVENTED_DW.password}" broken`)
+  try {
+    const { worker } = await mount(root, (call) => call.child.finish(0, VERSION))
+    const status = await worker.request('core.status', {})
+    assert.equal(status.config, 'invalid')
+    assert.deepEqual(status.instances, ABSENT)
+    assertNoSecrets(JSON.stringify(status), 'the answer')
+    assertNoSecrets(worker.logs.join('\n'), 'the log')
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
@@ -106,10 +131,32 @@ test('the uploading workspace, not the focused one, decides which dw.json is rea
     const spawn = fakeSpawner((call) => call.child.finish(0, VERSION))
     const worker = await mountWorker({ default: createActivate({ ...MACHINE, spawn: spawn.spawn }), deactivate }, { host })
     const status = await worker.request('core.status', {})
-    assert.equal(status.instances.development, true)
+    // Only the uploading workspace's file has a development host; neither has credentials.
+    assert.equal(status.instances.development, 'incomplete')
     await worker.deactivate()
   } finally {
     rmSync(focused, { recursive: true, force: true })
     rmSync(uploading, { recursive: true, force: true })
+  }
+})
+
+test('a workspace on another host is never read as a folder of this machine', async () => {
+  // The same path exists here and holds a dw.json, but the workspace lives elsewhere.
+  const root = makeWorkspace()
+  try {
+    for (const hostId of ['ssh:build-01', 'runtime:remote']) {
+      const { worker } = await mount(root, (call) => call.child.finish(0, VERSION), {}, hostId)
+      const status = await worker.request('core.status', {})
+      assert.equal(status.config, 'missing', hostId)
+      assert.deepEqual(status.instances, ABSENT, hostId)
+      await worker.deactivate()
+    }
+    for (const hostId of ['local', null]) {
+      const { worker } = await mount(root, (call) => call.child.finish(0, VERSION), {}, hostId)
+      assert.equal((await worker.request('core.status', {})).config, 'ok', String(hostId))
+      await worker.deactivate()
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
