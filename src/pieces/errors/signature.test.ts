@@ -49,7 +49,6 @@ test('the reviewer’s collisions: each pair is two errors', () => {
   const noTrace = (pipeline: string, logger: string, text: string) => `PipelineCallServlet|1|Sites-A-Site|${pipeline}|PipelineCall|s ${logger} ${text}`
   const pairs: [string, string][] = [
     [noTrace('Cart-Show', 'custom.Service', 'call failed with status 404'), noTrace('Cart-Show', 'custom.Service', 'call failed with status 500')],
-    [noTrace('Cart-Show', 'system.core', 'ISH-CORE-2368 Error executing script'), noTrace('Cart-Show', 'system.core', 'ISH-CORE-2482 Error executing script')],
     [noTrace('Cart-Show', 'custom.Basket', 'Basket could not be calculated'), noTrace('Account-Show', 'custom.Basket', 'Basket could not be calculated')],
     [
       noTrace('Cart-Show', 'system.core', "Error executing script 'app_x/cartridge/controllers/Cart.js': TypeError: x is undefined"),
@@ -58,9 +57,10 @@ test('the reviewer’s collisions: each pair is two errors', () => {
     [noTrace('Cart-Show', 'custom.Payment', 'Unknown payment processor PAYMENT_PROC_ADYEN_V2'), noTrace('Cart-Show', 'custom.Payment', 'Unknown payment processor PAYMENT_PROC_PAYPAL_V3')],
     // And more of the same kind.
     [noTrace('Cart-Show', 'custom.Service', 'HTTP/1.1 502 from upstream'), noTrace('Cart-Show', 'custom.Service', 'HTTP/1.1 504 from upstream')],
-    [noTrace('Cart-Show', 'custom.Service', 'Response 401 Unauthorized'), noTrace('Cart-Show', 'custom.Service', 'Response 403 Forbidden')],
+    [noTrace('Cart-Show', 'custom.Service', 'call failed with status code 401'), noTrace('Cart-Show', 'custom.Service', 'call failed with status code 403')],
     [noTrace('Cart-Show', 'custom.Service', 'rejected with statusCode=429'), noTrace('Cart-Show', 'custom.Service', 'rejected with statusCode=400')],
-    [noTrace('Cart-Show', 'custom.Db', 'ORA-00001 unique constraint'), noTrace('Cart-Show', 'custom.Db', 'ORA-01400 unique constraint')],
+    [noTrace('Cart-Show', 'custom.Db', 'insert failed, errorCode=1400'), noTrace('Cart-Show', 'custom.Db', 'insert failed, errorCode=2291')],
+    [noTrace('Cart-Show', 'custom.Codec', 'Base64Encoder failed'), noTrace('Cart-Show', 'custom.Codec', 'Base64Decoder failed')],
     [noTrace('Cart-Show', 'custom.Tax', 'tax failed with error code 17'), noTrace('Cart-Show', 'custom.Tax', 'tax failed with error code 18')]
   ]
   for (const [a, b] of pairs) assert.notEqual(signatureOf(a).signature, signatureOf(b).signature, `${a} / ${b}`)
@@ -80,6 +80,95 @@ test('what the collision rules keep apart is still one error when only its value
   assert.equal(signatureOf(traced('Cart-Show')).signature, signatureOf(traced('Account-Show')).signature)
   assert.equal(signatureOf(traced('Cart-Show')).identity.pipeline, null)
   assert.equal(signatureOf(line('Cart-Show', 'failed')).identity.pipeline, 'Cart-Show')
+})
+
+test('numbers of a customer or a business never survive: SKUs, orders, gift cards, postal and one-time codes', () => {
+  const line = (text: string) => `PipelineCallServlet|1|Sites-A-Site|COPlaceOrder-Submit|PipelineCall|s custom.Order ${text}`
+  const samples: [string, string, string][] = [
+    ['Product SKU-123456 not found', 'Product SKU-987654 not found', 'Product <code> not found'],
+    ['Payment failed for order GB-00012345', 'Payment failed for order GB-00067890', 'Payment failed for order <code>'],
+    ['Gift card GC-40021 balance check failed', 'Gift card GC-77310 balance check failed', 'Gift card <code> balance check failed'],
+    ['Password reset code: 5521 rejected', 'Password reset code: 9034 rejected', 'Password reset code: # rejected'],
+    ['Invalid verification code 483920', 'Invalid verification code 120577', 'Invalid verification code #'],
+    ['Unknown postal code 28013', 'Unknown postal code 08001', 'Unknown postal code #'],
+    ['Search returned 250 hits over the limit', 'Search returned 312 hits over the limit', 'Search returned # hits over the limit'],
+    ['Order 00012345 total 59.90 rejected', 'Order 77 total 1200.00 rejected', 'Order # total #.# rejected']
+  ]
+  for (const [a, b, expected] of samples) {
+    assert.equal(normalize(a), expected, a)
+    assert.ok(!/\d/.test(normalize(a)) && !/\d/.test(normalize(b)), `no digit of ${a} survives`)
+    assert.equal(signatureOf(line(a)).signature, signatureOf(line(b)).signature, `${a} / ${b}`)
+  }
+})
+
+test('only an HTTP status after its label, or an error code after its label, keeps its number', () => {
+  const kept: [string, string][] = [
+    ['call failed with status 404', 'call failed with status 404'],
+    ['call failed with status code 503', 'call failed with status code 503'],
+    ['rejected, statusCode=429', 'rejected, statusCode=429'],
+    ['HTTP 500 from upstream', 'HTTP 500 from upstream'],
+    ['failed with error code 17', 'failed with error code 17'],
+    ['failed, errorCode: 2048', 'failed, errorCode: 2048'],
+    ['failed, error-code=7', 'failed, error-code=7']
+  ]
+  for (const [input, expected] of kept) assert.equal(normalize(input), expected, input)
+  const dropped: [string, string][] = [
+    ['status 42 of the job', 'status # of the job'],
+    ['status 700 unknown', 'status # unknown'],
+    ['status 4041 unknown', 'status # unknown'],
+    ['code 404 sent', 'code # sent'],
+    ['errorCode=E17', 'errorCode=E#'],
+    ['status of order 404', 'status of order #']
+  ]
+  for (const [input, expected] of dropped) assert.equal(normalize(input), expected, input)
+})
+
+test('a host without a scheme becomes <host>; a file, a dw name or a Java package stays', () => {
+  const hosts: [string, string][] = [
+    ['Connection to shop.example.com refused', 'Connection to <host> refused'],
+    ['Lookup of mailhost.example.com timed out', 'Lookup of <host> timed out'],
+    ['Connecting to sftp.partner.example.org:22 failed', 'Connecting to <host> failed'],
+    ['Feed from cdn-03.example.net is stale', 'Feed from <host> is stale'],
+    ['Call to api.example.co.uk failed.', 'Call to <host> failed.'],
+    ['Shop shop.example.fr is down', 'Shop <host> is down']
+  ]
+  for (const [input, expected] of hosts) assert.equal(normalize(input), expected, input)
+  const line = (host: string) => `PipelineCallServlet|1|Sites-A-Site|Cart-Show|PipelineCall|s custom.Http Connection to ${host} refused`
+  assert.equal(signatureOf(line('shop.example.com')).signature, signatureOf(line('shop.example.fr')).signature)
+  assert.equal(signatureOf(line('cdn-03.example.net')).signature, signatureOf(line('cdn-17.example.net')).signature)
+
+  const kept = [
+    'java.lang.IllegalStateException thrown',
+    'dw.order.Basket.getProductLineItems failed',
+    'org.apache.commons.io failed',
+    'java.io failed',
+    'dw.io.File failed',
+    'loading app.js failed',
+    'loading jquery.min.js failed',
+    'loading Cart.js failed',
+    'reading dw.json failed',
+    'reading site.xml failed',
+    'reading messages.properties failed',
+    'reading helper.ds failed',
+    'reading product.isml failed',
+    'reading data.csv failed',
+    'value of basket.id is empty',
+    'logger custom.Cart and system.core'
+  ]
+  for (const input of kept) assert.equal(normalize(input), input, input)
+})
+
+test('IPv6 addresses become <ip>; a time does not', () => {
+  assert.equal(normalize('from 2001:db8::7a3f refused'), 'from <ip> refused')
+  assert.equal(normalize('from fe80::1 refused'), 'from <ip> refused')
+  assert.equal(normalize('from 2001:0db8:85a3:0000:0000:8a2e:0370:7334 refused'), 'from <ip> refused')
+  assert.equal(normalize('at 10:15:02 done'), 'at #:#:# done')
+})
+
+test('a two-letter path segment is a locale only in a storefront path', () => {
+  assert.equal(normalize('GET https://api.example.com/dw/shop/v1/baskets failed'), 'GET /dw/shop/v#/baskets failed')
+  assert.notEqual(normalize('GET https://api.example.com/dw/shop/v1/baskets failed'), normalize('GET https://api.example.com/ws/shop/v1/baskets failed'))
+  assert.equal(normalize('GET https://www.example.com/s/Shop/fr/cart failed'), 'GET /s/Shop/<locale>/cart failed')
 })
 
 test('two different errors do not share a signature', () => {
@@ -138,11 +227,11 @@ test('normalize removes each volatile part, and keeps the words around it', () =
     ['basket bcK8oiaagMVZ not found', 'basket <id> not found'],
     ['processor PAYMENT_PROC_ADYEN_V2 unknown', 'processor PAYMENT_PROC_ADYEN_V# unknown'],
     ['call failed with status 404', 'call failed with status 404'],
-    ['HTTP/1.1 503 from upstream', 'HTTP/1.1 503 from upstream'],
+    ['HTTP/1.1 503 from upstream', 'HTTP/#.# 503 from upstream'],
     ['statusCode=429 after 3 tries', 'statusCode=429 after # tries'],
     ['failed with error code 17', 'failed with error code 17'],
-    ['Response 502 Bad Gateway after 1200 ms', 'Response 502 Bad Gateway after # ms'],
-    ['ISH-CORE-2368 and ORA-00001 raised', 'ISH-CORE-2368 and ORA-00001 raised'],
+    ['Response 502 Bad Gateway after 1200 ms', 'Response # Bad Gateway after # ms'],
+    ['ISH-CORE-2368 and ORA-00001 raised', '<code> and <code> raised'],
     ["Error executing script 'app_x/cartridge/controllers/Cart.js#42': boom", "Error executing script 'app_x/cartridge/controllers/Cart.js': boom"],
     ['GET /on/demandware.store/Cart-Show?pid=12&qty=1 failed', 'GET /on/demandware.store/Cart-Show failed'],
     ['request 3f6c2a9e-1b7d-4c5e-9a0f-2d8e6b4c1a37 failed', 'request <uuid> failed'],
@@ -158,7 +247,7 @@ test('normalize removes each volatile part, and keeps the words around it', () =
   ]
   for (const [input, expected] of cases) assert.equal(normalize(input), expected, input)
   // Words that only look like ids stay whole.
-  for (const kept of ['TypeError: Cannot read property of undefined', 'deadbeef failed', 'ISH-CORE-2368 Error executing script', 'calculateLineTotal failed']) assert.equal(normalize(kept), kept)
+  for (const kept of ['TypeError: Cannot read property of undefined', 'deadbeef failed', 'Error executing script', 'calculateLineTotal failed', 'Base#Encoder failed']) assert.equal(normalize(kept), kept)
   assert.equal(normalize('x'.repeat(1000)).length, 300)
 })
 
