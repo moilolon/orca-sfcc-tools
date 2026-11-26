@@ -124,7 +124,7 @@ $cover = @{
   Accent = '#D9466B'
   AccentDark = '#7A1F3A'
   Title = 'SFCC Tools'
-  Text = @('Salesforce Commerce Cloud in Orca:', 'ISML colors, cartridge upload', 'and the new errors of your sandbox.')
+  Text = @('Salesforce Commerce Cloud in Orca:', 'ISML, cartridge upload', 'and the new errors of your sandbox.')
 }
 
 $cover.Glyph = {
