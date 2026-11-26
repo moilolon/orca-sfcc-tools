@@ -86,6 +86,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     list: async () => (workspace ? [workspace] : []),
     focused: async () => workspace,
     uploading: async () => null,
+    upload: async () => null,
     setUploading: async () => {},
     configRoot: async () => workspace?.path ?? null
   }

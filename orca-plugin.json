@@ -119,6 +119,35 @@
       {
         "id": "debugger.stepOut",
         "title": "SFCC: Step out (debugger)"
+      },
+      {
+        "id": "sandbox.pick",
+        "title": "SFCC: Upload from this workspace",
+        "when": "workspace"
+      },
+      {
+        "id": "sandbox.release",
+        "title": "SFCC: Stop uploading"
+      },
+      {
+        "id": "sandbox.deploy",
+        "title": "SFCC: Deploy everything again"
+      },
+      {
+        "id": "sandbox.reload",
+        "title": "SFCC: Reload the code version"
+      },
+      {
+        "id": "sandbox.refresh",
+        "title": "SFCC: Refresh sandbox status"
+      },
+      {
+        "id": "sandbox.start",
+        "title": "SFCC: Start sandbox"
+      },
+      {
+        "id": "sandbox.stop",
+        "title": "SFCC: Stop sandbox"
       }
     ],
     "statusBarItems": [
@@ -154,37 +183,6 @@
         "extensions": [
           ".isml"
         ]
-      }
-    ],
-    "commands": [
-      {
-        "id": "sandbox.pick",
-        "title": "SFCC: Upload from this workspace",
-        "when": "workspace"
-      },
-      {
-        "id": "sandbox.release",
-        "title": "SFCC: Stop uploading"
-      },
-      {
-        "id": "sandbox.deploy",
-        "title": "SFCC: Deploy everything again"
-      },
-      {
-        "id": "sandbox.reload",
-        "title": "SFCC: Reload the code version"
-      },
-      {
-        "id": "sandbox.refresh",
-        "title": "SFCC: Refresh sandbox status"
-      },
-      {
-        "id": "sandbox.start",
-        "title": "SFCC: Start sandbox"
-      },
-      {
-        "id": "sandbox.stop",
-        "title": "SFCC: Stop sandbox"
       }
     ],
     "events": [
