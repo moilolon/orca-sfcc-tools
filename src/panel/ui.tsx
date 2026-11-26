@@ -2,7 +2,7 @@
 // look like one panel. Each block is built only from Orca's own components and holds no text of
 // its own: the caller words everything in Orca's language. CLAUDE.md, "Panel look", says which
 // block goes where.
-import { Badge, Box, Button, Callout, EmptyState, Row, Stack, Text, type IconName, type OrcaNode, type Tone } from 'orca'
+import { Badge, Box, Button, Callout, EmptyState, Row, Spinner, Stack, Text, type IconName, type OrcaNode, type Tone } from 'orca'
 
 /**
  * The plugin's tones, by what they mean rather than by colour: `ok` done or ready, `busy` working
@@ -26,14 +26,22 @@ export function StateBadge({ tone, children }: { tone: StateTone; children: stri
 }
 
 /**
- * A small round mark in a tone: filled for a state, a hollow ring for `off`. It carries no words,
- * so it always sits beside a text that says the same.
+ * A small round mark in a tone: a spinner while `busy`, a filled dot for the other states, a
+ * hollow ring for `off`. It sits beside a text that says the same; `label` names a spinner for
+ * screen readers.
  */
-export function StateMark({ tone }: { tone: StateTone }) {
-  return tone === 'off' ? (
-    <Box width={8} height={8} radius="full" border={true} shrink={false} />
-  ) : (
-    <Box width={8} height={8} radius="full" border={TONES[tone]} background={TONES[tone]} shrink={false} />
+export function StateMark({ tone, label = '' }: { tone: StateTone; label?: string }) {
+  // Every mark takes the same width, so the names beside a dot and beside a spinner line up.
+  return (
+    <Box width={16} align="center" justify="center" shrink={false}>
+      {tone === 'busy' ? (
+        <Spinner label={label} labelHidden />
+      ) : tone === 'off' ? (
+        <Box width={10} height={10} radius="full" border={true} />
+      ) : (
+        <Box width={10} height={10} radius="full" border={TONES[tone]} background={TONES[tone]} />
+      )}
+    </Box>
   )
 }
 
@@ -122,7 +130,7 @@ export function ListRow({ tone, title, note, noteTone, current = false }: { tone
   return (
     <Row justify="between" align="center" gap="sm">
       <Row align="center" gap="sm">
-        <StateMark tone={tone} />
+        <StateMark tone={tone} label={note ?? title} />
         <Text truncate weight={current ? 'medium' : 'regular'}>
           {title}
         </Text>

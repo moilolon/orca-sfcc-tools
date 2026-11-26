@@ -8,6 +8,7 @@
 // delivered and has a view, what it listens to and what it draws. Nothing here names a piece.
 import {
   atom,
+  Box,
   Button,
   Callout,
   env,
@@ -19,9 +20,8 @@ import {
   set,
   settings,
   Skeleton,
+  Separator,
   Stack,
-  Tab,
-  Tabs,
   Text,
   type OrcaNode,
   type PanelContext
@@ -110,15 +110,15 @@ async function load(): Promise<void> {
 }
 
 /** What needs the person's attention first, worded in a few words for the status line. */
-type Attention = { key: CoreMessageKey; tone: 'danger' | 'warning' }
+type Attention = { key: CoreMessageKey; tone: StateTone }
 
 function attentionOf(current: CoreStatus | null, failure: string | null, failedPieces: number): Attention | null {
-  if (failure) return { key: 'attentionUnreadable', tone: 'danger' }
-  if (current?.config === 'invalid') return { key: 'attentionConfigInvalid', tone: 'danger' }
-  if (current && !current.b2c.found) return { key: 'attentionB2c', tone: 'danger' }
-  if (failedPieces > 0) return { key: 'attentionPiece', tone: 'danger' }
-  if (current?.config === 'missing') return { key: 'attentionConfigMissing', tone: 'warning' }
-  if (current && ROLES.some((role) => current.instances[role] === 'incomplete')) return { key: 'attentionIncomplete', tone: 'warning' }
+  if (failure) return { key: 'attentionUnreadable', tone: 'failed' }
+  if (current?.config === 'invalid') return { key: 'attentionConfigInvalid', tone: 'failed' }
+  if (current && !current.b2c.found) return { key: 'attentionB2c', tone: 'failed' }
+  if (failedPieces > 0) return { key: 'attentionPiece', tone: 'failed' }
+  if (current?.config === 'missing') return { key: 'attentionConfigMissing', tone: 'attention' }
+  if (current && ROLES.some((role) => current.instances[role] === 'incomplete')) return { key: 'attentionIncomplete', tone: 'attention' }
   return null
 }
 
@@ -128,44 +128,44 @@ function RefreshButton({ busy }: { busy: boolean }) {
 
 /**
  * The line under the bar: each environment by tone, the b2c version, and, when something needs
- * attention, a button that says what and opens the setup view.
+ * attention, what in a few words and a button to the setup view (Orca's buttons take no warning
+ * tone, so the words go in a badge).
  */
 function StatusLine({ current, failure, busy, attention, onAttention }: { current: CoreStatus | null; failure: string | null; busy: boolean; attention: Attention | null; onAttention?: () => void }) {
   let state: OrcaNode = null
   if (current) {
-    const b2c = current.b2c.found ? (
-      <Text key="b2c" size="sm" muted>
-        {text('b2cShort', { version: current.b2c.version ?? '' }).trim()}
-      </Text>
-    ) : (
-      <StateBadge key="b2c" tone="failed">
-        {text('b2cShort', { version: '' }).trim()}
-      </StateBadge>
-    )
     state = [
       ...ROLES.map((role) => (
         <StateBadge key={role} tone={ROLE_STATES[current.instances[role]].tone}>
           {text(ROLE_SHORT_KEYS[role])}
         </StateBadge>
       )),
-      b2c
+      current.b2c.found ? (
+        <Text key="b2c" size="sm" muted>
+          {text('b2cShort', { version: current.b2c.version ?? '' }).trim()}
+        </Text>
+      ) : (
+        <StateBadge key="b2c" tone="failed">
+          {text('b2cShort', { version: '' }).trim()}
+        </StateBadge>
+      )
     ]
   } else if (!failure) {
-    state = <Skeleton lines={1} label={text('loading')} />
+    // A skeleton has no width of its own: the box gives it room in the line.
+    state = (
+      <Box key="loading" grow minWidth={96}>
+        <Skeleton lines={1} label={text('loading')} />
+      </Box>
+    )
   }
+  // One row that wraps item by item; the growing box keeps the buttons on the right.
   return (
-    <Row justify="between" align="center" gap="sm" wrap>
-      <Row align="center" gap="xs" wrap>
-        {state}
-      </Row>
-      <Row align="center" gap="xs">
-        {attention && onAttention ? (
-          <Button size="xs" variant="ghost" tone={attention.tone} icon="warning" onPress={onAttention}>
-            {text(attention.key)}
-          </Button>
-        ) : null}
-        <RefreshButton busy={busy} />
-      </Row>
+    <Row align="center" gap="xs" wrap>
+      {state}
+      <Box grow />
+      {attention ? <StateBadge tone={attention.tone}>{text(attention.key)}</StateBadge> : null}
+      {attention && onAttention ? <IconButton icon="settings" size="sm" variant="ghost" label={text('openSetup')} onPress={onAttention} /> : null}
+      <RefreshButton busy={busy} />
     </Row>
   )
 }
@@ -255,7 +255,7 @@ function Pieces({ sections, failed, locale }: { sections: readonly PanelSection[
         failed.includes(section.id) ? (
           <ListRow key={section.id} tone="failed" title={section.title(locale)} note={text('pieceFailed')} noteTone="failed" />
         ) : (
-          <ListRow key={section.id} tone="ok" title={section.title(locale)} note={text('pieceDelivered')} />
+          <ListRow key={section.id} tone="ok" title={section.title(locale)} note={text('pieceDelivered')} noteTone="ok" />
         )
       )}
     </Group>
@@ -293,6 +293,26 @@ function PieceView({ section, failed, locale }: { section: PanelSection; failed:
   if (failed) return <FailedSection section={section} locale={locale} />
   const body = section.render(locale)
   return body === null || body === undefined || body === false ? <Empty title={text('emptyTitle')} guidance={text('emptyGuidance')} icon={section.icon} /> : body
+}
+
+/**
+ * The bar: one button per view, the open one solid, wrapping onto a second line when the sidebar
+ * is narrow (a tab strip would scroll the whole panel sideways). The setup view is the last.
+ */
+function Bar({ views, active, locale }: { views: readonly PanelSection[]; active: string; locale: string }) {
+  const pick = (view: string) => () => set(lastView, view)
+  return (
+    <Row align="center" gap="xs" wrap>
+      {views.map((section) => (
+        <Button key={`view-${section.id}`} size="sm" variant={section.id === active ? 'solid' : 'ghost'} icon={section.icon} onPress={pick(section.id)}>
+          {section.title(locale)}
+        </Button>
+      ))}
+      <Button key={`view-${SETUP_VIEW}`} size="sm" variant={active === SETUP_VIEW ? 'solid' : 'ghost'} icon="settings" onPress={pick(SETUP_VIEW)}>
+        {text('setup')}
+      </Button>
+    </Row>
+  )
 }
 
 /** The view to draw: the one last picked while it still exists, else the first piece's. */
@@ -345,29 +365,20 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
 
       const active = activeView(views, read(lastView))
       const attention = attentionOf(current, failure, failed.length)
-      const line = (onAttention?: () => void) => <StatusLine current={current} failure={failure} busy={busy} attention={attention} onAttention={onAttention} />
-      const toSetup = () => set(lastView, SETUP_VIEW)
+      const open = views.find((section) => section.id === active)
       return (
-        <Tabs label={text('views')} value={active} onChange={(value) => set(lastView, value)}>
-          {views.map((section) => (
-            <Tab key={section.id} value={section.id} label={section.title(locale)} icon={section.icon}>
-              {section.id === active ? (
-                <Stack gap="md">
-                  {line(toSetup)}
-                  <PieceView section={section} failed={failed.includes(section.id)} locale={locale} />
-                </Stack>
-              ) : null}
-            </Tab>
-          ))}
-          <Tab key={SETUP_VIEW} value={SETUP_VIEW} label={text('setup')} icon="settings">
-            {active === SETUP_VIEW ? (
-              <Stack gap="md">
-                {line()}
-                <SetupView sections={sections} failed={failed} locale={locale} busy={busy} />
-              </Stack>
-            ) : null}
-          </Tab>
-        </Tabs>
+        <Stack gap="sm">
+          <Bar views={views} active={active} locale={locale} />
+          <Separator />
+          <StatusLine current={current} failure={failure} busy={busy} attention={attention} onAttention={open ? () => set(lastView, SETUP_VIEW) : undefined} />
+          <Box paddingY="xs">
+            {open ? (
+              <PieceView section={open} failed={failed.includes(open.id)} locale={locale} />
+            ) : (
+              <SetupView sections={sections} failed={failed} locale={locale} busy={busy} />
+            )}
+          </Box>
+        </Stack>
       )
     }
   }

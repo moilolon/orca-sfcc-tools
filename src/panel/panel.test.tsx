@@ -84,8 +84,7 @@ const VIEWS = panelOver([
 
 test('with no piece delivered, the setup view is the whole panel and there is no bar', async () => {
   panel = await mount(CORE, { host: hostAnswering(FOUND), locale: 'en' })
-  assert.equal(panel.find({ type: 'Tabs' }), null)
-  assert.equal(panel.find({ role: 'tab' }), null)
+  assert.deepEqual(barOf(panel), [])
   assert.ok(panel.find({ type: 'Heading', text: 'Setup' }))
   assert.ok(panel.find({ role: 'button', label: 'Refresh' }))
   assert.ok(panel.find({ text: 'Found, version 9.8.7' }))
@@ -199,15 +198,36 @@ test('words a failure that has no code as the panel’s own action_failed, in bo
 // ---------------------------------------------------------------------------------------------
 // The bar of views
 
-function tabs(target: TestPanel): string[] {
-  return target.findAll({ role: 'tab' }).map((tab) => tab.label ?? '')
+/** The buttons of the bar: the only `Button`s drawn `solid` (the open view) or `ghost`. */
+function barButtons(target: TestPanel) {
+  return target.findAll({ type: 'Button' }).filter((button) => button.props.variant === 'solid' || button.props.variant === 'ghost')
+}
+
+/** The names in the bar, in order. */
+function barOf(target: TestPanel): string[] {
+  return barButtons(target).map((button) => button.text)
+}
+
+/** The views of VIEWS by name, as the bar shows them in English. */
+const VIEW_NAMES: Record<string, string> = { sandbox: 'Sandbox and upload', errors: 'Errors', setup: 'Setup' }
+
+/** The view open now: the one whose button in the bar is solid. */
+function openView(target: TestPanel): string | null {
+  const open = barButtons(target).filter((button) => button.props.variant === 'solid')
+  assert.ok(open.length <= 1, 'one view open at most')
+  return Object.keys(VIEW_NAMES).find((view) => VIEW_NAMES[view] === open[0]?.text) ?? null
+}
+
+/** Opens a view from the bar. */
+function pick(target: TestPanel, view: string): Promise<void> {
+  return target.press({ type: 'Button', text: VIEW_NAMES[view] })
 }
 
 test('the bar holds one view per delivered piece that has one, then the setup view', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en' })
-  assert.deepEqual(tabs(panel), ['Sandbox and upload', 'Errors', 'Setup'])
+  assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'])
   // The first view is open, with its body.
-  assert.equal(panel.valueOf({ type: 'Tabs' }), 'sandbox')
+  assert.equal(openView(panel), 'sandbox')
   assert.ok(panel.find({ text: 'Sandbox and upload body' }))
   assert.equal(panel.find({ text: 'Errors body' }), null)
   // A piece with no view and one not delivered are not in the bar.
@@ -217,12 +237,12 @@ test('the bar holds one view per delivered piece that has one, then the setup vi
   assert.deepEqual(panel.refusals, [])
   panel.unmount()
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'es' })
-  assert.deepEqual(tabs(panel), ['Sandbox y subida', 'Errores', 'Configuración'])
+  assert.deepEqual(barOf(panel), ['Sandbox y subida', 'Errores', 'Configuración'])
 })
 
 test('the setup view lists the delivered pieces discreetly, those with no view included', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en' })
-  await panel.select({ type: 'Tabs' }, 'setup')
+  await pick(panel, 'setup')
   assert.ok(panel.find({ text: 'Pieces' }))
   for (const name of ['ISML', 'Sandbox and upload', 'Errors']) assert.ok(panel.find({ text: name }), name)
   assert.equal(panel.findAll({ text: 'Available' }).length, 3)
@@ -234,21 +254,21 @@ test('the setup view lists the delivered pieces discreetly, those with no view i
 
 test('the last view is remembered, and one that no longer exists falls back to the first', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en' })
-  await panel.select({ type: 'Tabs' }, 'errors')
+  await pick(panel, 'errors')
   assert.ok(panel.find({ text: 'Errors body' }))
   assert.equal(panel.persisted.plugin.view, 'errors')
   panel.unmount()
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en', persisted: { plugin: { view: 'errors' } } })
-  assert.equal(panel.valueOf({ type: 'Tabs' }), 'errors')
+  assert.equal(openView(panel), 'errors')
   assert.ok(panel.find({ text: 'Errors body' }))
   panel.unmount()
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en', persisted: { plugin: { view: 'setup' } } })
-  assert.equal(panel.valueOf({ type: 'Tabs' }), 'setup')
+  assert.equal(openView(panel), 'setup')
   panel.unmount()
   // A piece that is gone, or one with no view, is not a view to open.
   for (const view of ['debugger', 'isml']) {
     panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en', persisted: { plugin: { view } } })
-    assert.equal(panel.valueOf({ type: 'Tabs' }), 'sandbox', view)
+    assert.equal(openView(panel), 'sandbox', view)
     panel.unmount()
   }
   panel = undefined
@@ -267,30 +287,35 @@ test('a delivered piece with nothing to show draws an empty state with a line of
 // ---------------------------------------------------------------------------------------------
 // The status line
 
-/** The status line's attention button, the one with a warning icon, or null. */
+const ATTENTION = /^(Setup unreadable|dw\.json invalid|b2c not found|A piece did not start|No dw\.json|Incomplete environment|Configuración ilegible|dw\.json no válido|b2c no encontrado|Una pieza no ha arrancado|No hay dw\.json|Entorno incompleto)$/
+
+/** The status line's button to the setup view, or null. */
 function attentionButton(target: TestPanel) {
-  return target.findAll({ role: 'button' }).find((button) => button.props.icon === 'warning') ?? null
+  return target.find({ role: 'button', label: /^(Open setup|Abrir configuración)$/ })
 }
 
+/** What the status line says needs attention, or null; a button to the setup view goes with it. */
 function attentionOf(target: TestPanel): string | null {
-  return attentionButton(target)?.text ?? null
+  const badge = target.findAll({ type: 'Badge' }).find((item) => ATTENTION.test(item.text))
+  assert.equal(Boolean(badge), Boolean(attentionButton(target)), 'the words and the button go together')
+  return badge?.text ?? null
 }
 
 test('the status line shows each environment by tone and the b2c version', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en' })
   const tones = Object.fromEntries(panel.findAll({ type: 'Badge' }).map((badge) => [badge.text, badge.props.tone]))
-  assert.deepEqual(tones, { SBX: 'success', DEV: 'success', STG: 'warning', PRD: 'neutral' })
+  assert.deepEqual(tones, { SBX: 'success', DEV: 'success', STG: 'warning', PRD: 'neutral', 'Incomplete environment': 'warning' })
   assert.ok(panel.find({ text: 'b2c 9.8.7' }))
   assert.ok(panel.find({ role: 'button', label: 'Refresh' }))
   panel.unmount()
-  panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'es' })
+  panel = await mount(VIEWS, { host: hostAnswering(ALL_READY), locale: 'es' })
   assert.deepEqual(panel.findAll({ type: 'Badge' }).map((badge) => badge.text), ['SBX', 'DEV', 'STG', 'PRD'])
   assert.ok(panel.find({ role: 'button', label: 'Actualizar' }))
 })
 
 test('with everything ready the status line asks for nothing', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(ALL_READY), locale: 'en' })
-  assert.equal(attentionButton(panel), null)
+  assert.equal(attentionOf(panel), null)
   assert.equal(panel.findAll({ type: 'Badge' }).filter((badge) => badge.props.tone === 'success').length, 4)
 })
 
@@ -304,12 +329,12 @@ test('the status line says what needs attention, by tone, and leads to the setup
   ]
   for (const { status, en, es, tone } of cases) {
     panel = await mount(VIEWS, { host: hostAnswering(status), locale: 'en' })
-    const button = attentionButton(panel)
-    assert.equal(button?.text, en)
-    assert.equal(button?.props.tone, tone, en)
-    await panel.press({ role: 'button', text: en })
-    assert.equal(panel.valueOf({ type: 'Tabs' }), 'setup', en)
-    // The setup view does not point at itself.
+    assert.equal(attentionOf(panel), en)
+    assert.equal(panel.find({ type: 'Badge', text: en })?.props.tone, tone, en)
+    await panel.press({ role: 'button', label: 'Open setup' })
+    assert.equal(openView(panel), 'setup', en)
+    // The setup view still says it, but does not point at itself.
+    assert.ok(panel.find({ type: 'Badge', text: en }), en)
     assert.equal(attentionButton(panel), null, en)
     panel.unmount()
     panel = await mount(VIEWS, { host: hostAnswering(status), locale: 'es' })
@@ -390,17 +415,17 @@ test('a section whose setup throws shows as not started until the panel is reope
   const shown = async () => {
     assert.ok(panel, 'mounted')
     // Its view stays in the bar and says why it is empty; its body is not drawn.
-    assert.deepEqual(tabs(panel), ['Errors', 'Sandbox and upload', 'Setup'])
-    await panel.select({ type: 'Tabs' }, 'errors')
+    assert.deepEqual(barOf(panel), ['Errors', 'Sandbox and upload', 'Setup'])
+    await pick(panel, 'errors')
     assert.match(panel.summary().join('\n'), /Errors could not start/)
     assert.ok(panel.find({ text: /^Its part of this panel failed to start/ }))
     assert.equal(panel.find({ text: 'errors body' }), null)
     assert.equal(attentionOf(panel), 'A piece did not start')
     // The other section started and draws its body.
-    await panel.select({ type: 'Tabs' }, 'sandbox')
+    await pick(panel, 'sandbox')
     assert.ok(panel.find({ text: 'uploads: 0' }))
     // The setup view lists it as not started.
-    await panel.select({ type: 'Tabs' }, 'setup')
+    await pick(panel, 'setup')
     assert.equal(panel.findAll({ text: 'Not started' }).length, 1)
     assert.equal(panel.findAll({ text: 'Available' }).length, 1)
   }
@@ -419,7 +444,7 @@ test('a section whose setup throws shows as not started until the panel is reope
   panel = await mount(module, { host: hostAnswering(ALL_READY), locale: 'es' })
   assert.match(panel.summary().join('\n'), /Errores no ha podido arrancar/)
   assert.equal(attentionOf(panel), 'Una pieza no ha arrancado')
-  await panel.select({ type: 'Tabs' }, 'setup')
+  await panel.press({ type: 'Button', text: 'Configuración' })
   assert.equal(panel.findAll({ text: 'No ha arrancado' }).length, 1)
   assert.equal(panel.findAll({ text: 'Disponible' }).length, 1)
 
@@ -430,7 +455,7 @@ test('a section whose setup throws shows as not started until the panel is reope
   assert.equal(panel.find({ text: /could not start/ }), null)
   assert.ok(panel.find({ text: 'errors body' }))
   assert.equal(attentionButton(panel), null)
-  await panel.select({ type: 'Tabs' }, 'setup')
+  await pick(panel, 'setup')
   assert.equal(panel.find({ text: 'Not started' }), null)
   assert.equal(panel.findAll({ text: 'Available' }).length, 2)
 })
@@ -439,7 +464,7 @@ test('a section whose setup throws with no view of its own is still shown as not
   const failing: PanelSection = { ...stub('isml', 'ISML', 'ISML'), hasView: false, setup: () => { throw new Error('broken') } }
   panel = await mount(panelOver([failing]), { host: hostAnswering(ALL_READY), locale: 'en' })
   // The setup view is the whole panel, and says so.
-  assert.equal(panel.find({ type: 'Tabs' }), null)
+  assert.deepEqual(barOf(panel), [])
   assert.match(panel.summary().join('\n'), /ISML could not start/)
   assert.equal(panel.findAll({ text: 'Not started' }).length, 1)
 })
@@ -448,7 +473,7 @@ test('which views the bar holds comes from the sections, not from the panel', as
   // A piece delivered with no view, or with a view but not delivered: neither gets a view.
   const module = panelOver([{ ...viewOf('sandbox', 'Sandbox and upload', 'Sandbox y subida'), hasView: false }, stub('errors', 'Errors', 'Errores')])
   panel = await mount(module, { host: hostAnswering(FOUND), locale: 'en' })
-  assert.equal(panel.find({ type: 'Tabs' }), null)
+  assert.deepEqual(barOf(panel), [])
   assert.ok(panel.find({ text: 'Sandbox and upload' }))
   assert.equal(panel.findAll({ text: 'Available' }).length, 1)
   assert.equal(panel.find({ text: 'Sandbox and upload body' }), null, 'a piece with no view is never drawn')
@@ -463,10 +488,10 @@ test('the plugin’s own panel has a view for every delivered piece with one, an
     panel = await mount(panelModule, { host: hostAnswering(FOUND), locale })
     const setup = locale === 'es' ? 'Configuración' : 'Setup'
     if (views.length === 0) {
-      assert.equal(panel.find({ type: 'Tabs' }), null, locale)
+      assert.deepEqual(barOf(panel), [], locale)
       assert.ok(panel.find({ type: 'Heading', text: setup }), locale)
     } else {
-      assert.deepEqual(tabs(panel), [...views.map((section) => section.title(locale)), setup], locale)
+      assert.deepEqual(barOf(panel), [...views.map((section) => section.title(locale)), setup], locale)
     }
     assert.deepEqual(panel.errors, [], locale)
     assert.deepEqual(panel.warnings, [], locale)

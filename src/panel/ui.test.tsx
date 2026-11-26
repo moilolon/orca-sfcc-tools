@@ -28,15 +28,31 @@ test('StateBadge draws its words in the tone’s colour', async () => {
   assert.equal(badge?.props.tone, 'warning')
 })
 
-test('StateMark is a small filled dot, or a hollow ring when off', async () => {
+test('StateMark is a dot, a hollow ring when off, a spinner while busy, all the same width', async () => {
+  /** The mark itself, inside the box that gives every mark one width. */
+  const markOf = (shown: TestPanel) => {
+    const frame = shown.tree()
+    assert.ok(frame && typeof frame === 'object', 'drawn')
+    assert.equal(frame.type, 'Box')
+    assert.equal(frame.props?.width, 16)
+    assert.equal(frame.props?.shrink, false)
+    return shown.findAll({ type: 'Box' }).find((box) => box.props.width === 10)
+  }
   let shown = await draw(() => <StateMark tone="ok" />)
-  let mark = shown.find({ type: 'Box' })
-  assert.deepEqual({ ...mark?.props }, { width: 8, height: 8, radius: 'full', border: 'success', background: 'success', shrink: false })
+  assert.deepEqual({ ...markOf(shown)?.props }, { width: 10, height: 10, radius: 'full', border: 'success', background: 'success' })
+  shown.unmount()
+  shown = await draw(() => <StateMark tone="failed" />)
+  assert.equal(markOf(shown)?.props.background, 'danger')
   shown.unmount()
   shown = await draw(() => <StateMark tone="off" />)
-  mark = shown.find({ type: 'Box' })
-  assert.equal(mark?.props.border, true)
-  assert.equal(mark?.props.background, undefined)
+  assert.equal(markOf(shown)?.props.border, true)
+  assert.equal(markOf(shown)?.props.background, undefined)
+  shown.unmount()
+  shown = await draw(() => <StateMark tone="busy" label="Uploading" />)
+  assert.equal(markOf(shown), undefined)
+  const spinner = shown.find({ type: 'Spinner' })
+  assert.equal(spinner?.props.label, 'Uploading')
+  assert.equal(spinner?.props.labelHidden, true)
 })
 
 test('LabelledRow puts the label on the left and the value on the right, cutting a long text', async () => {
@@ -111,14 +127,15 @@ test('ErrorState says what failed and why, and retries only when given a way to'
 
 test('ListRow leads with a state mark and ends with a short note', async () => {
   let shown = await draw(() => <ListRow tone="busy" title="feature-cart" note="uploading…" noteTone="busy" current />)
-  assert.equal(shown.find({ type: 'Box' })?.props.background, 'accent')
+  // The spinner is named by the note, which says the same.
+  assert.equal(shown.find({ type: 'Spinner' })?.props.label, 'uploading…')
   const name = shown.find({ text: 'feature-cart' })
   assert.equal(name?.props.weight, 'medium')
   assert.equal(name?.props.truncate, true)
   assert.equal(shown.find({ text: 'uploading…' })?.props.tone, 'accent')
   shown.unmount()
   shown = await draw(() => <ListRow tone="off" title="main" note="idle" />)
-  assert.equal(shown.find({ type: 'Box' })?.props.border, true)
+  assert.equal(shown.findAll({ type: 'Box' }).find((box) => box.props.width === 10)?.props.border, true)
   assert.equal(shown.find({ text: 'main' })?.props.weight, 'regular')
   assert.equal(shown.find({ text: 'idle' })?.props.muted, true)
   shown.unmount()
