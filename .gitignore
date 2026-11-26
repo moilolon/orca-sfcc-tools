@@ -1,3 +1,5 @@
+node_modules/
+# Typings and captures Orca writes into the plugin folder
+.orca/
 # Worktrees of agent sessions and Orca workspaces
 .claude/worktrees/
-node_modules/

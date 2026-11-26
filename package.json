@@ -1,10 +1,20 @@
 {
   "name": "orca-sfcc-tools",
   "private": true,
+  "description": "Development tooling only: Orca loads the plugin from source, with no build step.",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.18" },
   "volta": { "node": "24.22.3" },
   "scripts": {
-    "test": "node --test"
+    "types": "orca plugin types .",
+    "typecheck": "orca plugin types . && tsc -p . --noEmit",
+    "test": "orca plugin test .",
+    "check": "orca plugin check .",
+    "validate": "orca plugin validate .",
+    "manifest": "node scripts/build-manifest.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.6.3"
   }
 }

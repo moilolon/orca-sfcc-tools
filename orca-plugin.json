@@ -1,0 +1,89 @@
+{
+  "manifestVersion": 2,
+  "id": "sfcc-tools",
+  "name": "SFCC Tools",
+  "version": "0.1.0",
+  "description": "Salesforce Commerce Cloud work in Orca: ISML, cartridge upload, sandbox status and the new errors of its log, over the official b2c CLI.",
+  "repository": "https://github.com/moilolon/orca-sfcc-tools",
+  "author": {
+    "name": "moilolon"
+  },
+  "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "The plugin name beside a panel with the sandbox status, the upload of each cartridge, the new errors of the log and a line of ISML"
+  },
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "sfcc",
+        "title": "SFCC",
+        "icon": "cloud",
+        "entry": "src/panel/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "settings": [
+      {
+        "key": "b2cPath",
+        "title": "b2c path",
+        "description": "The b2c CLI to run: a name found on PATH, or the full path to it.",
+        "type": "string",
+        "default": "b2c",
+        "placeholder": "b2c"
+      },
+      {
+        "key": "configFile",
+        "title": "Configuration file",
+        "description": "A dw.json to read instead of the workspace's own. Empty: dw.json at the root of the workspace, or of the project's main checkout when a worktree has none. A relative path starts at the workspace.",
+        "type": "string",
+        "default": "",
+        "placeholder": "dw.json"
+      },
+      {
+        "key": "developmentSuffix",
+        "title": "Development key suffix",
+        "description": "Appended to each key of dw.json (hostname, client-id, ...) to find the development instance.",
+        "type": "string",
+        "default": "-dev"
+      },
+      {
+        "key": "stagingSuffix",
+        "title": "Staging key suffix",
+        "description": "Appended to each key of dw.json (hostname, client-id, ...) to find the staging instance.",
+        "type": "string",
+        "default": "-stg"
+      },
+      {
+        "key": "productionSuffix",
+        "title": "Production key suffix",
+        "description": "Appended to each key of dw.json (hostname, client-id, ...) to find the production instance.",
+        "type": "string",
+        "default": "-prd"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "settings:own"
+    },
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "workspace:write"
+    },
+    {
+      "kind": "notifications:show"
+    }
+  ]
+}
