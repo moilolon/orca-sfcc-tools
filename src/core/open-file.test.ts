@@ -151,6 +151,25 @@ test('on Linux and macOS: the bundled orca, no environment added', async () => {
   assert.deepEqual(spawner.calls[0].options.env, { PATH: '/usr/bin' })
 })
 
+test('a folder whose name starts with two dots is inside the workspace', async () => {
+  assert.ok(isInside('C:\\work\\shop', 'C:\\work\\shop\\..cache\\a.js', 'win32'))
+  assert.ok(isInside('/w', '/w/..cache/a.js', 'linux'))
+  assert.ok(!isInside('/w', '/w/../a.js', 'linux'))
+  assert.ok(!isInside('/w', '/', 'linux'))
+  const odd = 'C:\\work\\shop\\..cache\\a.js'
+  const { open, calls } = windows({}, [WINDOWS_ORCA, odd])
+  assert.deepEqual(await open({ root: WINDOWS_ROOT, path: odd }), { opened: true })
+  assert.equal(calls[0].args[2], odd)
+})
+
+test('the file opened is the one checked: a link inside the workspace opens its target', async () => {
+  const link = 'C:\\work\\shop\\link.js'
+  const target = 'C:\\work\\shop\\cartridges\\real.js'
+  const { open, calls } = windows({ realPath: async (path) => (path === link ? target : path) }, [WINDOWS_ORCA, link, target])
+  assert.deepEqual(await open({ root: WINDOWS_ROOT, path: 'link.js' }), { opened: true })
+  assert.equal(calls[0].args[2], target)
+})
+
 test('isInside compares whole path segments, ignoring case on Windows only', () => {
   assert.ok(isInside('C:\\work\\shop', 'c:\\WORK\\shop\\a.js', 'win32'))
   assert.ok(!isInside('C:\\work\\shop', 'C:\\work\\shop-other\\a.js', 'win32'))

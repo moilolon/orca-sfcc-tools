@@ -103,7 +103,8 @@ export function isInside(root: string, path: string, platform: string): boolean 
   const api = pathFor(platform)
   const fold = (value: string) => (platform === 'win32' ? value.toLowerCase() : value)
   const rel = api.relative(fold(root), fold(path))
-  return rel === '' || (!rel.startsWith('..') && !api.isAbsolute(rel))
+  // `..cache` is a folder of the workspace; only `..` itself, or `..` and a separator, leaves it.
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + api.sep) && !api.isAbsolute(rel))
 }
 
 function valueOf(env: Record<string, string | undefined>, wanted: string): string | undefined {
@@ -205,11 +206,14 @@ export function createOpenFile(deps: OpenFileDeps = {}): OpenFile {
     if (realRoot === null || realFile === null || !(await isFile(realFile))) return { opened: false, reason: 'not_found' }
     // A link inside the workspace may point out of it.
     if (!isInside(realRoot, realFile, platform)) return { opened: false, reason: 'outside_workspace' }
+    // The file opened is the one checked: its real path, written under the workspace's folder as
+    // Orca knows it, so a link changed after the check cannot send the call elsewhere.
+    const opened = api.join(root, api.relative(realRoot, realFile))
     const orca = await findOrca({ execPath: deps.execPath ?? process.execPath, platform, env, isFile })
     if ('refused' in orca) return { opened: false, reason: orca.refused }
     let child: OpenFileChild
     try {
-      child = spawn(orca.file, openArguments(file, root, request), {
+      child = spawn(orca.file, openArguments(opened, root, request), {
         cwd: root,
         env: orcaEnvironment(env, { platform, homedir: home }),
         shell: false,

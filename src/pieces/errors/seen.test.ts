@@ -31,6 +31,17 @@ test('a new error appears once, however many times it repeats', async () => {
   assert.equal(await seen.newCount('sandbox'), 1)
 })
 
+test('a read that found nothing writes nothing', async () => {
+  const { store } = memoryStore()
+  let writes = 0
+  const counting: SeenStore = { get: store.get, set: async (key, value) => void (writes++, await store.set(key, value)) }
+  const seen = createSeenList(counting)
+  assert.deepEqual(await seen.record('sandbox', []), { added: [] })
+  assert.equal(writes, 0)
+  await seen.record('sandbox', [occurrence('a', 1)])
+  assert.equal(writes, 1)
+})
+
 test('the sample is the newest occurrence’s', async () => {
   const { store } = memoryStore()
   const seen = createSeenList(store)

@@ -127,6 +127,8 @@ export function createSeenList(store: SeenStore): SeenList {
     list: (role) => serial(role, async () => ordered(await load(role))),
     record: (role, occurrences) =>
       serial(role, async () => {
+        // A read that found nothing writes nothing: the list can be large.
+        if (occurrences.length === 0) return { added: [] }
         const table = await load(role)
         const added: string[] = []
         for (const { signature, at, sample } of occurrences) {
