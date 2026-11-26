@@ -88,6 +88,21 @@ Changing it needs the owner's yes.
       function), `files.ts`, and `fake-adapter.ts`, the scripted adapter its tests use. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
+    - `src/pieces/engine/` (phase 6, still `delivered: false`): so far the syntax layer, pure
+      modules with no Node and no Orca imports (a test checks it) that the editor will load in
+      its frame too, exported with their types by `index.ts`, the contract of 6.3 and 6.4.
+      `js/lexer.ts` and `js/parser.ts` read SFCC scripts (ES5 plus what Rhino accepts, `for
+      each` and conditional `catch` included) into an ESTree-shaped tree (`js/ast.ts`) with
+      `start` and `end` offsets on every node; they never throw, report problems by code
+      (`PROBLEM_CODES`) and recover at statement boundaries; recursion and tree depth are bounded
+      (`MAX_DEPTH`, `MAX_TREE_DEPTH`), so a walker of the tree may recurse. JSDoc rides on the
+      next declaration as `doc`. `js/facts.ts`: scopes, declarations, the declaration of each use,
+      `require` calls and their bindings, exports and `module.superModule`. `isml/parser.ts`: a
+      template into elements, ISML and custom tags, text, `${…}` (ending as the ISML grammar
+      does), comments and `<isscript>`, tolerant the same way; `isml/embedded.ts` parses its
+      JavaScript in template positions, where a template-level name is seen only after it is
+      declared. Fixtures are invented; `fixtures/generate.ts` makes the large script and the
+      seeded mutations.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

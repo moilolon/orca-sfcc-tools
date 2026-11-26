@@ -1,0 +1,16 @@
+<div class="box">
+    <isif condition="${pdict.open">
+        <span>${pdict.unclosed</span>
+    <p class="a>after</p>
+    <isloop items="${pdict.items}" var="item">
+        ${item.name}
+</div>
+<iscomment>never closed
+<isscript>
+    var x = require('dw/util/StringUtils');
+    var y = x.format(
+<span>${x}</span>
+<!-- open comment
+<isprint value="${'still parsed'}"/>
+</isif>
+</isnotopen>
