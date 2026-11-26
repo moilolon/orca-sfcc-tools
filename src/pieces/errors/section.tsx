@@ -5,7 +5,7 @@
 //
 // What it shows comes from the worker already masked: the normalised first line, the logger and
 // the top frames of each signature. Never a host, a local path or a raw log entry.
-import { atom, Button, Collapsible, env, Link, plugin, read, RelativeTime, Select, Stack, Text, update, type OrcaNode, type PanelContext } from 'orca'
+import { atom, Button, Callout, Collapsible, env, Link, plugin, read, RelativeTime, Select, Stack, Text, update, type OrcaNode, type PanelContext } from 'orca'
 import { t, wordError } from '../../core/i18n'
 import { ROLES, isRole, type Role } from '../../core/instances'
 import type { PanelSection } from '../../core/piece'
@@ -94,6 +94,15 @@ function pick(value: string): void {
   update(pickedRole, () => value)
   update(openProblem, () => null)
   void load(value)
+}
+
+/** A moment as the person's locale writes a date and time, in their time zone. */
+function formatTime(at: number, locale: string): string {
+  try {
+    return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(at)
+  } catch {
+    return new Date(at).toISOString()
+  }
 }
 
 /** The last part of a script's path: the name a person recognises. */
@@ -231,7 +240,14 @@ function ErrorsView({ answer, failure, locale, busy }: { answer: RoleErrors | un
   } else if (answer.error) {
     blocks.push(<ErrorState key="error" title={text(locale, 'readFailedTitle')} message={wordError(locale, answer.error)} retryLabel={text(locale, 'readNow')} onRetry={() => refresh(role)} busy={busy !== null || answer.reading} />)
   }
-  if (problem) blocks.push(<ErrorState key="open" title={text(locale, 'openFailed')} message={text(locale, openFailureKey(problem))} />)
+  if (answer.missedSince !== null && answer.state === 'ready') {
+    blocks.push(
+      <Callout key="missed" tone="warning" icon="warning" title={text(locale, 'missedTitle')}>
+        <Text>{text(locale, 'missedBody', { time: formatTime(answer.missedSince, locale) })}</Text>
+      </Callout>
+    )
+  }
+  if (problem) blocks.push(<ErrorState key="open" title={text(locale, 'openFailedTitle')} message={text(locale, openFailureKey(problem))} />)
   if (answer.rows.length === 0) {
     if (answer.state === 'ready') blocks.push(<Empty key="none" icon="check" title={text(locale, 'noneTitle')} guidance={text(locale, role === 'sandbox' ? 'noneGuidanceSandbox' : 'noneGuidanceOther')} />)
   } else {

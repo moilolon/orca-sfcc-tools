@@ -18,7 +18,7 @@ function rows(now: number): ErrorRow[] {
       lastSeen: now - 4 * MINUTE,
       count: 27,
       markedAt: null,
-      message: 'ISH-CORE-# Error executing script <q>: TypeError: Cannot read property <q> of undefined (app_example/cartridge/scripts/helpers/cartHelper.js)',
+      message: "ISH-CORE-2368 Error executing script 'app_example/cartridge/controllers/Cart.js': TypeError: Cannot read property <q> of undefined (app_example/cartridge/scripts/helpers/cartHelper.js) at /on/demandware.store/<site>/<locale>/Cart-AddProduct",
       logger: 'system.core',
       frames: [
         { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'calculateLineTotal', line: 118, openable: true },
@@ -54,7 +54,7 @@ function rows(now: number): ErrorRow[] {
 
 function answer(role: Role, overrides: Partial<RoleErrors> = {}): RoleErrors {
   const now = Date.now()
-  return { role, state: 'ready', reading: false, lastRead: now - 2 * MINUTE, error: null, intervalMinutes: role === 'sandbox' ? 5 : 0, rows: rows(now), ...overrides }
+  return { role, state: 'ready', reading: false, lastRead: now - 2 * MINUTE, error: null, missedSince: null, intervalMinutes: role === 'sandbox' ? 5 : 0, rows: rows(now), ...overrides }
 }
 
 /** Answers every request of the piece with one state, whatever the environment asked. */
@@ -87,6 +87,8 @@ export const scenarios: PieceScenarios = {
   },
   /** The last read failed: b2c ended with an error. The rows read before stay. */
   errorsReadFailed: { requests: requests((role) => answer(role, { error: 'b2c_failed', lastRead: Date.now() - 3 * HOUR })) },
+  /** The last read may have missed entries: b2c returned as many as it keeps. */
+  errorsMissed: { requests: requests((role) => answer(role, { missedSince: Date.now() - 6 * HOUR })) },
   /** A read is running. */
   errorsReading: { requests: requests((role) => answer(role, { reading: true })) }
 }

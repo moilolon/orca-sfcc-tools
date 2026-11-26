@@ -20,7 +20,9 @@ test('parseLogEntries sorts by time, drops what cannot be read and never keeps r
   const times = entries.map((entry) => entry.timestamp)
   assert.deepEqual(times, [...times].sort((a, b) => a - b))
   assert.equal(entries[0].timestamp, Date.UTC(2026, 10, 25, 23, 59, 58, 1))
-  for (const entry of entries) assert.deepEqual(Object.keys(entry).sort(), ['file', 'level', 'message', 'timestamp'])
+  for (const entry of entries) assert.deepEqual(Object.keys(entry).sort(), ['bytes', 'file', 'level', 'message', 'timestamp'])
+  // The size is the entry's in its file: its raw line.
+  assert.equal(entries[0].bytes, new TextEncoder().encode(LOGS_GET.entries[1].raw).length)
 
   const mixed = {
     entries: [
@@ -31,8 +33,19 @@ test('parseLogEntries sorts by time, drops what cannot be read and never keeps r
       { timestamp: '2026-11-26 10:00:00.000 GMT', message: 'kept' }
     ]
   }
-  assert.deepEqual(parseLogEntries(mixed), [{ file: '', timestamp: Date.UTC(2026, 10, 26, 10), level: '', message: 'kept' }])
+  assert.deepEqual(parseLogEntries(mixed), [{ file: '', timestamp: Date.UTC(2026, 10, 26, 10), level: '', message: 'kept', bytes: 4 }])
   for (const nothing of [null, undefined, {}, { entries: 'x' }, [], 'x']) assert.deepEqual(parseLogEntries(nothing), [])
+})
+
+test('parseLogEntries keeps only the levels asked for, in any letter case', () => {
+  const at = '2026-11-26 10:00:00.000 GMT'
+  const answer = {
+    entries: ['ERROR', 'WARN', 'INFO', 'fatal', 'DEBUG', 'Error', ''].map((level) => ({ file: 'custom-cart-blade0.log', timestamp: at, level, message: level || 'none', raw: `[${at}] ${level} é` }))
+  }
+  assert.deepEqual(parseLogEntries(answer, { levels: ['ERROR', 'FATAL'] }).map((entry) => entry.level), ['ERROR', 'fatal', 'Error'])
+  assert.equal(parseLogEntries(answer).length, 7, 'without levels, every entry')
+  // A size in bytes, not characters.
+  assert.equal(parseLogEntries(answer)[0].bytes, `[${at}] ERROR `.length + 2)
 })
 
 test('parseLogEntries keeps the order b2c gave for two entries of the same millisecond', () => {

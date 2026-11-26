@@ -38,6 +38,11 @@ export type RoleErrors = {
   lastRead: number | null
   /** The code of the last read's failure (`b2c_failed`, `b2c_timeout`, …), cleared by a good one. */
   error: string | null
+  /**
+   * When the last read may have left entries unread since this time (b2c reads only the end of
+   * each file and at most `MAX_ENTRIES`); null when it read everything. Shown, never notified.
+   */
+  missedSince: number | null
   /** The sandbox is read every this many minutes; 0 when only by hand. Always 0 for the others. */
   intervalMinutes: number
   /** New first, then by the newest occurrence. */

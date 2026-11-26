@@ -12,8 +12,25 @@
 // trace, one `at …` line per frame. `timestamp` is `YYYY-MM-DD HH:mm:ss.SSS GMT`, not ISO 8601,
 // and entries do not come in order: they are parsed and sorted here.
 
-/** One entry of the log, without its `raw` text. `timestamp` is milliseconds since the epoch. */
-export type LogEntry = { file: string; timestamp: number; level: string; message: string }
+/**
+ * One entry of the log, without its `raw` text. `timestamp` is milliseconds since the epoch;
+ * `bytes` is the size of the entry in its file (of `raw`, else of the message), to tell whether
+ * b2c's window on a file was full.
+ */
+export type LogEntry = { file: string; timestamp: number; level: string; message: string; bytes: number }
+
+/** The levels that are errors: anything else read from a file is not one. */
+export const ERROR_LEVELS: readonly string[] = ['ERROR', 'FATAL']
+
+/** UTF-8 size of a text, without Node. */
+function utf8Bytes(text: string): number {
+  let bytes = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4
+  }
+  return bytes
+}
 
 /**
  * A frame of a stack trace. `file` is the script's path on the instance
@@ -58,17 +75,21 @@ export function parseTimestamp(text: unknown): number | null {
 
 /**
  * The entries of a `logs get --json` answer, oldest first. An entry without a message or a
- * timestamp that parses is left out; `raw` is never kept.
+ * timestamp that parses is left out, and so is one whose level is not in `levels` when given
+ * (any letter case); `raw` is never kept.
  */
-export function parseLogEntries(json: unknown): LogEntry[] {
+export function parseLogEntries(json: unknown, { levels }: { levels?: readonly string[] } = {}): LogEntry[] {
   const entries = json && typeof json === 'object' && Array.isArray((json as { entries?: unknown }).entries) ? (json as { entries: unknown[] }).entries : []
   const parsed: LogEntry[] = []
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue
-    const { file, timestamp, level, message } = entry as Record<string, unknown>
+    const { file, timestamp, level, message, raw } = entry as Record<string, unknown>
     const at = parseTimestamp(timestamp)
     if (at === null || typeof message !== 'string') continue
-    parsed.push({ file: typeof file === 'string' ? file : '', timestamp: at, level: typeof level === 'string' ? level : '', message })
+    const levelText = typeof level === 'string' ? level : ''
+    if (levels && !levels.includes(levelText.toUpperCase())) continue
+    const bytes = utf8Bytes(typeof raw === 'string' ? raw : message)
+    parsed.push({ file: typeof file === 'string' ? file : '', timestamp: at, level: levelText, message, bytes })
   }
   // Stable: two entries of the same millisecond keep the order b2c gave them.
   return parsed.map((entry, index) => ({ entry, index })).sort((a, b) => a.entry.timestamp - b.entry.timestamp || a.index - b.index).map(({ entry }) => entry)

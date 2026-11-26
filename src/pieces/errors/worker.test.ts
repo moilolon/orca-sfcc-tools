@@ -4,7 +4,7 @@ import { assert, mockHost, mountWorker, test, type MockHost } from 'orca/testing
 import type { OrcaWorkerApi } from 'orca/worker'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createB2c } from '../../core/b2c'
+import { createB2c, type B2c } from '../../core/b2c'
 import type { OpenFileRequest } from '../../core/open-file'
 import { translator } from '../../core/i18n'
 import type { PieceContext } from '../../core/piece'
@@ -15,7 +15,7 @@ import { createWorkspaces } from '../../core/workspaces'
 import { createActivate, deactivate } from '../../worker/worker'
 import { cartError, LOGS_GET, paymentError } from './fixtures/logs'
 import type { RoleErrors } from './protocol'
-import { createErrorsPiece, FIRST_READ_MS, intervalOf, MAX_ENTRIES, readArguments, START_DELAY_MS, STATUS_ITEM, type ErrorsDeps } from './worker'
+import { createErrorsPiece, FIRST_READ_MS, FULL_WINDOW_BYTES, intervalOf, MAX_ENTRIES, OVERLAP_MS, readArguments, START_DELAY_MS, STATUS_ITEM, type ErrorsDeps } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const MACHINE = {
@@ -56,7 +56,7 @@ async function mountPlugin(host: MockHost, script: (call: SpawnCall) => void = b
 }
 
 /** The errors piece alone, with its clock and timers in the test's hands. */
-async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, deps: ErrorsDeps = {}) {
+async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, deps: ErrorsDeps = {}, wrap: (b2c: B2c) => B2c = (b2c) => b2c) {
   const spawn = fakeSpawner(script)
   const timers: { run: () => void; ms: number; cleared: boolean; fired: boolean }[] = []
   const piece = createErrorsPiece({
@@ -86,7 +86,7 @@ async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, dep
         const settings = createSettings(orca.settings)
         const workspaces = createWorkspaces(orca.host, createStore(orca.storage, 'core'))
         const b2c = createB2c({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill(), settings, configRoot: () => workspaces.configRoot() })
-        const ctx: PieceContext = { orca, b2c, settings, store: createStore(orca.storage, 'errors'), workspaces, t: translator(() => 'en'), log: (message) => orca.log(message) }
+        const ctx: PieceContext = { orca, b2c: wrap(b2c), settings, store: createStore(orca.storage, 'errors'), workspaces, t: translator(() => 'en'), log: (message) => orca.log(message) }
         disposable = await piece.activate(ctx)
       },
       deactivate: () => disposable?.dispose()
@@ -128,7 +128,18 @@ test('a read asks b2c for error-level entries since the last read, bounded, and 
     const { worker, logsCalls } = await mountPiece(hostFor(root), b2cAnswering())
     const list = await worker.request('errors.refresh', { role: 'sandbox' })
     const [first] = logsCalls()
-    assert.deepEqual(first.args, ['logs', 'get', '--no-normalize', '--filter=error', '--filter=customerror', `--count=${MAX_ENTRIES}`, `--since=${new Date(NOW - FIRST_READ_MS).toISOString()}`, '--json'])
+    assert.deepEqual(first.args, [
+      'logs',
+      'get',
+      '--no-normalize',
+      '--filter=error',
+      '--filter=customerror',
+      '--level=ERROR',
+      '--level=FATAL',
+      `--count=${MAX_ENTRIES}`,
+      `--since=${new Date(NOW - FIRST_READ_MS).toISOString()}`,
+      '--json'
+    ])
     // Seven entries: the cart error twice, the payment error twice, a job error, two near misses.
     assert.equal(list.rows.length, 5)
     assert.deepEqual(list.rows.map((row) => row.count).sort(), [1, 1, 1, 2, 2])
@@ -137,10 +148,11 @@ test('a read asks b2c for error-level entries since the last read, bounded, and 
     assert.equal(list.error, null)
     assert.equal(list.state, 'ready')
 
-    // The next read starts at the newest entry read, and counts nothing twice.
+    // The next read starts a few minutes before the newest entry read, and counts nothing twice.
     const again = await worker.request('errors.refresh', { role: 'sandbox' })
     const newest = Math.max(...LOGS_GET.entries.map((entry) => Date.parse(entry.timestamp.replace(' GMT', 'Z').replace(' ', 'T'))))
-    assert.ok(logsCalls()[1].args.includes(`--since=${new Date(newest).toISOString()}`))
+    assert.ok(logsCalls()[1].args.includes(`--since=${new Date(newest - OVERLAP_MS).toISOString()}`))
+    assert.equal(again.missedSince, null)
     assert.deepEqual(again.rows.map((row) => row.count), list.rows.map((row) => row.count))
     await worker.deactivate()
   } finally {
@@ -277,7 +289,8 @@ test('what is stored is the counters and a masked, bounded sample: never a raw e
       assert.ok(!stored.includes(entry.raw.slice(0, 80)), 'no raw entry')
       assert.ok(!stored.includes(entry.message.split('\n')[0]), 'no first line as written')
     }
-    for (const volatile of ['jane.doe@example.com', 'k3Jd8sLq0aZx2Vb7Nn4Mc1Pq', '3f6c2a9e-1b7d-4c5e-9a0f-2d8e6b4c1a37', 'Sites-Example-Site', 'pid=100234', 'System Information']) {
+    // No host of any kind: the storefront's is not in dw.json, so only the URL rule keeps it out.
+    for (const volatile of ['www.example.com', 'example.org', 'https:', 'en_US', 'jane.doe@example.com', 'k3Jd8sLq0aZx2Vb7Nn4Mc1Pq', '3f6c2a9e-1b7d-4c5e-9a0f-2d8e6b4c1a37', 'Sites-Example-Site', 'pid=100234', 'System Information']) {
       assert.ok(!stored.includes(volatile), volatile)
     }
     const keys = Object.keys(storage).filter((key) => key.startsWith('errors.'))
@@ -286,6 +299,28 @@ test('what is stored is the counters and a masked, bounded sample: never a raw e
       assert.ok(record.sample.message.length <= 300)
       assert.deepEqual(Object.keys(record).sort(), ['count', 'firstSeen', 'lastSeen', 'sample'])
     }
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the sample is masked before it is normalised and again after', async () => {
+  const root = makeWorkspace()
+  try {
+    const masked: string[] = []
+    const { worker } = await mountPiece(hostFor(root), b2cAnswering(() => ({ entries: [cartError({ at: '2026-11-26 11:00:00.000 GMT' })] })), {}, (b2c) => ({
+      ...b2c,
+      mask: async (text) => {
+        masked.push(text)
+        return b2c.mask(text)
+      }
+    }))
+    const list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(masked.length, 2)
+    assert.match(masked[0], /https:\/\/www\.example\.com/, 'first the text as written')
+    assert.ok(masked[1].includes(list.rows[0].message), 'then the normalised sample, as stored')
+    assert.ok(!masked[1].includes('www.example.com'))
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -375,6 +410,8 @@ test('the timer reads the sandbox every interval and never overlaps two reads', 
     assert.equal(live()[0].ms, START_DELAY_MS)
     live()[0].run()
     await until(() => logsCalls().length === 1, 'the first tick reads')
+    // Only the sandbox: its host in the child's environment, and its sign-in methods.
+    assert.equal(logsCalls()[0].options.env.SFCC_SERVER, INVENTED_DW.hostname)
     assert.equal(logsCalls()[0].args.includes('--filter=error'), true)
     assert.equal(live().length, 0, 'no next tick while the read runs')
 
@@ -390,6 +427,7 @@ test('the timer reads the sandbox every interval and never overlaps two reads', 
 
     live()[0].run()
     await until(() => logsCalls().length === 2, 'the second tick reads')
+    assert.deepEqual(logsCalls().map((call) => call.options.env.SFCC_SERVER), [INVENTED_DW.hostname, INVENTED_DW.hostname])
     pending.shift()?.child.finish(0, JSON.stringify({ entries: [] }))
     await until(() => live().length === 1, 'and schedules the third')
     await worker.deactivate()
@@ -474,11 +512,88 @@ test('requests refuse an environment or a payload they do not know', async () =>
   }
 })
 
+test('entries of any other level than ERROR and FATAL are never read as errors', async () => {
+  const root = makeWorkspace()
+  try {
+    const at = '2026-11-26 11:00:00.000 GMT'
+    const warning = { ...paymentError(at, '1', 'a@example.com', '1'), level: 'WARN', file: 'custom-payment-blade0.log' }
+    const info = { ...paymentError(at, '2', 'b@example.com', '2'), level: 'INFO', file: 'custom-payment-blade0.log' }
+    const { worker, logsCalls } = await mountPiece(hostFor(root, { errorsFilter: 'custom-' }), b2cAnswering(() => ({ entries: [warning, info] })))
+    const list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.ok(logsCalls()[0].args.includes('--filter=custom-') && logsCalls()[0].args.includes('--level=ERROR') && logsCalls()[0].args.includes('--level=FATAL'))
+    assert.equal(list.rows.length, 0)
+    assert.equal(JSON.stringify(worker.host.data().storage).includes('Payment'), false, 'nothing of them is stored')
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a read that may have skipped entries says so in the view, and never notifies it', async () => {
+  const root = makeWorkspace()
+  try {
+    const at = (i: number) => `2026-11-26 11:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.000 GMT`
+    let answer: () => unknown = () => ({ entries: Array.from({ length: MAX_ENTRIES }, (_, i) => cartError({ at: at(i) })) })
+    const { worker } = await mountPiece(hostFor(root), b2cAnswering(() => answer()))
+    // As many entries as b2c keeps.
+    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.missedSince, NOW - FIRST_READ_MS, 'since the start of the read')
+    assert.equal(list.rows.length, 1)
+    const notifications = paramsOf(worker.host, 'notifications.show')
+    assert.deepEqual(notifications, [{ title: 'New errors on Sandbox', body: '1 new error in the log. Open the Errors view of the SFCC panel to see it.' }])
+
+    // A read that got everything clears it.
+    answer = () => ({ entries: [] })
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.missedSince, null)
+
+    // Nearly a whole 64 KB window of one file, in few entries: since the newest entry read before.
+    const before = Date.UTC(2026, 10, 26, 11, 3, 19)
+    const big = (i: number) => {
+      const entry = paymentError(`2026-11-26 11:50:${String(i).padStart(2, '0')}.000 GMT`, String(i), 'c@example.com', '1')
+      return { ...entry, raw: entry.raw + ' '.repeat(Math.ceil(FULL_WINDOW_BYTES / 10)) }
+    }
+    answer = () => ({ entries: Array.from({ length: 10 }, (_, i) => big(i)) })
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.missedSince, before)
+    assert.equal(paramsOf(worker.host, 'notifications.show').length, 2, 'one more for the new payment error, none for the gap')
+    assert.ok(!JSON.stringify(paramsOf(worker.host, 'notifications.show')).match(/miss/i))
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an entry another server wrote late is read; one read before from its own file is not counted twice', async () => {
+  const root = makeWorkspace()
+  try {
+    const entry = (file: string, at: string, order: string) => ({ ...paymentError(at, order, 'd@example.com', '1'), file })
+    let answer: unknown = { entries: [entry('customerror-blade0-1.log', '2026-11-26 11:00:00.000 GMT', '1')] }
+    const { worker, logsCalls } = await mountPiece(hostFor(root), b2cAnswering(() => answer))
+    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.rows[0].count, 1)
+    // The next read starts five minutes before: blade0's entry comes back and is not counted again;
+    // blade1 wrote one a minute earlier than blade0's, but later.
+    answer = {
+      entries: [entry('customerror-blade0-1.log', '2026-11-26 11:00:00.000 GMT', '1'), entry('customerror-blade1-1.log', '2026-11-26 10:59:00.000 GMT', '2')]
+    }
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.ok(logsCalls()[1].args.includes(`--since=${new Date(Date.UTC(2026, 10, 26, 11) - OVERLAP_MS).toISOString()}`))
+    assert.equal(list.rows[0].count, 2)
+    // Read again: neither is counted again.
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.rows[0].count, 2)
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('intervalOf and readArguments', () => {
   assert.equal(intervalOf(5), 5)
   assert.equal(intervalOf('15'), 15)
   assert.equal(intervalOf(2.4), 2)
   assert.equal(intervalOf(99999), 1440)
   for (const off of [0, -1, '', 'x', null, undefined, Number.NaN]) assert.equal(intervalOf(off), 0, String(off))
-  assert.deepEqual(readArguments(['error'], 0), ['logs', 'get', '--no-normalize', '--filter=error', `--count=${MAX_ENTRIES}`, '--since=1970-01-01T00:00:00.000Z'])
+  assert.deepEqual(readArguments(['error'], 0), ['logs', 'get', '--no-normalize', '--filter=error', '--level=ERROR', '--level=FATAL', `--count=${MAX_ENTRIES}`, '--since=1970-01-01T00:00:00.000Z'])
 })

@@ -31,7 +31,7 @@ function row(signature: string, overrides: Partial<ErrorRow> = {}): ErrorRow {
 }
 
 function answer(role: Role, overrides: Partial<RoleErrors> = {}): RoleErrors {
-  return { role, state: 'ready', reading: false, lastRead: NOW - 120_000, error: null, intervalMinutes: 0, rows: [], ...overrides }
+  return { role, state: 'ready', reading: false, lastRead: NOW - 120_000, error: null, missedSince: null, intervalMinutes: 0, rows: [], ...overrides }
 }
 
 type Sent = { name: string; input: unknown }
@@ -129,6 +129,19 @@ test('a read that failed shows why, worded, with a retry; the rows read before s
   const retries = panel.findAll({ type: 'Button', text: 'Read now' })
   await panel.press(retries[retries.length - 1])
   assert.deepEqual(sent.at(-1), { name: 'errors.refresh', input: { role: 'sandbox' } })
+})
+
+test('a read that may have skipped entries says so, with the time', async () => {
+  const { panel } = await open((role) => answer(role, { rows: [row('alpha')], missedSince: Date.UTC(2026, 10, 26, 8, 30) }))
+  assert.match(panel.summary().join('\n'), /Entries may be missing/)
+  assert.ok(panel.find({ text: /^Some entries since .*2026.* may have been missed: b2c reads only the end of each log file/ }))
+})
+
+test('a frame that could not be opened says why, under a title of its own', async () => {
+  const { panel } = await open((role) => answer(role, { rows: [row('alpha')] }))
+  await panel.toggle(panel.findAll({ type: 'Collapsible', label: 'Details' })[0])
+  await panel.press({ text: 'cart.js:12 · total' })
+  assert.match(panel.summary().join('\n'), /File not opened/)
 })
 
 test('picking another environment asks the worker for it', async () => {

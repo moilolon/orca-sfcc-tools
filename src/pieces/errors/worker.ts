@@ -5,9 +5,16 @@
 //
 // The sandbox is read on a timer (Settings, in minutes; 0, the default, is off), the other three
 // only when a person asks. Two reads of one environment never overlap: asking during a read joins
-// it. Each read asks for the entries since the newest one already read (`cursor.<role>`), at most
-// `MAX_ENTRIES`, error-level files only (`--filter`, a setting). What is stored, in the plugin's
-// own storage: per signature its counters and one bounded sample, masked; never a raw entry.
+// it. Each read asks for the ERROR and FATAL entries (`--level`) of the files a setting names
+// (`--filter`), since a few minutes before the newest entry already read (`cursor.<role>`), at
+// most `MAX_ENTRIES`; an entry counts once, by the newest time read from its own file. What is
+// stored, in the plugin's own storage: per signature its counters and one bounded sample, masked;
+// never a raw entry.
+//
+// b2c's `logs get` reads only the last 64 KB of each log file (not a flag) and keeps at most
+// `--count` entries, so a busy log can hold entries no read ever sees. That cannot be fixed here;
+// it is detected: a read that got `MAX_ENTRIES` entries, or nearly a whole window of one file,
+// marks the environment "some entries may have been missed since <time>" in the view.
 import { B2cError } from '../../core/b2c'
 import { isRole, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
@@ -16,12 +23,20 @@ import { isLocal } from '../../core/workspaces'
 import { createFrameResolver, type FrameResolver } from './frames'
 import { messages, ROLE_KEYS } from './i18n'
 import type { ErrorRow, OpenFrameResult, RoleErrors } from './protocol'
-import { filtersOf, parseLogEntries, parseMessage, type ParsedMessage } from './reader'
+import { ERROR_LEVELS, filtersOf, parseLogEntries, parseMessage, type ParsedMessage } from './reader'
 import { createSeenList, type Occurrence, type Sample, type SeenJson, type SeenStore } from './seen'
 import { identityOf, normalize, signatureOfIdentity } from './signature'
 
-/** The most entries one read asks for. */
+/** The most entries one read asks for. b2c also reads only the last 64 KB of each file. */
 export const MAX_ENTRIES = 200
+/** How much of a file b2c reads, from its end. */
+export const FILE_WINDOW_BYTES = 64 * 1024
+/** Entries of one file adding up to this much mean its window was (nearly) full. */
+export const FULL_WINDOW_BYTES = 48 * 1024
+/** How far before the cursor a read starts, so an entry another server wrote late is still read. */
+export const OVERLAP_MS = 5 * 60 * 1000
+/** How long a file's own cursor is kept. */
+const FILE_CURSOR_MS = 2 * 24 * 60 * 60 * 1000
 /** How far back the first read of an environment looks. */
 export const FIRST_READ_MS = 24 * 60 * 60 * 1000
 /** How long after the worker starts the timer's first read runs. */
@@ -43,7 +58,26 @@ export type ErrorsDeps = {
   frames?: FrameResolver
 }
 
-type ReadStatus = { lastRead: number | null; error: string | null }
+type ReadStatus = { lastRead: number | null; error: string | null; missedSince: number | null }
+
+/** Where reading stopped: the newest entry read, overall and per file. */
+type Cursor = { at: number; files: Record<string, number> }
+
+function cursorOf(value: unknown): Cursor | null {
+  // An older worker kept one number.
+  if (typeof value === 'number') return { at: value, files: {} }
+  if (!value || typeof value !== 'object' || typeof (value as { at?: unknown }).at !== 'number') return null
+  const files: Record<string, number> = {}
+  const stored = (value as { files?: unknown }).files
+  if (stored && typeof stored === 'object') for (const [file, at] of Object.entries(stored)) if (typeof at === 'number') files[file] = at
+  return { at: (value as { at: number }).at, files }
+}
+
+/** The number of entries b2c returned, whatever their level. */
+function returnedCount(json: unknown): number {
+  const entries = json && typeof json === 'object' ? (json as { entries?: unknown }).entries : undefined
+  return Array.isArray(entries) ? entries.length : 0
+}
 
 function invalid(): Error {
   return Object.assign(new Error('invalid_params'), { code: 'invalid_params' })
@@ -61,11 +95,20 @@ export function intervalOf(value: unknown): number {
   return Number.isFinite(minutes) && minutes > 0 ? Math.min(Math.round(minutes), 1440) : 0
 }
 
-/** The arguments of one read: error-level files since `since`, at most `MAX_ENTRIES`. */
+/** The arguments of one read: ERROR and FATAL entries of the files named, since `since`, at most `MAX_ENTRIES`. */
 export function readArguments(filters: readonly string[], since: number): string[] {
   // `--no-normalize`: the frames keep the instance's own script paths, so a signature does not
-  // depend on the checkout, and no local path reaches the sample.
-  return ['logs', 'get', '--no-normalize', ...filters.map((filter) => `--filter=${filter}`), `--count=${MAX_ENTRIES}`, `--since=${new Date(since).toISOString()}`]
+  // depend on the checkout, and no local path reaches the sample. `--level`: a file the setting
+  // names may mix levels (`custom-*`); only errors are read.
+  return [
+    'logs',
+    'get',
+    '--no-normalize',
+    ...filters.map((filter) => `--filter=${filter}`),
+    ...ERROR_LEVELS.map((level) => `--level=${level}`),
+    `--count=${MAX_ENTRIES}`,
+    `--since=${new Date(since).toISOString()}`
+  ]
 }
 
 export function createErrorsPiece(deps: ErrorsDeps = {}): WorkerPiece {
@@ -120,7 +163,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     const stored = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
     return {
       lastRead: typeof stored.lastRead === 'number' ? stored.lastRead : null,
-      error: typeof stored.error === 'string' ? stored.error : null
+      error: typeof stored.error === 'string' ? stored.error : null,
+      missedSince: typeof stored.missedSince === 'number' ? stored.missedSince : null
     }
   }
 
@@ -145,40 +189,60 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     if (role === 'sandbox') await updateStatusBar()
   }
 
-  /** The samples of the newest entry of each signature, masked: one call to `mask` for all. */
+  /** Texts masked with one call to `mask`. A text holds no line break, so the lines map back. */
+  async function maskAll(texts: readonly string[]): Promise<string[]> {
+    if (texts.length === 0) return []
+    const masked = (await ctx.b2c.mask(texts.map((text) => text.replace(/[\r\n]+/g, ' ')).join('\n'))).split('\n')
+    return texts.map((_, index) => masked[index] ?? '')
+  }
+
+  /**
+   * The samples of the newest entry of each signature. Masked, then normalised (a host in the text
+   * is masked whole before its digits go, and a URL loses its host), then masked again.
+   */
   async function maskedSamples(newest: Map<string, ParsedMessage>): Promise<Map<string, Sample>> {
-    const texts: string[] = []
-    const take = (text: string) => texts.push(text.replace(/[\r\n]+/g, ' ')) - 1
-    const plan = [...newest].map(([signature, parsed]) => {
-      const identity = identityOf(parsed)
+    const plan = [...newest].map(([signature, parsed]) => ({ signature, parsed, identity: identityOf(parsed) }))
+    // A sample as a list of texts, and back: message, logger, then each frame's file and function.
+    const flatten = (sample: Sample) => [sample.message, sample.logger ?? '', ...sample.frames.flatMap((frame) => [frame.file, frame.function ?? ''])]
+    const rebuild = (sample: Sample, texts: string[]): Sample => {
+      let i = 0
+      const next = () => texts[i++] ?? ''
+      const message = next()
+      const logger = next()
       return {
-        signature,
-        message: take(parsed.text),
-        logger: identity.logger === null ? null : take(identity.logger),
-        frames: identity.frames.map((frame) => ({ file: take(frame.file), function: frame.function === null ? null : take(frame.function), line: frame.line }))
+        message,
+        logger: sample.logger === null ? null : logger,
+        frames: sample.frames.map((frame) => {
+          const file = next()
+          const name = next()
+          return { file, function: frame.function === null ? null : name, line: frame.line }
+        })
       }
-    })
-    const masked = (await ctx.b2c.mask(texts.join('\n'))).split('\n')
-    const at = (index: number) => masked[index] ?? ''
-    return new Map(
-      plan.map((item) => [
-        item.signature,
-        {
-          // Masked first, then normalised: a host in the text is masked whole before its digits go.
-          message: normalize(at(item.message)),
-          logger: item.logger === null ? null : at(item.logger),
-          frames: item.frames.map((frame) => ({ file: at(frame.file), function: frame.function === null ? null : at(frame.function), line: frame.line }))
-        }
-      ])
-    )
+    }
+    const maskEach = async (samples: Sample[]): Promise<Sample[]> => {
+      const masked = await maskAll(samples.flatMap(flatten))
+      let offset = 0
+      return samples.map((sample) => {
+        const size = flatten(sample).length
+        return rebuild(sample, masked.slice(offset, (offset += size)))
+      })
+    }
+    const raw: Sample[] = plan.map(({ parsed, identity }) => ({
+      message: parsed.text,
+      logger: identity.logger,
+      frames: identity.frames.map((frame) => ({ file: frame.file, function: frame.function, line: frame.line }))
+    }))
+    const normalised = (await maskEach(raw)).map((sample) => ({ ...sample, message: normalize(sample.message) }))
+    const twice = await maskEach(normalised)
+    return new Map(twice.map((sample, index) => [plan[index].signature, sample]))
   }
 
   async function read(role: Role): Promise<void> {
     const { instances } = await ctx.b2c.instances()
     if (instances[role] !== 'ready') return
     const settings = await rawSettings()
-    const cursor = await ctx.store.get<number | null>(cursorKey(role), null)
-    const since = typeof cursor === 'number' ? cursor : now() - FIRST_READ_MS
+    const cursor = cursorOf(await ctx.store.get<SeenJson>(cursorKey(role), null))
+    const since = cursor ? cursor.at - OVERLAP_MS : now() - FIRST_READ_MS
     let json: unknown
     try {
       json = (await ctx.b2c.run(readArguments(filtersOf(settings[SETTING_FILTER]), since), { role, timeoutMs: READ_TIMEOUT_MS })).json
@@ -188,8 +252,10 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
       await ctx.store.set(statusKey(role), { ...(await readStatus(role)), error: code })
       return
     }
-    // An entry at or before the cursor was counted by an earlier read.
-    const entries = parseLogEntries(json).filter((entry) => typeof cursor !== 'number' || entry.timestamp > cursor)
+    const all = parseLogEntries(json, { levels: ERROR_LEVELS })
+    // An entry at or before the newest one read from its own file was counted by an earlier read;
+    // a file not read before has nothing counted since the read's start.
+    const entries = all.filter((entry) => !cursor || entry.timestamp > (cursor.files[entry.file] ?? since))
     const occurrences: { signature: string; at: number }[] = []
     const newest = new Map<string, ParsedMessage>()
     for (const entry of entries) {
@@ -202,8 +268,21 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     const samples = await maskedSamples(newest)
     const recorded: Occurrence[] = occurrences.map(({ signature, at }) => ({ signature, at, sample: samples.get(signature) as Sample }))
     const { added } = await seen.record(role, recorded)
-    if (entries.length > 0) await ctx.store.set(cursorKey(role), entries[entries.length - 1].timestamp)
-    await ctx.store.set(statusKey(role), { lastRead: now(), error: null })
+
+    if (all.length > 0) {
+      const newestAt = Math.max(cursor?.at ?? 0, ...all.map((entry) => entry.timestamp))
+      const files: Record<string, number> = {}
+      for (const [file, at] of Object.entries(cursor?.files ?? {})) if (at >= newestAt - FILE_CURSOR_MS) files[file] = at
+      for (const entry of all) files[entry.file] = Math.max(files[entry.file] ?? 0, entry.timestamp)
+      await ctx.store.set(cursorKey(role), { at: newestAt, files })
+    }
+    // b2c kept at most MAX_ENTRIES, and read only the end of each file: either cut means entries
+    // since the last read may never be seen. It is said in the view, never notified.
+    const bytesPerFile = new Map<string, number>()
+    for (const entry of all) bytesPerFile.set(entry.file, (bytesPerFile.get(entry.file) ?? 0) + entry.bytes)
+    const cut = returnedCount(json) >= MAX_ENTRIES || [...bytesPerFile.values()].some((bytes) => bytes >= FULL_WINDOW_BYTES)
+    await ctx.store.set(statusKey(role), { lastRead: now(), error: null, missedSince: cut ? (cursor?.at ?? since) : null })
+    if (cut) ctx.log(`the ${role} read may have missed entries`)
     if (added.length > 0 && !stopped) {
       const name = ctx.t(messages, ROLE_KEYS[role])
       try {
@@ -260,6 +339,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
       reading: reads.has(role),
       lastRead: status.lastRead,
       error: status.error,
+      missedSince: status.missedSince,
       intervalMinutes: role === 'sandbox' ? intervalOf(settings[SETTING_INTERVAL]) : 0,
       rows: out
     }

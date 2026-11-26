@@ -57,7 +57,14 @@ Changing it needs the owner's yes.
       line; `frames.ts` finds which stack frames are files of a local cartridge. A read stores
       per signature only its counters and a masked, bounded sample, never a raw entry; a
       notification says how many, never what. The workspace whose cartridges a frame is looked
-      for in is chosen by `frameRoot()` in its `worker.ts`.
+      for in is chosen by `frameRoot()` in its `worker.ts`. A read passes `--level ERROR` and
+      `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
+      reduced to its path, its locale segment to `<locale>`. **The limit of `b2c logs get`:**
+      it reads only the last 64 KB of each log file (not a flag) and keeps at most `--count`
+      entries (200 here), so a busy log can hold entries no read sees. The piece cannot fix
+      that; it detects it (200 entries returned, or 48 KB of entries from one file) and the
+      view says "some entries may have been missed since <time>", never a notification.
+      Phase 4's command line has the same limit.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
