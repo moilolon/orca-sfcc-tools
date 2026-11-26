@@ -1,14 +1,16 @@
-// The SFCC sidebar panel: the setup (b2c, what dw.json configures, the pieces), then one section
-// per piece (src/panel/sections.ts). Every text comes from src/core/i18n.ts or the piece's own
-// table, in Orca's language. It never shows a host, a path or a credential.
+// The SFCC sidebar panel: a bar with one view per delivered piece that has something to show,
+// a compact line with the state of the four environments and of b2c, the active view under it,
+// and a setup view that explains that state and how to fix it. While no piece has a view, the
+// setup view is the whole panel and there is no bar. Every text comes from src/core/i18n.ts or
+// the piece's own table, in Orca's language. It never shows a host, a path or a credential.
 //
-// What the panel knows of a piece is its section: the name, whether it is delivered, what it
-// listens to and what it draws. Nothing here names a piece.
+// What the panel knows of a piece is its section (src/panel/sections.ts): the name, whether it is
+// delivered and has a view, what it listens to and what it draws. Nothing here names a piece.
 import {
   atom,
-  Badge,
+  Box,
+  Button,
   Callout,
-  Card,
   env,
   Heading,
   IconButton,
@@ -16,18 +18,22 @@ import {
   read,
   Row,
   set,
+  settings,
   Skeleton,
+  Separator,
   Stack,
   Text,
+  type IconName,
   type OrcaNode,
-  type PanelContext,
-  type Tone
+  type PanelContext
 } from 'orca'
 import { CORE_MESSAGES, t, wordError, type CoreMessageKey } from '../core/i18n'
-import { ROLES, type Role, type RoleState } from '../core/instances'
+import { ROLES, type ConfigState, type Role, type RoleState } from '../core/instances'
 import type { PanelSection, PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import { SECTIONS } from './sections'
+import { ErrorState, Group, LabelledRow, ListRow, StateBadge, TONES, type StateTone } from './ui'
+import { FAILED_VIEW_KEY, SETUP_VIEW, VIEW_KEY, viewBoxKey } from './views'
 
 const status = atom<CoreStatus | null>(null)
 const loading = atom(false)
@@ -38,6 +44,17 @@ const problem = atom<string | null>(null)
  * section that did not start listens to nothing, so what it would draw is not to be trusted.
  */
 const broken = atom<readonly PieceId[]>([])
+/** Whether a setting names the configuration file; null when the setting could not be read. */
+const customFile = atom<boolean | null>(null)
+/** The view last picked in the bar, kept across runs of the plugin. Read through `activeView`. */
+const lastView = atom<string | null>(VIEW_KEY, null, { persist: 'plugin' })
+/**
+ * The view whose `render` threw last, kept across runs: opening the panel on it again would only
+ * show the same failure, so the next open goes to the setup view instead. A good render clears it.
+ */
+const failedView = atom<string | null>(FAILED_VIEW_KEY, null, { persist: 'plugin' })
+/** Raised by *Try again* on a view whose render threw, so the view is drawn again. */
+const attempt = atom(0)
 
 const ROLE_KEYS: Record<Role, CoreMessageKey> = {
   sandbox: 'roleSandbox',
@@ -46,10 +63,24 @@ const ROLE_KEYS: Record<Role, CoreMessageKey> = {
   production: 'roleProduction'
 }
 
-const STATE_BADGES: Record<RoleState, { key: CoreMessageKey; tone: Tone }> = {
-  ready: { key: 'roleReady', tone: 'success' },
-  incomplete: { key: 'roleIncomplete', tone: 'warning' },
-  absent: { key: 'roleAbsent', tone: 'neutral' }
+const ROLE_SHORT_KEYS: Record<Role, CoreMessageKey> = {
+  sandbox: 'roleShortSandbox',
+  development: 'roleShortDevelopment',
+  staging: 'roleShortStaging',
+  production: 'roleShortProduction'
+}
+
+/** Each state of an environment: its words, its tone and, so colour is never the only sign, its icon. */
+const ROLE_STATES: Record<RoleState, { key: CoreMessageKey; tone: StateTone; icon: IconName }> = {
+  ready: { key: 'roleReady', tone: 'ok', icon: 'check' },
+  incomplete: { key: 'roleIncomplete', tone: 'attention', icon: 'warning' },
+  absent: { key: 'roleAbsent', tone: 'off', icon: 'remove' }
+}
+
+const CONFIG_STATES: Record<ConfigState, { key: CoreMessageKey; tone: StateTone }> = {
+  ok: { key: 'configOk', tone: 'ok' },
+  missing: { key: 'configMissing', tone: 'attention' },
+  invalid: { key: 'configInvalid', tone: 'failed' }
 }
 
 function text(key: CoreMessageKey, vars?: Record<string, string | number>): string {
@@ -61,30 +92,181 @@ function codeOf(error: unknown): string {
   return error && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : 'action_failed'
 }
 
+/** Whether the person named another configuration file in Settings; only that, never the path. */
+async function readCustomFile(): Promise<boolean | null> {
+  try {
+    const value = await settings.get('configFile')
+    return typeof value === 'string' && value.trim() !== ''
+  } catch {
+    return null
+  }
+}
+
 async function load(): Promise<void> {
   set(loading, true)
+  const file = readCustomFile()
   try {
     set(status, await plugin.request('core.status', { locale: env.locale }, { timeoutMs: 60_000 }))
     set(problem, null)
   } catch (error) {
     set(problem, codeOf(error))
   } finally {
+    set(customFile, await file)
     set(loading, false)
   }
 }
 
-function B2cState({ value }: { value: CoreStatus['b2c'] }) {
-  const state = value.found
-    ? value.version
-      ? text('b2cFound', { version: value.version })
-      : text('b2cFoundNoVersion')
-    : text('b2cMissing')
+/** What needs the person's attention first, worded in a few words for the status line. */
+type Attention = { key: CoreMessageKey; tone: StateTone }
+
+function attentionOf(current: CoreStatus | null, failure: string | null, failedPieces: number): Attention | null {
+  if (failure) return { key: 'attentionUnreadable', tone: 'failed' }
+  if (current?.config === 'invalid') return { key: 'attentionConfigInvalid', tone: 'failed' }
+  if (current && !current.b2c.found) return { key: 'attentionB2c', tone: 'failed' }
+  if (failedPieces > 0) return { key: 'attentionPiece', tone: 'failed' }
+  if (current?.config === 'missing') return { key: 'attentionConfigMissing', tone: 'attention' }
+  if (current && ROLES.some((role) => current.instances[role] === 'incomplete')) return { key: 'attentionIncomplete', tone: 'attention' }
+  return null
+}
+
+function RefreshButton({ busy }: { busy: boolean }) {
+  return <IconButton icon="refresh" size="sm" variant="ghost" label={text('refresh')} disabled={busy} onPress={() => void load()} />
+}
+
+/**
+ * One fact of the status line as a small button that opens the setup view: an icon and a short
+ * name, with the whole state in its tooltip (`Development: Not configured`). The icon says the
+ * state without colour; the tone adds it where Orca draws one.
+ */
+function StatusChip({ name, tooltip, icon, tone, onPress }: { name: string; tooltip: string; icon: IconName; tone: StateTone; onPress: () => void }) {
   return (
-    <Stack gap="sm">
-      <Row justify="between">
-        <Text weight="medium">{text('b2c')}</Text>
-        <Badge tone={value.found ? 'success' : 'danger'}>{state}</Badge>
-      </Row>
+    <Button size="xs" variant="ghost" tone={TONES[tone]} icon={icon} tooltip={tooltip} onPress={onPress}>
+      {name}
+    </Button>
+  )
+}
+
+/**
+ * The line under the bar: each environment as a `StatusChip`, the b2c version, and, when something
+ * needs attention, what in a few words and a button to the setup view (Orca's buttons take no
+ * warning tone, so the words go in a badge).
+ */
+function StatusLine({ current, failure, busy, attention, onAttention }: { current: CoreStatus | null; failure: string | null; busy: boolean; attention: Attention | null; onAttention?: () => void }) {
+  const toSetup = () => set(lastView, SETUP_VIEW)
+  let state: OrcaNode = null
+  if (current) {
+    state = [
+      ...ROLES.map((role) => {
+        const roleState = ROLE_STATES[current.instances[role]]
+        return (
+          <StatusChip
+            key={role}
+            name={text(ROLE_SHORT_KEYS[role])}
+            tooltip={text('stateTooltip', { name: text(ROLE_KEYS[role]), state: text(roleState.key) })}
+            icon={roleState.icon}
+            tone={roleState.tone}
+            onPress={toSetup}
+          />
+        )
+      }),
+      current.b2c.found ? (
+        <Text key="b2c" size="sm" muted>
+          {text('b2cShort', { version: current.b2c.version ?? '' }).trim()}
+        </Text>
+      ) : (
+        <StatusChip
+          key="b2c"
+          name={text('b2cShort', { version: '' }).trim()}
+          tooltip={text('stateTooltip', { name: text('b2c'), state: text('b2cMissing') })}
+          icon="close"
+          tone="failed"
+          onPress={toSetup}
+        />
+      )
+    ]
+  } else if (!failure) {
+    // A skeleton has no width of its own: the box gives it room in the line.
+    state = (
+      <Box key="loading" grow minWidth={96}>
+        <Skeleton lines={1} label={text('loading')} />
+      </Box>
+    )
+  }
+  // One row that wraps item by item; the growing box keeps the buttons on the right.
+  return (
+    <Row align="center" gap="xs" wrap>
+      {state}
+      <Box grow />
+      {attention ? <StateBadge tone={attention.tone}>{text(attention.key)}</StateBadge> : null}
+      {attention && onAttention ? <IconButton icon="settings" size="sm" variant="ghost" label={text('openSetup')} onPress={onAttention} /> : null}
+      <RefreshButton busy={busy} />
+    </Row>
+  )
+}
+
+function FailedSection({ section, locale }: { section: PanelSection; locale: string }) {
+  return (
+    <Callout tone="danger" icon="error" title={text('sectionFailedTitle', { piece: section.title(locale) })}>
+      <Text>{text('sectionFailedBody')}</Text>
+    </Callout>
+  )
+}
+
+function Environments({ current }: { current: CoreStatus }) {
+  const states = ROLES.map((role) => current.instances[role])
+  return (
+    <Group title={text('instances')}>
+      {ROLES.map((role) => (
+        <LabelledRow key={role} label={text(ROLE_KEYS[role])}>
+          <StateBadge tone={ROLE_STATES[current.instances[role]].tone}>{text(ROLE_STATES[current.instances[role]].key)}</StateBadge>
+        </LabelledRow>
+      ))}
+      {states.includes('incomplete') ? (
+        <Text size="sm" muted>
+          {text('incompleteHint')}
+        </Text>
+      ) : null}
+      {current.config === 'ok' && states.includes('absent') ? (
+        <Text size="sm" muted>
+          {text('absentHint')}
+        </Text>
+      ) : null}
+    </Group>
+  )
+}
+
+function ConfigFile({ config, custom }: { config: ConfigState; custom: boolean | null }) {
+  const hint = custom === null ? 'configFromUnknownHint' : custom ? 'configFromSettingHint' : 'configFromWorkspaceHint'
+  return (
+    <Group title={text('configFile')}>
+      {custom === null ? null : <LabelledRow label={text('configReadFrom')}>{text(custom ? 'configFromSetting' : 'configFromWorkspace')}</LabelledRow>}
+      <LabelledRow label={text('configState')}>
+        <StateBadge tone={CONFIG_STATES[config].tone}>{text(CONFIG_STATES[config].key)}</StateBadge>
+      </LabelledRow>
+      <Text size="sm" muted>
+        {`${text(hint)} ${text('neverShown')}`}
+      </Text>
+      {config === 'invalid' ? (
+        <Callout tone="danger" icon="error" title={text('configInvalidTitle')}>
+          <Text>{text('configInvalidBody')}</Text>
+        </Callout>
+      ) : null}
+      {config === 'missing' ? (
+        <Callout tone="warning" icon="info" title={text('configMissingTitle')}>
+          <Text>{text('configMissingBody')}</Text>
+        </Callout>
+      ) : null}
+    </Group>
+  )
+}
+
+function B2cState({ value }: { value: CoreStatus['b2c'] }) {
+  const state = value.found ? (value.version ? text('b2cFound', { version: value.version }) : text('b2cFoundNoVersion')) : text('b2cMissing')
+  return (
+    <Group title={text('b2c')}>
+      <LabelledRow label={text('configState')}>
+        <StateBadge tone={value.found ? 'ok' : 'failed'}>{state}</StateBadge>
+      </LabelledRow>
       {value.found ? null : (
         <Callout tone="warning" icon="warning" title={text('b2cMissingTitle')}>
           <Stack gap="xs">
@@ -93,54 +275,140 @@ function B2cState({ value }: { value: CoreStatus['b2c'] }) {
           </Stack>
         </Callout>
       )}
+    </Group>
+  )
+}
+
+/** The delivered pieces, and any whose section did not start, listed discreetly. */
+function Pieces({ sections, failed, locale }: { sections: readonly PanelSection[]; failed: readonly PieceId[]; locale: string }) {
+  const listed = sections.filter((section) => section.delivered || failed.includes(section.id))
+  if (listed.length === 0) return null
+  return (
+    <Group title={text('pieces')}>
+      {listed.map((section) =>
+        failed.includes(section.id) ? (
+          <ListRow key={section.id} tone="failed" title={section.title(locale)} note={text('pieceFailed')} noteTone="failed" />
+        ) : (
+          <ListRow key={section.id} tone="ok" title={section.title(locale)} note={text('pieceDelivered')} noteTone="ok" />
+        )
+      )}
+    </Group>
+  )
+}
+
+function SetupView({ sections, failed, locale, busy }: { sections: readonly PanelSection[]; failed: readonly PieceId[]; locale: string; busy: boolean }) {
+  const current = read(status)
+  const failure = read(problem)
+  const custom = read(customFile)
+  return (
+    <Stack gap="md">
+      {failure ? <ErrorState title={text('errorTitle')} message={wordError(locale, failure)} retryLabel={text('tryAgain')} busy={busy} onRetry={() => void load()} /> : null}
+      {sections
+        .filter((section) => failed.includes(section.id))
+        .map((section) => (
+          <FailedSection key={section.id} section={section} locale={locale} />
+        ))}
+      {current ? (
+        <Stack gap="md">
+          <Environments current={current} />
+          <ConfigFile config={current.config} custom={custom} />
+          <B2cState value={current.b2c} />
+          <Pieces sections={sections} failed={failed} locale={locale} />
+        </Stack>
+      ) : failure ? null : (
+        <Skeleton lines={4} label={text('loading')} />
+      )}
     </Stack>
   )
 }
 
-function Instances({ config, value }: { config: CoreStatus['config']; value: CoreStatus['instances'] }) {
+/** An element as Orca's runtime builds it: what `drawNow` needs of it. */
+type DrawnElement = { readonly $$typeof: symbol; readonly type: unknown; readonly props: Record<string, unknown>; readonly key?: unknown }
+
+function isDrawnElement(node: unknown): node is DrawnElement {
+  return typeof node === 'object' && node !== null && '$$typeof' in node && 'type' in node && 'props' in node
+}
+
+/**
+ * The tree a section returned, with the components in it already called. Orca calls them only
+ * once the panel's draw has returned, so a component that throws would escape `PieceView`'s guard
+ * and blank the whole panel; calling them here, as Orca would (components have no hooks), lets the
+ * guard catch it. Anything that does not look like an element is left for Orca to judge.
+ */
+function drawNow(node: OrcaNode, depth = 0): OrcaNode {
+  if (depth > 256) return node
+  if (Array.isArray(node)) return node.map((child: OrcaNode) => drawNow(child, depth + 1))
+  if (!isDrawnElement(node)) return node
+  if (typeof node.type === 'function') {
+    const drawn = drawNow((node.type as (props: Record<string, unknown>) => OrcaNode)(node.props), depth + 1)
+    // A key given to the component (a row of a list) stays on what it drew.
+    return node.key !== undefined && node.key !== null && isDrawnElement(drawn) && (drawn.key === undefined || drawn.key === null) ? ({ ...drawn, key: node.key } as OrcaNode) : drawn
+  }
+  if (!('children' in node.props)) return node
+  return { ...node, props: { ...node.props, children: drawNow(node.props.children as OrcaNode, depth + 1) } } as OrcaNode
+}
+
+/** Records, after this draw, which view's render threw last; atoms cannot change while drawing. */
+function noteFailedRender(view: string | null): void {
+  void Promise.resolve().then(() => {
+    if (read(failedView) !== view) set(failedView, view)
+  })
+}
+
+/**
+ * A piece's view: its body; a loading placeholder until the piece has its first answer (`render`
+ * returns null); why it did not start; or, when its `render` throws, an error state with a retry,
+ * so the bar and the status line stay and the person can go elsewhere.
+ */
+function PieceView({ section, failed, locale }: { section: PanelSection; failed: boolean; locale: string }) {
+  if (failed) return <FailedSection section={section} locale={locale} />
+  read(attempt)
+  let body: OrcaNode
+  try {
+    body = drawNow(section.render(locale))
+  } catch {
+    noteFailedRender(section.id)
+    return (
+      <ErrorState
+        title={text('viewFailedTitle', { piece: section.title(locale) })}
+        message={text('viewFailedBody')}
+        retryLabel={text('tryAgain')}
+        onRetry={() => set(attempt, read(attempt) + 1)}
+      />
+    )
+  }
+  if (read(failedView) === section.id) noteFailedRender(null)
+  return body === null || body === undefined || body === false ? <Skeleton lines={3} label={text('viewLoading', { piece: section.title(locale) })} /> : body
+}
+
+/**
+ * The bar: one button per view, the open one solid, wrapping onto a second line when the sidebar
+ * is narrow (a tab strip would scroll the whole panel sideways). The setup view is the last.
+ */
+function Bar({ views, active, locale }: { views: readonly PanelSection[]; active: string; locale: string }) {
+  const pick = (view: string) => () => set(lastView, view)
   return (
-    <Card title={text('instances')} description={text('instancesHint')}>
-      <Stack gap="xs">
-        {config === 'invalid' ? (
-          <Callout tone="danger" icon="error" title={text('configInvalidTitle')}>
-            <Text>{text('configInvalidBody')}</Text>
-          </Callout>
-        ) : null}
-        {config === 'missing' ? (
-          <Callout tone="neutral" icon="info" title={text('configMissingTitle')}>
-            <Text>{text('configMissingBody')}</Text>
-          </Callout>
-        ) : null}
-        {ROLES.map((role) => (
-          <Row key={role} justify="between">
-            <Text>{text(ROLE_KEYS[role])}</Text>
-            <Badge tone={STATE_BADGES[value[role]].tone}>{text(STATE_BADGES[value[role]].key)}</Badge>
-          </Row>
-        ))}
-        {ROLES.some((role) => value[role] === 'incomplete') ? <Text muted>{text('incompleteHint')}</Text> : null}
-      </Stack>
-    </Card>
+    <Row align="center" gap="xs" wrap>
+      {views.map((section) => (
+        <Button key={`bar-${section.id}`} size="sm" variant={section.id === active ? 'solid' : 'ghost'} icon={section.icon} onPress={pick(section.id)}>
+          {section.title(locale)}
+        </Button>
+      ))}
+      <Button key={`bar-${SETUP_VIEW}`} size="sm" variant={active === SETUP_VIEW ? 'solid' : 'ghost'} icon="settings" onPress={pick(SETUP_VIEW)}>
+        {text('setup')}
+      </Button>
+    </Row>
   )
 }
 
-function Pieces({ sections, failed, locale }: { sections: readonly PanelSection[]; failed: readonly PieceId[]; locale: string }) {
-  return (
-    <Card title={text('pieces')}>
-      <Stack gap="xs">
-        {sections.map((section) => {
-          // A piece whose section did not start is not available, whatever it says of itself.
-          const state = failed.includes(section.id) ? 'failed' : section.delivered ? 'delivered' : 'coming'
-          const badge = { failed: ['pieceFailed', 'danger'], delivered: ['pieceDelivered', 'success'], coming: ['pieceComing', 'neutral'] } as const
-          return (
-            <Row key={section.id} justify="between">
-              <Text>{section.title(locale)}</Text>
-              <Badge tone={badge[state][1]}>{text(badge[state][0])}</Badge>
-            </Row>
-          )
-        })}
-      </Stack>
-    </Card>
-  )
+/**
+ * The view to draw: the first piece's until one is picked; then the one picked while it still
+ * exists, else the setup view.
+ */
+function activeView(views: readonly PanelSection[], stored: string | null): string {
+  if (stored === null) return views[0]?.id ?? SETUP_VIEW
+  if (stored === SETUP_VIEW || views.some((section) => section.id === stored)) return stored
+  return SETUP_VIEW
 }
 
 /**
@@ -148,6 +416,7 @@ function Pieces({ sections, failed, locale }: { sections: readonly PanelSection[
  * `createPanel(SECTIONS)`; tests build one over sections of their own.
  */
 export function createPanel(sections: readonly PanelSection[]): { setup(ctx: PanelContext): void; Panel(): OrcaNode } {
+  const views = sections.filter((section) => section.delivered && section.hasView)
   return {
     setup(ctx) {
       ctx.subscriptions.push(plugin.on('core.changed', () => void load()))
@@ -162,6 +431,12 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
         }
       }
       set(broken, failed)
+      // The view whose render threw on the last open is not opened again: the setup view is.
+      const lastFailed = read(failedView)
+      if (lastFailed !== null) {
+        if (read(lastView) === lastFailed) set(lastView, SETUP_VIEW)
+        set(failedView, null)
+      }
       void load()
     },
     Panel() {
@@ -170,41 +445,35 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
       const failure = read(problem)
       const failed = read(broken)
       const locale = env.locale
+
+      // No piece to show: the setup view alone, with no bar that would offer one choice.
+      if (views.length === 0) {
+        return (
+          <Stack key={viewBoxKey(SETUP_VIEW)} gap="md">
+            <Row justify="between" align="center">
+              <Heading level={2}>{text('setup')}</Heading>
+              <RefreshButton busy={busy} />
+            </Row>
+            <SetupView sections={sections} failed={failed} locale={locale} busy={busy} />
+          </Stack>
+        )
+      }
+
+      const active = activeView(views, read(lastView))
+      const attention = attentionOf(current, failure, failed.length)
+      const open = views.find((section) => section.id === active)
       return (
-        <Stack gap="md">
-          <Row justify="between" align="center">
-            <Heading level={2}>{text('setup')}</Heading>
-            <IconButton icon="refresh" label={text('refresh')} disabled={busy} onPress={() => void load()} />
-          </Row>
-          {failure ? (
-            <Callout tone="danger" icon="error" title={text('errorTitle')}>
-              <Text>{wordError(locale, failure)}</Text>
-            </Callout>
-          ) : null}
-          {sections
-            .filter((section) => failed.includes(section.id))
-            .map((section) => (
-              <Callout key={section.id} tone="danger" icon="error" title={text('sectionFailedTitle', { piece: section.title(locale) })}>
-                <Text>{text('sectionFailedBody')}</Text>
-              </Callout>
-            ))}
-          {current ? (
-            <Stack gap="md">
-              <B2cState value={current.b2c} />
-              <Instances config={current.config} value={current.instances} />
-              <Pieces sections={sections} failed={failed} locale={locale} />
-            </Stack>
-          ) : failure ? null : (
-            <Skeleton lines={4} label={text('loading')} />
-          )}
-          {sections.map((section) => {
-            const body = failed.includes(section.id) ? null : section.render(locale)
-            return body === null || body === undefined ? null : (
-              <Card key={section.id} title={section.title(locale)}>
-                {body}
-              </Card>
-            )
-          })}
+        <Stack gap="sm">
+          <Bar views={views} active={active} locale={locale} />
+          <Separator />
+          <StatusLine current={current} failure={failure} busy={busy} attention={attention} onAttention={open ? () => set(lastView, SETUP_VIEW) : undefined} />
+          <Box key={viewBoxKey(active)} paddingY="xs">
+            {open ? (
+              <PieceView section={open} failed={failed.includes(open.id)} locale={locale} />
+            ) : (
+              <SetupView sections={sections} failed={failed} locale={locale} busy={busy} />
+            )}
+          </Box>
         </Stack>
       )
     }

@@ -10,5 +10,6 @@ export const section: PanelSection = {
   icon: 'code',
   title: (locale) => t(messages, locale, 'title'),
   delivered: true,
+  hasView: false,
   render: () => null
 }

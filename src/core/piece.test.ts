@@ -55,6 +55,7 @@ test('the registries list every piece, in the order of PIECE_IDS', () => {
     assert.ok(section.title('en'), section.id)
     assert.ok(section.title('es'), section.id)
     assert.equal(typeof section.delivered, 'boolean', section.id)
+    assert.equal(typeof section.hasView, 'boolean', section.id)
   }
 })
 

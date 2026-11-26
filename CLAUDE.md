@@ -31,19 +31,22 @@ Changing it needs the owner's yes.
     - `src/protocol.ts`: the panel–worker contract (`core.status`), importing each piece's
       `protocol.ts`. Request names start with the piece id.
     - `src/worker/worker.ts` builds core and starts every piece of `src/worker/pieces.ts`;
-      `src/panel/panel.tsx` draws the setup and one section per piece of
-      `src/panel/sections.ts`, knowing no piece by name; `src/panel/checks.ts` merges core's
-      check scenarios with every piece's, and `src/panel/panel.check.ts` hands them to Orca.
-    - `src/pieces/<piece>/`: `manifest.json`, `section.tsx` (its name, `delivered`, an optional
-      `setup(ctx)` for its own events, its body), `scenarios.ts` (its check scenarios, each named
-      after the piece), `i18n.ts`, and `protocol.ts` and `worker.ts` unless it runs nothing
-      (`isml`). Pieces: `isml`, `sandbox`, `errors`, `debugger`, `engine`, `editor`. A phase works
-      inside its own piece folder: the three registries (`src/worker/pieces.ts`,
-      `src/panel/sections.ts`, `src/panel/checks.ts`) and `src/protocol.ts` already list every
-      piece, and a test fails when any other shared module imports one. The shared tests
-      (`src/panel/panel.test.tsx`, `src/worker/worker.test.ts`) expect nothing of what the
-      pieces are today: keep them that way, and test a piece beside its own files. A section
-      whose `setup` throws is shown as not started until the panel is opened again.
+      `src/panel/panel.tsx` draws a bar with one view per delivered piece of
+      `src/panel/sections.ts` that has one, the status line and the setup view (the whole panel
+      while no piece has a view), knowing no piece by name; `src/panel/ui.tsx` holds the blocks
+      every view is built from (see *Panel look*); `src/panel/checks.ts` merges core's check
+      scenarios with every piece's, and `src/panel/panel.check.ts` hands them to Orca.
+    - `src/pieces/<piece>/`: `manifest.json`, `section.tsx` (its name, `delivered`, `hasView`,
+      an optional `setup(ctx)` for its own events, the body of its view), `scenarios.ts` (its
+      check scenarios, each named after the piece), `i18n.ts`, and `protocol.ts` and `worker.ts`
+      unless it runs nothing (`isml`). Pieces: `isml`, `sandbox`, `errors`, `debugger`,
+      `engine`, `editor`. A phase works inside its own piece folder: the three registries
+      (`src/worker/pieces.ts`, `src/panel/sections.ts`, `src/panel/checks.ts`) and
+      `src/protocol.ts` already list every piece, and a test fails when any other shared module
+      imports one. The shared tests (`src/panel/panel.test.tsx`, `src/worker/worker.test.ts`)
+      expect nothing of what the pieces are today: keep them that way, and test a piece beside
+      its own files. A section whose `setup` throws is shown as not started until the panel is
+      opened again.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
@@ -127,6 +130,54 @@ Changing it needs the owner's yes.
   It is saved as UTF-8 with BOM, or PowerShell 5.1 breaks the accents; redraw it when what it
   shows changes.
 
+## Panel look
+
+The panel is one column in Orca's sidebar, often under 320 px wide. At the top, a bar of buttons,
+one per delivered piece with `hasView` and then *Setup*; it wraps onto a second line when
+narrow. Under it, the status line: the four environments and `b2c`, and what needs attention.
+Then the open view: the piece's `render(locale)`, or *Setup*. A piece not delivered is not shown;
+one with no view (`isml`) is only listed in *Setup*. Write a view only with the blocks of
+`src/panel/ui.tsx` and Orca's own components; there is no DOM or CSS, and nothing is drawn with
+text characters (no `●`, `→` as a control, ASCII boxes).
+
+- **Which block:** `Group` for each part of a view, with a short title and an optional action;
+  `LabelledRow` for one fact (label left, a text or a `StateBadge` right); `ListRow` for an item
+  of a list (a `StateMark`, a name, a short note; with `onPress` its name is a link that opens
+  the item); `Actions` for the buttons of a view or group; `Empty` when there is nothing, with
+  one line on what brings something; `ErrorState` when a request failed, worded with
+  `wordError`, with a retry when trying again can help; `Callout` (Orca's) for a fix the person
+  must make. Orca's `Button` (`size="sm"`, one `solid` for the main action, the others
+  `outline`), `IconButton` (always with a `label`), `RelativeTime`, `Spinner`, `Progress` and
+  `Skeleton` as they come; `Tree` for a hierarchy (threads and frames, a call stack) and
+  `Collapsible` for detail opened on demand (a sample of a log entry).
+- **States of a view:** `render` returns null until the piece has its first answer, and the
+  panel draws a loading placeholder; with nothing to show, the piece draws `Empty` in its own
+  words. A `render` that throws, or a component in its tree that throws, is caught: the view
+  shows an error state with *Try again*, the bar and the status line stay, and the next time the
+  panel opens it goes to *Setup* instead of that view.
+- **Tones** (`StateTone`, drawn with `TONES`): `ok` done or ready (green); `busy` working now
+  (accent; a spinner as a mark); `attention` usable but something is missing (amber); `failed`
+  broken or refused (red); `off` not set up or not running (grey, a hollow ring). Tone is never
+  the only sign: a mark sits beside words that say the same, a badge holds them, and the status
+  line gives each environment an icon (check, warning, minus) and its state in a tooltip. Orca's
+  `Button` ignores a warning tone, so a state goes in a badge or an icon, not in a button's
+  colour.
+- **Spacing:** a view is a `Stack gap="md"` of groups; inside a group rows are `gap="xs"`. No
+  `Card` in a view and nothing nested in a card: the panel is already the frame. No `Heading`
+  in a view (the bar names it) and no `Separator` between groups.
+- **Words:** a label of 24 characters or fewer, a badge of one or two words, a group title of
+  three, a note of about 12 characters (`uploading…`, `3 new`); long names are cut by
+  `truncate`, never by code. Longer guidance goes in a muted `Text size="sm"` or an `Empty`. Every
+  text in English and Spanish in the piece's `i18n.ts`; the Spanish one is often longer, so check
+  it wraps.
+- **Never** a host, a path, a credential or a value of `dw.json`, in any block: whatever a view
+  shows of `b2c`'s output goes through `b2c.mask(text)` first.
+- **Check it** at a narrow width (`orca plugin shot … --width 300`) as well as the default one.
+- **Scenarios name their view:** each one opens the view in its `persisted.plugin.view`. A
+  piece's scenarios open its own view (*Setup* until it is delivered with a view) and core's open
+  *Setup*, unless the scenario persists another (`persisted: { plugin: { view: 'setup' } }`). A
+  test mounts every scenario and fails when it draws a view other than the one it names.
+
 ## Development
 
 - `npm install`. Node 22.18 or later. `tsconfig.json` extends `.orca/types`, which is ignored
@@ -140,12 +191,12 @@ Changing it needs the owner's yes.
   `settings:own`, `workspace:read`, `workspace:write`, `notifications:show`. A change to it, or
   to the commands, needs the owner's approval in Orca again; a phase that needs more stops.
 - **Captures:** `orca plugin shot . --scenario <name> --json` draws a scenario of
-  `src/panel/checks.ts` (core's `found`, `wrongPath`, `configured`, `missing` and
-  `invalidConfig`, plus each piece's, drawn over a ready setup) with the worker on a
-  stand-in host, without loading the plugin, into `.orca/shots/`. It needs Orca's window hidden
-  or minimized and fails otherwise: never bring the window forward or change what the owner
-  sees; report the error. Open the PNG and say what it shows. Spanish needs Orca's own language
-  set to Spanish: scenarios cannot set the locale.
+  `src/panel/checks.ts` (core's `found`, `wrongPath`, `configured`, `missing`, `invalidConfig`,
+  `customConfigFile` and `workerTimeout`, plus each piece's, drawn over a ready setup, each on
+  the view it names) with the worker on a stand-in host, without loading the plugin, into
+  `.orca/shots/`. It needs Orca's window hidden or minimized and fails otherwise: never bring
+  the window forward or change what the owner sees; report the error. Open the PNG and say what
+  it shows. Spanish needs Orca's own language set to Spanish: scenarios cannot set the locale.
 - **Loading the plugin** (`orca plugin dev load` / `dev watch`) runs its code with its access
   list, so only the owner approves it; never pass `--approve` on their behalf. Every worktree
   holds a copy with the same id, and a folder load is keyed `local.sfcc-tools`, so Orca treats
