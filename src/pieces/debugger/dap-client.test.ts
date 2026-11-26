@@ -74,7 +74,8 @@ test('the header may hold other fields and any letter case; a frame without a us
   frames.push(bytes(`Content-Length: 999999999999\r\n\r\n`))
   frames.push(encodeFrame(EVENT))
   assert.deepEqual(messages, [RESPONSE, EVENT])
-  assert.deepEqual(dropped, ['length', 'length'])
+  // The stray header line is skipped as one run of garbage; the oversized length is its own drop.
+  assert.deepEqual(dropped, ['garbage', 'length'])
 })
 
 test('a body that is not JSON, or not a protocol message, is dropped; the next frame still reads', () => {
@@ -87,9 +88,64 @@ test('a body that is not JSON, or not a protocol message, is dropped; the next f
 test('stray bytes that never make a header are let go instead of growing without end', () => {
   const { frames, messages, dropped } = reader()
   frames.push(new Uint8Array(9000).fill(65))
-  assert.deepEqual(dropped, ['header'])
+  assert.deepEqual(dropped, ['garbage'])
+  assert.ok(frames.pending < 16, 'only what could begin a header is kept')
   frames.push(encodeFrame(EVENT))
   assert.deepEqual(messages, [EVENT])
+})
+
+/** Ten frames that must all arrive whatever came before them. */
+const TEN = Array.from({ length: 10 }, (_, i) => ({ seq: 100 + i, type: 'event', event: 'output', body: { output: `line ${i}` } }))
+
+function withLength(body: string, delta: number): Uint8Array {
+  return bytes(`Content-Length: ${bytes(body).length + delta}\r\n\r\n${body}`)
+}
+
+test('garbage before, between and inside frames is dropped and reading resynchronises on the next header', () => {
+  const body = JSON.stringify(EVENT)
+  const cases: [string, Uint8Array][] = [
+    ['a stray line (LF only)', bytes('Warning: something\n')],
+    ['a header whose length is not a number, with its body', bytes('Content-Length: abc\r\n\r\n{"seq":1,"type":"event","event":"x"}')],
+    ['a body one byte shorter than its declared length', withLength(body, 1)],
+    ['a body one byte longer than its declared length', withLength(body, -1)],
+    ['junk inside a header', bytes('Content-Length: 1\u0000\u0000 2\r\n\r\n{}')],
+    ['junk inside a body', bytes(`Content-Length: ${bytes(body).length}\r\n\r\n${body.slice(0, 10)}<<junk>>${body.slice(10, -8)}`)],
+    ['binary noise', new Uint8Array([0xff, 0xfe, 0x00, 0x43, 0x6f, 0x6e, 0x0a, 0x0d, 0x0a])]
+  ]
+  for (const [name, garbage] of cases) {
+    for (const size of [0, 1, 5]) {
+      const { frames, messages, dropped } = reader()
+      const whole = join(encodeFrame(RESPONSE), garbage, ...TEN.map((frame) => encodeFrame(frame)))
+      if (size === 0) frames.push(whole)
+      else for (let i = 0; i < whole.length; i += size) frames.push(whole.subarray(i, i + size))
+      const where = `${name}, chunks of ${size || 'all'}`
+      assert.deepEqual(messages[0], RESPONSE, `${where}: the frame before it`)
+      assert.deepEqual(messages.slice(-10), TEN, `${where}: the ten frames after it`)
+      assert.equal(messages.length, 11, `${where}: nothing invented`)
+      assert.ok(dropped.length >= 1 && dropped.length <= 2, `${where}: counted (${dropped.join(', ')})`)
+    }
+  }
+})
+
+test('the client counts what it drops and goes on answering', async () => {
+  const counts: number[] = []
+  let dap: ReturnType<typeof createDapClient> | null = null
+  const reading = createFrameReader((message) => {
+    if (message.type !== 'request') return
+    dap?.receive(bytes('noise\n'))
+    dap?.receive(encodeFrame({ seq: 9, type: 'response', request_seq: message.seq, command: message.command, success: true, body: { ok: true } }))
+  })
+  dap = createDapClient({
+    write: (data) => {
+      reading.push(data)
+      return true
+    },
+    onEvent: () => {},
+    onDropped: (count) => counts.push(count)
+  })
+  assert.deepEqual(await dap.request('threads'), { ok: true })
+  assert.deepEqual(await dap.request('threads'), { ok: true })
+  assert.deepEqual(counts, [1, 2])
 })
 
 /** A client over a fake adapter that records the requests written. */

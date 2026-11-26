@@ -14,11 +14,34 @@ export type DapMessage = DapRequest | DapResponse | DapEvent
 export const MAX_BODY_BYTES = 16 * 1024 * 1024
 
 const HEADER_END = [13, 10, 13, 10] // \r\n\r\n
+/** The header every frame begins with, matched in any letter case. */
+const HEADER_NAME = new TextEncoder().encode('content-length:')
+/** A header never runs this long: past it, what was taken for one is not. */
+const MAX_HEADER_BYTES = 8192
 
 function indexOfHeaderEnd(bytes: Uint8Array, from: number): number {
   for (let i = from; i + 3 < bytes.length; i++) {
     if (bytes[i] === HEADER_END[0] && bytes[i + 1] === HEADER_END[1] && bytes[i + 2] === HEADER_END[2] && bytes[i + 3] === HEADER_END[3]) return i
   }
+  return -1
+}
+
+/** Whether `HEADER_NAME`, or as much of it as `bytes` holds from `at`, is there (letters in any case). */
+function nameAt(bytes: Uint8Array, at: number, whole: boolean): boolean {
+  const available = Math.min(HEADER_NAME.length, bytes.length - at)
+  if (whole && available < HEADER_NAME.length) return false
+  for (let k = 0; k < available; k++) {
+    const want = HEADER_NAME[k]
+    const got = bytes[at + k]
+    const letter = want >= 0x61 && want <= 0x7a
+    if ((letter ? got | 0x20 : got) !== want) return false
+  }
+  return true
+}
+
+/** Where the next whole `Content-Length:` begins at or after `from`, or -1. */
+function findHeader(bytes: Uint8Array, from: number): number {
+  for (let i = from; i + HEADER_NAME.length <= bytes.length; i++) if (nameAt(bytes, i, true)) return i
   return -1
 }
 
@@ -28,14 +51,24 @@ function isMessage(value: unknown): value is DapMessage {
   return type === 'request' || type === 'response' || type === 'event'
 }
 
+/** Why a frame, or bytes that were not one, were dropped. */
+export type DropReason = 'garbage' | 'header' | 'length' | 'json' | 'message'
+
 /**
  * Turns the adapter's stdout, in chunks cut anywhere (in a header, in a body, in the middle of a
- * character), into whole messages. A frame whose header has no usable length, or whose body is
- * not a JSON message, is dropped and reading goes on after it.
+ * character), into whole messages. Whatever is not a well-formed frame is dropped and reading
+ * resynchronises on the next `Content-Length:` header: bytes before a frame (a stray line), a
+ * header with no usable length, a body that is not JSON (its declared length may be wrong, so the
+ * search starts again right after its header), or JSON that is not a protocol message. Each
+ * dropped frame or run of stray bytes is reported once through `onDropped`.
  */
-export function createFrameReader(onMessage: (message: DapMessage) => void, onDropped: (why: string) => void = () => {}) {
+export function createFrameReader(onMessage: (message: DapMessage) => void, onDropped: (why: DropReason) => void = () => {}) {
   let buffer = new Uint8Array(0)
   const decoder = new TextDecoder('utf-8')
+  /** Whether the buffer begins where a frame should; false after anything went wrong. */
+  let inStep = true
+  /** Whether the bytes being skipped were already reported, so one bad run counts once. */
+  let reported = false
 
   function append(chunk: Uint8Array): void {
     if (buffer.length === 0) {
@@ -48,41 +81,81 @@ export function createFrameReader(onMessage: (message: DapMessage) => void, onDr
     buffer = joined
   }
 
+  function drop(why: DropReason): void {
+    if (reported && why === 'garbage') return
+    reported = true
+    onDropped(why)
+  }
+
+  /** Skips to the next header; false when there is none yet (the tail that may begin one is kept). */
+  function resync(): boolean {
+    const at = findHeader(buffer, 0)
+    if (at === -1) {
+      const keep = HEADER_NAME.length - 1
+      if (buffer.length > keep) {
+        drop('garbage')
+        buffer = buffer.subarray(buffer.length - keep)
+      }
+      return false
+    }
+    if (at > 0) {
+      drop('garbage')
+      buffer = buffer.subarray(at)
+    }
+    inStep = true
+    return true
+  }
+
   return {
     push(chunk: Uint8Array): void {
       if (chunk.length === 0) return
       append(chunk)
       for (;;) {
-        const end = indexOfHeaderEnd(buffer, 0)
-        if (end === -1) {
-          // A header never runs this long: whatever this is, it is not a frame.
-          if (buffer.length > 8192) {
-            onDropped('header')
-            buffer = new Uint8Array(0)
-          }
-          return
-        }
-        const header = decoder.decode(buffer.subarray(0, end))
-        const match = /(?:^|\r\n)content-length:\s*(\d+)\s*(?:\r\n|$)/i.exec(header)
-        const length = match ? Number(match[1]) : NaN
-        if (!Number.isSafeInteger(length) || length > MAX_BODY_BYTES) {
-          onDropped('length')
-          buffer = buffer.subarray(end + 4)
+        if (!inStep && !resync()) return
+        // Line breaks or spaces between frames are no harm.
+        let start = 0
+        while (start < buffer.length && (buffer[start] === 13 || buffer[start] === 10 || buffer[start] === 32 || buffer[start] === 9)) start++
+        if (start > 0) buffer = buffer.subarray(start)
+        if (buffer.length === 0) return
+        if (!nameAt(buffer, 0, false)) {
+          inStep = false
           continue
         }
-        const start = end + 4
-        if (buffer.length < start + length) return
-        const body = buffer.subarray(start, start + length)
-        buffer = buffer.subarray(start + length)
+        const end = indexOfHeaderEnd(buffer, 0)
+        if (end === -1) {
+          if (buffer.length <= MAX_HEADER_BYTES) return
+          drop('header')
+          buffer = buffer.subarray(1)
+          inStep = false
+          continue
+        }
+        const header = decoder.decode(buffer.subarray(0, end))
+        const match = /^content-length:[ \t]*(\d+)[ \t]*(?:\r\n|$)/i.exec(header)
+        const length = match ? Number(match[1]) : NaN
+        if (!Number.isSafeInteger(length) || length > MAX_BODY_BYTES) {
+          drop('length')
+          buffer = buffer.subarray(1)
+          inStep = false
+          continue
+        }
+        const bodyStart = end + 4
+        if (buffer.length < bodyStart + length) return
+        const body = buffer.subarray(bodyStart, bodyStart + length)
         let parsed: unknown
         try {
           parsed = JSON.parse(decoder.decode(body))
         } catch {
-          onDropped('json')
+          // The declared length may be wrong: look for the next header right after this one.
+          drop('json')
+          buffer = buffer.subarray(bodyStart)
+          inStep = false
           continue
         }
-        if (isMessage(parsed)) onMessage(parsed)
-        else onDropped('message')
+        buffer = buffer.subarray(bodyStart + length)
+        if (isMessage(parsed)) {
+          reported = false
+          onMessage(parsed)
+        } else drop('message')
       }
     },
     /** Bytes held while waiting for the rest of a frame. */
@@ -133,6 +206,8 @@ export type DapClientOptions = {
   /** Writes bytes to the adapter's stdin; false when they could not be written. */
   write(bytes: Uint8Array): boolean
   onEvent(event: DapEvent): void
+  /** A frame, or a run of bytes that was not one, was dropped: how many so far. */
+  onDropped?(count: number): void
   defaultTimeoutMs?: number
 }
 
@@ -140,6 +215,7 @@ export function createDapClient(options: DapClientOptions): DapClient {
   const waiting = new Map<number, { command: string; resolve: (body: unknown) => void; reject: (error: DapError) => void; timer: ReturnType<typeof setTimeout> | null }>()
   let seq = 0
   let closed = false
+  let dropped = 0
   const reader = createFrameReader((message) => {
     if (message.type === 'event') {
       options.onEvent(message)
@@ -152,6 +228,9 @@ export function createDapClient(options: DapClientOptions): DapClient {
     if (entry.timer) clearTimeout(entry.timer)
     if (message.success) entry.resolve(message.body)
     else entry.reject(new DapError('refused', entry.command, typeof message.message === 'string' ? message.message : null))
+  }, () => {
+    dropped += 1
+    options.onDropped?.(dropped)
   })
 
   /** Writes a request; `before` runs with its number first, so an answer written back at once finds it. */
