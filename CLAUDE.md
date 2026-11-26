@@ -128,8 +128,12 @@ Changing it needs the owner's yes.
       workspace on another host (`hostId` other than `local`) is never read as a local folder.
       Picking deploys it whole to its own code version with `--activate`, then runs `code watch`
       in it, with the workspace as the working folder and never its path as an argument.
-      Releasing leaves the version active; removing a workspace deletes its version once
-      another one is active; a worker restart restarts the watcher without a redeploy.
+      Releasing leaves the version active. Every change of ownership goes through one queue, so
+      there is never more than one watcher. A version is deleted only on its workspace's
+      `workspace.removed` event (once another version is active) or by a person's hand; a
+      workspace missing from a list is never taken as removed. A worker restart restarts the
+      watcher without a redeploy, but only for a version whose last full deploy ended; the
+      others show that a deploy is needed and are never reloaded.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
       or customer data, in code, tests, fixtures, commit messages or pull requests. Fixtures are
       invented, with hosts under `example.com`. Never open or copy a real `dw.json`.

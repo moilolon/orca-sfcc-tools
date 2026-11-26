@@ -3,7 +3,7 @@
 // worker posts.
 import { afterEach, assert, hostError, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import type { SandboxStatus } from './protocol'
-import { DEPLOYING, FAILED, IDLE, WATCHING } from './scenarios'
+import { DEPLOYING, FAILED, IDLE, UPLOADING, WATCHING } from './scenarios'
 import { section } from './section'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
@@ -111,4 +111,75 @@ test('in Spanish', async () => {
   const { panel } = await show(WATCHING, {}, 'es')
   assert.ok(panel.find({ text: 'Vigilando' }))
   assert.ok(panel.find({ type: 'Button', text: 'Desplegar todo de nuevo' }))
+})
+
+const button = (target: TestPanel, text: string) => target.find({ type: 'Button', text })
+
+test('a full deploy is never the one-press main action, except to retry a failed one', async () => {
+  let shown = await show(WATCHING)
+  assert.equal(button(shown.panel, 'Deploy everything again')?.props.variant, 'outline')
+  shown.panel.unmount()
+  shown = await show(FAILED)
+  assert.equal(button(shown.panel, 'Deploy everything again')?.props.variant, 'solid')
+  panel = shown.panel
+})
+
+test('the owner’s row says what its upload is doing, a failure included', async () => {
+  const notes = async (status: SandboxStatus) => {
+    const shown = await show(status)
+    const found = ['uploads', 'deploying', 'uploading…', 'failed'].filter((note) => shown.panel.find({ text: note }))
+    shown.panel.unmount()
+    return found
+  }
+  assert.deepEqual(await notes(WATCHING), ['uploads'])
+  assert.deepEqual(await notes(DEPLOYING), ['deploying'])
+  assert.deepEqual(await notes(UPLOADING), ['uploading…'])
+  assert.deepEqual(await notes(FAILED), ['failed'])
+})
+
+test('the restart hint shows only for a watcher restored without a deploy', async () => {
+  const hint = 'Changes made while the plugin was stopped are not uploaded until the next full deploy.'
+  let shown = await show(WATCHING)
+  assert.equal(shown.panel.find({ text: hint }), null, 'not after a fresh deploy')
+  shown.panel.unmount()
+  shown = await show({ ...WATCHING, upload: { ...WATCHING.upload, restored: true } })
+  assert.ok(shown.panel.find({ text: hint }))
+  panel = shown.panel
+})
+
+test('reload is offered only for a version whose last deploy ended, while it is watched', async () => {
+  let shown = await show(WATCHING)
+  assert.equal(button(shown.panel, 'Reload version')?.props.disabled, false)
+  shown.panel.unmount()
+  for (const status of [FAILED, DEPLOYING, { ...WATCHING, upload: { ...WATCHING.upload, deployed: false } }]) {
+    shown = await show(status)
+    assert.equal(button(shown.panel, 'Reload version')?.props.disabled, true, status.upload.state)
+    shown.panel.unmount()
+  }
+  shown = await show({ ...FAILED, upload: { ...FAILED.upload, reason: 'deploy_needed' } })
+  assert.match(shown.panel.summary().join(' | '), /Deploy needed/)
+  assert.ok(shown.panel.find({ text: 'Deploy needed' }), 'the badge says it')
+  panel = shown.panel
+})
+
+test('an owner Orca no longer lists is shown as not found, kept, and can be released', async () => {
+  const { panel } = await show({ ...FAILED, upload: { ...FAILED.upload, reason: 'workspace_not_found' }, workspaces: IDLE.workspaces.filter((w) => w.id !== 'w-checkout') })
+  assert.ok(panel.find({ text: 'Not found' }))
+  assert.equal(button(panel, 'Deploy everything again')?.props.disabled, true)
+  assert.equal(button(panel, 'Stop uploading')?.props.disabled, false)
+})
+
+test('a version left behind is deleted only after pressing it and then the button', async () => {
+  const forgets: unknown[] = []
+  const { panel } = await show({ ...WATCHING, leftovers: [{ workspaceId: 'w-old', codeVersion: 'ws-old-promo' }] }, {
+    'sandbox.forget': (input: { workspaceId: string }) => {
+      forgets.push(input)
+      return WATCHING
+    }
+  })
+  assert.equal(button(panel, 'Delete this version'), null)
+  await panel.press({ type: 'Link', text: 'ws-old-promo' })
+  assert.deepEqual(forgets, [])
+  await panel.press({ type: 'Button', text: 'Delete this version' })
+  assert.deepEqual(forgets, [{ workspaceId: 'w-old' }])
 })
