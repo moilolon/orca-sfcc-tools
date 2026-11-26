@@ -8,7 +8,7 @@
 [![No build](https://img.shields.io/badge/TypeScript-no%20build-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](#-how-it-works)
 [![Salesforce Commerce Cloud](https://img.shields.io/badge/Salesforce-Commerce%20Cloud-00A1E0?style=for-the-badge)](https://developer.salesforce.com/docs/commerce/b2c-commerce/overview)
 
-<img src="assets/cover.png" alt="The plugin name beside a panel with the sandbox status, the upload of each cartridge, the new errors of the log and a line of ISML in colors" width="820">
+<img src="assets/cover.png" alt="The plugin name beside a panel with the sandbox status, the upload of each cartridge, the new errors of the log and a line of ISML" width="820">
 
 </div>
 
@@ -22,7 +22,7 @@ today it holds only the base, and the pieces in the table are added one at a tim
 
 | | Piece | What it does |
 |---|---|---|
-| 🎨 | **ISML** | Colors for `.isml` templates in Orca's editor |
+| 🧩 | **ISML** | `.isml` templates in Orca's editor |
 | ⬆️ | **Upload** | Uploads the cartridges to the sandbox on save, from one workspace at a time |
 | 🚦 | **Sandbox** | Its status and the active code version, in the status bar |
 | 🪵 | **Errors** | The new errors of the sandbox log, apart from the ones already seen |

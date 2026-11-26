@@ -1,6 +1,6 @@
 # SFCC Tools for Orca
 
-Orca plugin for working on a Salesforce Commerce Cloud (SFCC) project: ISML colors, cartridge
+Orca plugin for working on a Salesforce Commerce Cloud (SFCC) project: ISML, cartridge
 upload, sandbox status and the new errors of its log. One plugin holds everything.
 
 `README.md` is the cover for visitors, laid out like every moilolon repo: *What this is*, *How

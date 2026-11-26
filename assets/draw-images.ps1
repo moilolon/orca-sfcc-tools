@@ -124,7 +124,7 @@ $cover = @{
   Accent = '#D9466B'
   AccentDark = '#7A1F3A'
   Title = 'SFCC Tools'
-  Text = @('Salesforce Commerce Cloud in Orca:', 'ISML colors, cartridge upload', 'and the new errors of your sandbox.')
+  Text = @('Salesforce Commerce Cloud in Orca:', 'ISML, cartridge upload', 'and the new errors of your sandbox.')
 }
 
 $cover.Glyph = {
@@ -181,7 +181,7 @@ $cover.Picture = {
     Fill-Rounded $g (Get-Color '#1A1D24') 1372 ($y - 2) 52 22 11
   }
 
-  # A line of ISML, in its colors.
+  # A line of ISML.
   Fill-Rounded $g $sheet 930 766 520 110 16
   $x = 956
   foreach ($token in @(@('#7AA2F7', 96), @('#E6B95A', 70), @('#78C88C', 150), @('#7AA2F7', 30))) {
