@@ -24,6 +24,9 @@ export function cartError(options: {
   errorClass?: string
   script?: string
   functions?: [string, string, string]
+  /** The storefront's host and locale in the URL of the first line. */
+  host?: string
+  locale?: string
 }): FixtureEntry {
   const {
     at,
@@ -36,10 +39,12 @@ export function cartError(options: {
     lines = [118, 64, 42],
     errorClass = 'TypeError',
     script = 'app_example/cartridge/scripts/helpers/cartHelper.js',
-    functions = ['calculateLineTotal', 'addProductToCart', 'addProduct']
+    functions = ['calculateLineTotal', 'addProductToCart', 'addProduct'],
+    host = 'www.example.com',
+    locale = 'en_US'
   } = options
   const message = [
-    `PipelineCallServlet|${thread}|${site}|Cart-AddProduct|PipelineCall|${session} system.core ISH-CORE-2368 Error executing script 'app_example/cartridge/controllers/Cart.js': ${errorClass}: Cannot read property "price" of undefined (app_example/cartridge/scripts/helpers/cartHelper.js#${lines[0]}) at https://www.example.com/on/demandware.store/${site}/en_US/Cart-AddProduct?pid=${pid}&qty=2 for ${email} request ${request} on ${at}`,
+    `PipelineCallServlet|${thread}|${site}|Cart-AddProduct|PipelineCall|${session} system.core ISH-CORE-2368 Error executing script 'app_example/cartridge/controllers/Cart.js': ${errorClass}: Cannot read property "price" of undefined (app_example/cartridge/scripts/helpers/cartHelper.js#${lines[0]}) at https://${host}/on/demandware.store/${site}/${locale}/Cart-AddProduct?pid=${pid}&qty=2 for ${email} request ${request} on ${at}`,
     'System Information',
     '------------------',
     `Log Time: ${at}`,

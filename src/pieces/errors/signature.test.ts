@@ -35,6 +35,53 @@ test('two occurrences that differ only in volatile parts share a signature', () 
   assert.equal(signatureOf(jobError(AT, 'export_20261126_1015.xml').message).signature, signatureOf(jobError(AT, 'export_20261201_0700.xml').message).signature)
 })
 
+test('one error on two storefront hosts and two locales is one signature, and no host is kept', () => {
+  const english = signatureOf(cartError({ at: AT, host: 'www.example.com', locale: 'en_GB' }).message)
+  const french = signatureOf(cartError({ at: AT, host: 'www.example.fr', locale: 'fr_FR', site: 'Sites-Other-Site' }).message)
+  assert.equal(english.signature, french.signature)
+  for (const identity of [english.identity, french.identity]) {
+    assert.ok(!/example\.(?:com|fr)|https?:|en_GB|fr_FR/.test(identity.message), identity.message)
+    assert.match(identity.message, /\/on\/demandware\.store\/<site>\/<locale>\/Cart-AddProduct for <email>/)
+  }
+})
+
+test('the reviewer’s collisions: each pair is two errors', () => {
+  const noTrace = (pipeline: string, logger: string, text: string) => `PipelineCallServlet|1|Sites-A-Site|${pipeline}|PipelineCall|s ${logger} ${text}`
+  const pairs: [string, string][] = [
+    [noTrace('Cart-Show', 'custom.Service', 'call failed with status 404'), noTrace('Cart-Show', 'custom.Service', 'call failed with status 500')],
+    [noTrace('Cart-Show', 'system.core', 'ISH-CORE-2368 Error executing script'), noTrace('Cart-Show', 'system.core', 'ISH-CORE-2482 Error executing script')],
+    [noTrace('Cart-Show', 'custom.Basket', 'Basket could not be calculated'), noTrace('Account-Show', 'custom.Basket', 'Basket could not be calculated')],
+    [
+      noTrace('Cart-Show', 'system.core', "Error executing script 'app_x/cartridge/controllers/Cart.js': TypeError: x is undefined"),
+      noTrace('Cart-Show', 'system.core', "Error executing script 'app_x/cartridge/controllers/Search.js': TypeError: x is undefined")
+    ],
+    [noTrace('Cart-Show', 'custom.Payment', 'Unknown payment processor PAYMENT_PROC_ADYEN_V2'), noTrace('Cart-Show', 'custom.Payment', 'Unknown payment processor PAYMENT_PROC_PAYPAL_V3')],
+    // And more of the same kind.
+    [noTrace('Cart-Show', 'custom.Service', 'HTTP/1.1 502 from upstream'), noTrace('Cart-Show', 'custom.Service', 'HTTP/1.1 504 from upstream')],
+    [noTrace('Cart-Show', 'custom.Service', 'Response 401 Unauthorized'), noTrace('Cart-Show', 'custom.Service', 'Response 403 Forbidden')],
+    [noTrace('Cart-Show', 'custom.Service', 'rejected with statusCode=429'), noTrace('Cart-Show', 'custom.Service', 'rejected with statusCode=400')],
+    [noTrace('Cart-Show', 'custom.Db', 'ORA-00001 unique constraint'), noTrace('Cart-Show', 'custom.Db', 'ORA-01400 unique constraint')],
+    [noTrace('Cart-Show', 'custom.Tax', 'tax failed with error code 17'), noTrace('Cart-Show', 'custom.Tax', 'tax failed with error code 18')]
+  ]
+  for (const [a, b] of pairs) assert.notEqual(signatureOf(a).signature, signatureOf(b).signature, `${a} / ${b}`)
+})
+
+test('what the collision rules keep apart is still one error when only its values vary', () => {
+  const line = (pipeline: string, text: string) => `PipelineCallServlet|9|Sites-B-Site|${pipeline}|PipelineCall|t custom.Order ${text}`
+  const pairs: [string, string][] = [
+    [line('COPlaceOrder-Submit', 'Order orderNo=00012345 failed for customerNo: 77'), line('COPlaceOrder-Submit', 'Order orderNo=99 failed for customerNo: 12345')],
+    [line('COPlaceOrder-Submit', 'status 500 after 3 retries'), line('COPlaceOrder-Submit', 'status 500 after 7 retries')],
+    [line('COPlaceOrder-Submit', 'basket bcK8oiaagMVZ expired'), line('COPlaceOrder-Submit', 'basket Qw7ErtyuIop1 expired')],
+    [line('COPlaceOrder-Submit', 'created at Tue Nov 26 10:15:02 GMT 2026'), line('COPlaceOrder-Submit', 'created at Wed Nov 27 08:00:59 GMT 2026')]
+  ]
+  for (const [a, b] of pairs) assert.equal(signatureOf(a).signature, signatureOf(b).signature, `${a} / ${b}`)
+  // With frames, the pipeline is not part of it: the frames say where.
+  const traced = (pipeline: string) => `${line(pipeline, 'failed')}\n\tat app_x/cartridge/scripts/a.js:1 (run)`
+  assert.equal(signatureOf(traced('Cart-Show')).signature, signatureOf(traced('Account-Show')).signature)
+  assert.equal(signatureOf(traced('Cart-Show')).identity.pipeline, null)
+  assert.equal(signatureOf(line('Cart-Show', 'failed')).identity.pipeline, 'Cart-Show')
+})
+
 test('two different errors do not share a signature', () => {
   const signatures = [cartError({ at: AT }), jobError(AT), paymentError(AT, '1', 'jane.doe@example.com', '1')].map((entry) => signatureOf(entry.message).signature)
   assert.equal(new Set(signatures).size, 3)
@@ -77,7 +124,26 @@ test('normalize removes each volatile part, and keeps the words around it', () =
   const cases: [string, string][] = [
     ['at 2026-11-26 10:15:02.123 GMT done', 'at <time> done'],
     ['at 2026-11-26T10:15:02Z done', 'at <time> done'],
-    ['GET https://www.example.com/s/Home?q=shoes&page=2#top failed', 'GET https://www.example.com/s/Home failed'],
+    ['GET https://www.example.com/s/Home?q=shoes&page=2#top failed', 'GET /s/Home failed'],
+    ['call to https://api.example.com failed', 'call to / failed'],
+    ['GET https://shop.example.co.uk/on/demandware.store/Sites-A-Site/en_GB/Cart-Show?pid=1 failed', 'GET /on/demandware.store/<site>/<locale>/Cart-Show failed'],
+    ['GET https://www.example.fr/s/Shop/fr/cart failed', 'GET /s/Shop/<locale>/cart failed'],
+    ['GET http://www.example.com/s/Shop/default/cart failed', 'GET /s/Shop/<locale>/cart failed'],
+    ['GET https://www.example.com/s/Shop/home-en-gb.html failed', 'GET /s/Shop/home-<locale>.html failed'],
+    ['GET /on/demandware.store/Sites-A-Site/de_DE/Cart-Show failed', 'GET /on/demandware.store/<site>/<locale>/Cart-Show failed'],
+    ['from 192.0.2.17 refused', 'from <ip> refused'],
+    ['at Tue Nov 26 10:15:02 GMT 2026 done', 'at <time> done'],
+    ['order orderNo=00012345 and customerNo: 77 for basketId="abc12" UUID 1f2e3d4c', 'order orderNo=# and customerNo:# for basketId=# UUID #'],
+    ['valid: true', 'valid: true'],
+    ['basket bcK8oiaagMVZ not found', 'basket <id> not found'],
+    ['processor PAYMENT_PROC_ADYEN_V2 unknown', 'processor PAYMENT_PROC_ADYEN_V# unknown'],
+    ['call failed with status 404', 'call failed with status 404'],
+    ['HTTP/1.1 503 from upstream', 'HTTP/1.1 503 from upstream'],
+    ['statusCode=429 after 3 tries', 'statusCode=429 after # tries'],
+    ['failed with error code 17', 'failed with error code 17'],
+    ['Response 502 Bad Gateway after 1200 ms', 'Response 502 Bad Gateway after # ms'],
+    ['ISH-CORE-2368 and ORA-00001 raised', 'ISH-CORE-2368 and ORA-00001 raised'],
+    ["Error executing script 'app_x/cartridge/controllers/Cart.js#42': boom", "Error executing script 'app_x/cartridge/controllers/Cart.js': boom"],
     ['GET /on/demandware.store/Cart-Show?pid=12&qty=1 failed', 'GET /on/demandware.store/Cart-Show failed'],
     ['request 3f6c2a9e-1b7d-4c5e-9a0f-2d8e6b4c1a37 failed', 'request <uuid> failed'],
     ['for jane.doe@example.com only', 'for <email> only'],
@@ -92,7 +158,7 @@ test('normalize removes each volatile part, and keeps the words around it', () =
   ]
   for (const [input, expected] of cases) assert.equal(normalize(input), expected, input)
   // Words that only look like ids stay whole.
-  for (const kept of ['TypeError: Cannot read property of undefined', 'deadbeef failed', 'ISH-CORE-# Error executing script']) assert.equal(normalize(kept), kept)
+  for (const kept of ['TypeError: Cannot read property of undefined', 'deadbeef failed', 'ISH-CORE-2368 Error executing script', 'calculateLineTotal failed']) assert.equal(normalize(kept), kept)
   assert.equal(normalize('x'.repeat(1000)).length, 300)
 })
 
