@@ -11,7 +11,10 @@ Status: **nothing is built yet.** No phase starts until this plan is approved.
 1. Everything is written in this repository. No binaries and no code from other tool
    repositories.
 2. Upload, logs, sandbox, debugging and API documentation go through the official `b2c` CLI.
-   The plugin never reads `dw.json` or any credential: it hands `b2c` an instance name.
+   The plugin reads the workspace's `dw.json` for one purpose: to tell `b2c` which host and
+   credentials each environment uses. One module reads it, and what it reads goes to `b2c` in
+   the environment of the process it starts and nowhere else: it is never stored, logged,
+   shown in a panel or sent anywhere.
 3. The repository is public and holds nothing of any project it is used on: no hosts, sandbox
    names, credentials or customer data, in code, tests, fixtures, commits or pull requests.
    Every fixture is invented.
@@ -86,8 +89,9 @@ the script again.
 | Module | Promise |
 | --- | --- |
 | `piece.ts` | `WorkerPiece { id; activate(ctx): Disposable \| void }` and `PanelSection { id; title; icon; render() }`. `ctx` carries the worker API, the `b2c` runner, settings, the store, the translator and a logger. |
-| `b2c.ts` | The only place that starts `b2c`. `run(args, { role, cwd, signal, timeoutMs })` for one-shot commands (adds `--instance <name>` and `--json`), `start(args, …)` for long-lived ones. It never reads a configuration file and passes no credential. |
-| `instances.ts` | Four roles: `sandbox`, `development`, `staging`, `production`, each a setting holding an instance name. A guard in the runner allows `code`, `debug` and sandbox commands on the `sandbox` role only; the other roles accept `logs` and nothing else. The guard is tested with a fake process. |
+| `b2c.ts` | The only place that starts `b2c`. `run(args, { role, cwd, signal, timeoutMs })` for one-shot commands (adds `--json`), `start(args, …)` for long-lived ones. It puts the role's host and credentials in the environment of the process (`SFCC_SERVER`, `SFCC_CLIENT_ID`, …), never in its arguments, and tells `b2c` to load no configuration file of its own. |
+| `dw-config.ts` | The only place that reads `dw.json`: the one at the root of the workspace, or of the project's main checkout when a worktree has none; a setting can name another file. It answers `resolve(role)` with what `b2c.ts` needs and exposes nothing else: other modules learn only whether a role is configured. |
+| `instances.ts` | Four roles: `sandbox`, `development`, `staging`, `production`. The sandbox uses the plain keys of `dw.json` (`hostname`, `client-id`, …); each other role uses the same keys with a suffix, a setting per role (`-dev`, `-stg` and `-prd` by default). A guard in the runner allows `code`, `debug` and sandbox commands on the `sandbox` role only; the other roles accept `logs` and nothing else. The guard is tested with a fake process. |
 | `settings.ts` | Typed reads of the plugin's settings and change notifications. |
 | `store.ts` | Typed access to the plugin's own storage, one namespace per piece. |
 | `workspaces.ts` | The workspace list, and the workspace that uploads (read by `sandbox`, `debugger` and `engine`). |
@@ -140,8 +144,9 @@ Everything else is merged by squash once the reviewer approved and every check p
 
 **On real instances.** Tests on the sandbox use a code version of their own. Development,
 staging and production are read for logs only: nothing is uploaded, activated or debugged
-there, and the runner's guard enforces it. Instance names, hosts and log content never reach
-the repository, a commit or a pull request.
+there, and the runner's guard enforces it. Hosts, credentials and log content never reach the
+repository, a commit, a pull request or a capture attached to one: the panel shows roles, never
+hosts.
 
 ## 5. Spikes
 
@@ -155,12 +160,12 @@ thrown away; the answer is written into this table.
 | S3 | Can the open document be matched to its file from its text alone, including identical copies in several cartridges and unsaved edits, and with the path `editor.save.before` gives? | 7 | The editor is opened through a plugin command that records the path, and a tab opened another way asks which file it is. |
 | S4 | Do `.js`, `.xml` and `.properties` open directly in a plugin editor, or only as an alternative view? | 7 | The editor is the default for `.isml` only; the other types are reached from the view toggle and their findings from the problems section. |
 | S5 | Can hosted runners download the public Script API pages without being limited, is their structure stable enough to parse, and do their terms allow committing short descriptions? | 6.1 | The generator runs locally on demand and the workflow only reminds; or descriptions are left out of the committed index and read through `b2c docs` at run time. |
-| S6 | What do `b2c docs read`, `b2c logs get`, `b2c code list`, `deploy`, `watch`, `activate` and `delete` print with `--json`, with which exit codes, and how does `b2c` resolve an instance name from a worktree? | 2, 3, 6.1 | Not a yes or no: delivers the shapes as invented fixtures. |
-| S7 | Can the state of the sandbox (started, stopped, starting) be read, and the sandbox started and stopped, from the instance name alone? | 2 | Status shows whether the instance answers and its active code version; start and stop are dropped. |
+| S6 | What do `b2c docs read`, `b2c logs get`, `b2c code list`, `deploy`, `watch`, `activate` and `delete` print with `--json`, and with which exit codes? Does `b2c` authenticate for each role with host and credentials given only in the environment and no configuration file? | 0, 2, 3, 6.1 | The shapes are delivered as invented fixtures either way. If the environment is not enough, phase 0 stops: passing credentials as arguments would show them to every local process, so the alternative (a configuration file per role, written by the owner) is put to the owner. |
+| S7 | Can the state of the sandbox (started, stopped, starting) be read, and the sandbox started and stopped, from what `dw.json` holds? | 2 | Status shows whether the instance answers and its active code version; start and stop are dropped. |
 | S8 | Where can the seen list live so that the worker and a command line run outside Orca both read and write it, and how does a bot run call that command line? | 4 | The seen list moves to a file in the user's data folder that both open. |
 | S9 | Is an editing surface written here (text layer, highlight layer, gutter, pop-ups) good enough inside an editor frame: typing latency on a 3,000-line file, undo, selection, composition input? | 7 | Phase 7 stops and vendoring an open-source editor component is put to the owner, since it bends rule 1. |
 
-S1, S6 and S7 need the sandbox instance name. S2, S3, S4 and S9 share one throwaway plugin so
+S1, S6 and S7 run against the sandbox. S2, S3, S4 and S9 share one throwaway plugin so
 the owner approves a spike plugin once. S5 needs a workflow run, so it waits for the owner like
 any workflow.
 
@@ -169,7 +174,8 @@ any workflow.
 ### Phase 0. Base
 
 **Scope.** Manifest (generated), worker, one empty panel, the panel-worker contract, `src/core`,
-tests, English and Spanish texts, settings (`b2cPath`, and one instance name per role), the
+tests, English and Spanish texts, settings (`b2cPath`, the configuration file, and the key
+suffix of each role), the
 stub of every piece and both registries, development scripts (`typecheck`, `test`, `check`,
 `validate`, `manifest`), `tsconfig.json`, and `README.md` and `CLAUDE.md` brought up to date.
 
@@ -190,10 +196,18 @@ stub of every piece and both registries, development scripts (`typecheck`, `test
 - The runner starts `b2c --version` on Windows, where `b2c` is a command shim, and passes
   arguments with spaces and quotes through unchanged (tested).
 - The role guard refuses every `code`, `debug` and sandbox command on a non-sandbox role.
+- With an invented `dw.json`, the values read reach the environment of the `b2c` process and
+  nothing else: a test checks they are absent from its arguments, from storage, from the log,
+  from every answer to the panel and from error messages. A role whose keys are missing is
+  reported as not configured.
 - `CLAUDE.md` documents how to take captures and load the plugin when several worktrees hold
   a copy of it.
 
-**Risks.** `b2c` is a command shim on Windows, which Node will not start without care. Orca may
+**Spikes.** S6, for the part about authenticating from the environment.
+
+**Risks.** The plugin holds credentials in memory, production's included, for as long as a
+command runs: an error path that prints its environment would leak them, hence the test above.
+`b2c` is a command shim on Windows, which Node will not start without care. Orca may
 treat copies of the plugin in several worktrees as one development plugin. Manifest titles
 (commands, settings) can only be in one language: they are English, and only panel and
 notification texts are translated.
@@ -474,7 +488,7 @@ approves, live check, merge, report.
 
 | Wave | In parallel (at most four workers) | Waits for the owner |
 | --- | --- | --- |
-| 1 | 0, S2, S6, S7 | instance names; approval of the spike plugin and of the plugin |
+| 1 | 0, S2, S6, S7 | approval of the spike plugin and of the plugin |
 | 2 | 1, 2, 3, S1 | activation on the sandbox |
 | 3 | 5, 6.1, 6.2, S8 (and S5 before 6.1) | the workflow of 6.1 and the run S5 needs |
 | 4 | 4, 6.3, then 6.4, with S3, S4 and S9 alongside | the bot and its automation |
@@ -509,7 +523,13 @@ unless told otherwise.
    except for breakpoints in 7.3.
 8. **Deleting the version of a removed workspace** is deferred while that version is active.
 9. **One approval per phase.** Each phase adds commands, and Orca asks again for each change.
-10. **One project at a time.** Settings belong to the plugin, so instance names are four
-    plugin-wide settings.
+10. **One project at a time.** Settings belong to the plugin, so the key suffixes are
+    plugin-wide and the plugin tracks one uploading workspace.
 11. **No hosted checks.** "Every check passes" means the four local checks, recorded in the
     pull request and re-run by the reviewer.
+12. **The plugin reads `dw.json`.** The brief had the plugin read no configuration and pass
+    `b2c` an instance name. A `dw.json` that keeps each environment under its own suffixed keys
+    is not something `b2c` resolves by itself, so the plugin reads it, within the limits of
+    rule 2. `README.md` and `CLAUDE.md` say the opposite today and are corrected in phase 0.
+    The alternative that keeps the plugin away from credentials is one configuration per
+    environment in `b2c`'s own format, written once by the owner.
