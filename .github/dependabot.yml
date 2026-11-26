@@ -1,10 +1,28 @@
+# Keeps the development types current: Dependabot opens the pull requests, and `npm run
+# typecheck` and `npm test` say whether they are safe to merge.
 version: 2
+
 updates:
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
+    - package-ecosystem: "npm"
+      directory: "/"
+      schedule:
+          interval: "weekly"
+          day: "monday"
+      open-pull-requests-limit: 5
+      # package.json holds exact versions (no ^ or ~): every update rewrites it, not only the lockfile
+      versioning-strategy: "increase"
+      commit-message:
+          prefix: "chore"
+          include: "scope"
+      groups:
+          # One pull request for all the minor and patch updates of the week
+          minor-and-patch:
+              update-types:
+                  - "minor"
+                  - "patch"
+      # A major update comes alone, in its own pull request: it may need changes in the code
+      ignore:
+          # Follows the Node version Orca runs plugin workers on (Node 24, Electron 43), changed by hand with it
+          - dependency-name: "@types/node"
+            update-types:
+                - "version-update:semver-major"
