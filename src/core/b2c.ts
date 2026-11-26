@@ -175,8 +175,10 @@ export type B2c = {
   /**
    * `text` as it may be shown: every value the runner has read from a dw.json since the worker
    * started is masked, for every role and whichever workspace is focused now, and the home
-   * folder. By exact value, never by shape: other names stay whole. For what a piece takes from
-   * a `run()` result or from stdout; error details and stderr events are masked already.
+   * folder, after its ANSI escape sequences are stripped. By exact value, never by shape: other
+   * names stay whole. For what a piece takes from a `run()` result or from stdout (b2c is started
+   * with `NO_COLOR=1`, so it should print no colour); error details and stderr events are masked
+   * already.
    */
   mask(text: string): Promise<string>
   /**
@@ -336,8 +338,15 @@ export function commandFor(
 // Environment, arguments and output
 
 /**
+ * The variables the child does not inherit: the two that turn colour on whatever the output is,
+ * and `NO_COLOR` itself in any letter case, which the child gets as `NO_COLOR=1`.
+ */
+const COLOUR_VARIABLES = /^(?:FORCE_COLOR|CLICOLOR_FORCE|NO_COLOR)$/i
+
+/**
  * The child's environment: everything the worker has except any `SFCC_*` variable (so no
- * inherited `SFCC_INSTANCE` or credential), then no configuration or `.env` file of b2c's own,
+ * inherited `SFCC_INSTANCE` or credential) and `FORCE_COLOR` or `CLICOLOR_FORCE`, with
+ * `NO_COLOR=1` so b2c prints no colour, then no configuration or `.env` file of b2c's own,
  * the role's sign-in methods and its variables.
  *
  * Orca starts the worker with a trimmed environment. On Windows a missing `APPDATA`,
@@ -351,8 +360,11 @@ export function childEnvironment(
 ): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(base)) {
-    if (value !== undefined && !/^SFCC_/i.test(key)) env[key] = value
+    if (value !== undefined && !/^SFCC_/i.test(key) && !COLOUR_VARIABLES.test(key)) env[key] = value
   }
+  // b2c prints no colour: what it writes on stdout reaches a piece raw, and a colour code right
+  // before a short value would keep it from being masked.
+  env.NO_COLOR = '1'
   if (platform === 'win32' && home) {
     const root = home.replace(/[\\/]+$/, '')
     const defaults: Record<string, string> = {
@@ -441,10 +453,13 @@ export function basicForms(vars: B2cEnvironment): string[] {
 
 /**
  * ANSI escape sequences: colours and other CSI sequences, OSC sequences (a terminal title, a
- * link) and the two-character escapes. A colour code ends in a letter (`ESC[1m`), which would
- * leave a short value right after it no longer standing alone, and so unmasked.
+ * link), the escapes with intermediate bytes (`ESC ( B`) and the two-character escapes, `ESC 7`
+ * and `ESC 8` (save and restore the cursor) included. A colour code ends in a letter
+ * (`ESC[1m`), which would leave a short value right after it no longer standing alone, and so
+ * unmasked. An OSC sequence ends at its terminator on the same line: one without it loses only
+ * its `ESC ]`, and the text after it is kept.
  */
-const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-Z\\-_]|\u009b[0-?]*[ -/]*[@-~]/g
+const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b\r\n]*(?:\u0007|\u001b\\)|\u001b[ -/]+[0-~]|\u001b[0-~]|\u009b[0-?]*[ -/]*[@-~]/g
 
 /** `text` without its ANSI escape sequences. */
 export function stripAnsi(text: string): string {
@@ -486,6 +501,19 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/**
+ * The source of a pattern that finds `text` in any letter case, without the `i` flag: each letter
+ * becomes the class of its cases (`[hH]`), so needles of either kind share one pattern.
+ */
+function anyCaseSource(text: string): string {
+  let source = ''
+  for (const char of text) {
+    const cases = new Set([char, char.toLowerCase(), char.toUpperCase()].filter((each) => [...each].length === 1))
+    source += cases.size > 1 ? `[${[...cases].join('')}]` : escapeRegExp(char)
+  }
+  return source
+}
+
 /** Where a short value stands alone: not inside a word, a hyphenated name or a dotted one. */
 const ALONE_BEFORE = '(?<![\\p{L}\\p{N}_-])(?<![\\p{L}\\p{N}_-]\\.)'
 const ALONE_AFTER = '(?![\\p{L}\\p{N}_-])(?!\\.[\\p{L}\\p{N}_-])'
@@ -519,9 +547,17 @@ function percentEncoded(value: string): string {
 export function createMasker(home?: string) {
   const values = new Set<string>()
   const hosts = new Set<string>()
-  let patterns: RegExp[] | null = null
+  /** The pattern of everything remembered; rebuilt only when a value is added or becomes a host. */
+  let pattern: RegExp | null = null
+  let stale = false
+  let compiled = 0
 
-  function compile(): RegExp[] {
+  /**
+   * One pattern for everything remembered: each needle is an alternative, the longest first, so a
+   * single pass over a text masks them all, and a value is masked whole before a shorter one
+   * that starts where it does. Null when there is nothing to mask.
+   */
+  function compile(): RegExp | null {
     const needles = new Map<string, { text: string; anyCase: boolean; alone: boolean }>()
     const add = (text: string, anyCase: boolean, alone: boolean) => {
       const key = anyCase ? text.toLowerCase() : text
@@ -541,10 +577,14 @@ export function createMasker(home?: string) {
       const label = host ? value.split('.')[0] : ''
       if (namesInstance(label) && label !== value) add(label, true, label.length < LONG_VALUE)
     }
-    // The longest first, so a value is masked whole before a shorter one that is part of it.
-    return [...needles.values()]
+    if (needles.size === 0) return null
+    const alternatives = [...needles.values()]
       .sort((a, b) => b.text.length - a.text.length)
-      .map(({ text, anyCase, alone }) => new RegExp(alone ? `${ALONE_BEFORE}${escapeRegExp(text)}${ALONE_AFTER}` : escapeRegExp(text), anyCase ? 'giu' : 'gu'))
+      .map(({ text, anyCase, alone }) => {
+        const body = anyCase ? anyCaseSource(text) : escapeRegExp(text)
+        return alone ? `${ALONE_BEFORE}${body}${ALONE_AFTER}` : body
+      })
+    return new RegExp(alternatives.join('|'), 'gu')
   }
 
   const root = home?.replace(/[\\/]+$/, '')
@@ -554,20 +594,31 @@ export function createMasker(home?: string) {
     /** Adds the values of one role, as dw.json has them. The host is the one b2c is sent to. */
     remember(vars: B2cEnvironment): void {
       const keep = (value: string, host: boolean) => {
-        if (!values.has(value) || (host && !hosts.has(value))) patterns = null
+        if (!values.has(value) || (host && !hosts.has(value))) stale = true
         values.add(value)
         if (host) hosts.add(value)
       }
       for (const [variable, value] of Object.entries(vars)) if (value) keep(value, variable === 'SFCC_SERVER')
       for (const form of basicForms(vars)) keep(form, false)
     },
-    /** `text` with everything remembered masked. Anything that is not a text comes back as it is. */
+    /**
+     * `text` without its ANSI escape sequences, with everything remembered masked in one pass.
+     * Anything that is not a text comes back as it is.
+     */
     mask(text: string): string {
       if (typeof text !== 'string') return text
-      patterns ??= compile()
-      let out = text
-      for (const pattern of patterns) out = out.replace(pattern, '***')
+      if (stale) {
+        pattern = compile()
+        stale = false
+        compiled++
+      }
+      let out = stripAnsi(text)
+      if (pattern) out = out.replace(pattern, '***')
       return homePattern ? out.replace(homePattern, '~') : out
+    },
+    /** How many times the pattern has been built: once per change of the values, for the tests. */
+    get compiled(): number {
+      return compiled
     }
   }
 }
@@ -588,14 +639,14 @@ class TooDeep extends Error {}
  * numbered. Throws `TooDeep` past `MAX_JSON_DEPTH` levels, before the stack runs out.
  */
 function maskDeep(value: unknown, mask: (text: string) => string, depth = 0): unknown {
-  if (typeof value === 'string') return mask(stripAnsi(value))
+  if (typeof value === 'string') return mask(value)
   if (!value || typeof value !== 'object') return value
   if (depth >= MAX_JSON_DEPTH) throw new TooDeep()
   if (Array.isArray(value)) return value.map((item) => maskDeep(item, mask, depth + 1))
   const used = new Set<string>()
   const entries: [string, unknown][] = []
   for (const [key, item] of Object.entries(value)) {
-    const masked = mask(stripAnsi(key))
+    const masked = mask(key)
     let name = masked
     for (let count = 2; used.has(name); count++) name = `${masked} ${count}`
     used.add(name)
@@ -619,7 +670,7 @@ function maskJsonText(text: string, mask: (text: string) => string): string {
     let masked = seen.get(token)
     if (masked === undefined) {
       try {
-        masked = JSON.stringify(mask(stripAnsi(JSON.parse(token) as string)))
+        masked = JSON.stringify(mask(JSON.parse(token) as string))
       } catch {
         masked = mask(token)
       }
@@ -637,7 +688,7 @@ function maskJsonText(text: string, mask: (text: string) => string): string {
  */
 export function maskedEvent(line: string, mask: (text: string) => string): B2cEvent {
   const json = parseJson(line)
-  if (json === undefined) return { text: mask(stripAnsi(line)) }
+  if (json === undefined) return { text: mask(line) }
   try {
     return { json: maskDeep(json, mask) }
   } catch {
@@ -873,7 +924,7 @@ export function createB2c(deps: B2cDeps): B2c {
               resolve({ stdout, stderr, json: parseJson(stdout) })
             } else {
               const message = errorMessageOf(stderr)
-              reject(new B2cError('b2c_failed', { exitCode, detail: message === null ? null : prepared.mask(stripAnsi(message)) }))
+              reject(new B2cError('b2c_failed', { exitCode, detail: message === null ? null : prepared.mask(message) }))
             }
           })
         })

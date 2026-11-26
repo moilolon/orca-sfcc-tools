@@ -919,10 +919,46 @@ test('a Basic header b2c prints on stderr arrives masked', () =>
     await running.exited
   }, ADMIN_DW))
 
+test('the masking pattern is built once per change of the known values, not on every call', () => {
+  const masker = createMasker()
+  assert.equal(masker.mask('nothing known yet'), 'nothing known yet')
+  assert.equal(masker.compiled, 0)
+  masker.remember(MASKED_FILE.sandbox)
+  for (let i = 0; i < 100; i++) assert.equal(masker.mask('to Sandbox-41.example.com as admin'), 'to *** as ***')
+  assert.equal(masker.compiled, 1)
+  // The same values again change nothing; a new one, or a value becoming a host, does.
+  masker.remember(MASKED_FILE.sandbox)
+  masker.mask('x')
+  assert.equal(masker.compiled, 1)
+  masker.remember(MASKED_FILE.development)
+  assert.equal(masker.mask('dev-box and abcd1234'), '*** and ***')
+  masker.remember({ SFCC_SERVER: 'admin' })
+  assert.equal(masker.mask('ADMIN'), '***')
+  assert.equal(masker.compiled, 3)
+})
+
+test('mask() strips ANSI escape sequences too, so stdout a piece masks cannot hide a short value behind a colour', () =>
+  withWorkspace(async (root) => {
+    const coloured = 'user \u001b[1madmin\u001b[22m on \u001b[36mSandbox-41\u001b[39m, then \u001b7admin\u001b8 saved'
+    const masker = createMasker()
+    masker.remember({ SFCC_SERVER: 'sandbox-41.example.com', SFCC_USERNAME: 'admin' })
+    assert.equal(masker.mask(coloured), 'user *** on ***, then *** saved')
+    const { b2c } = runner(root)
+    assert.equal(await b2c.mask(coloured), 'user *** on ***, then *** saved')
+    // What is not a value of the file loses its colours and keeps its text.
+    assert.equal(await b2c.mask('\u001b[32mcode list\u001b[39m: \u001b]8;;app_storefront uploaded'), 'code list: 8;;app_storefront uploaded')
+  }, ADMIN_DW))
+
 test('ANSI escape sequences are stripped before masking, so a short value right after ESC[1m is masked', () =>
   withWorkspace(async (root) => {
     assert.equal(stripAnsi('\u001b[1madmin\u001b[22m, \u001b[38;5;196mred\u001b[0m, \u001b]0;title\u0007x, \u001b]8;;https://x.example.com\u001b\\link\u001b]8;;\u001b\\, \u009b31mc1'), 'admin, red, x, link, c1')
     assert.equal(stripAnsi('no escape here [1m'), 'no escape here [1m')
+    // An OSC with no terminator loses only its ESC ]: the rest of the line, and the next ones, stay.
+    assert.equal(stripAnsi('cartridge \u001b]8;;app_storefront uploaded'), 'cartridge 8;;app_storefront uploaded')
+    assert.equal(stripAnsi('title \u001b]0;first\nsecond line\u0007 kept'), 'title 0;first\nsecond line\u0007 kept')
+    // Save and restore the cursor, and a character set chosen with an intermediate byte.
+    assert.equal(stripAnsi('\u001b7admin\u001b8 and \u001b(Badmin\u001b(0'), 'admin and admin')
+    assert.equal(createMasker().mask('\u001b7x'), 'x')
     const { b2c, calls } = runner(root, fakeSpawner(() => {}))
     const events: B2cEvent[] = []
     const running = await b2c.start(['code', 'watch'], { role: 'sandbox', onEvent: (event) => events.push(event) })
@@ -1047,6 +1083,40 @@ test('masking turns the home folder into ~, whatever its slashes or case', () =>
   assert.equal(createMasker('/').mask('open /var/x'), 'open /var/x')
 })
 
+/**
+ * Waits until `calls` holds `count` spawns. Fails with a clear message when `pending` settles
+ * first (the command ended without starting its process) or when `limitMs` passes.
+ */
+async function spawned(calls: readonly unknown[], count: number, pending: Promise<unknown>, limitMs = 5000): Promise<void> {
+  let settled = false
+  pending.then(
+    () => (settled = true),
+    () => (settled = true)
+  )
+  const deadline = Date.now() + limitMs
+  while (calls.length < count) {
+    if (settled) assert.fail(`the command settled before starting process ${count}`)
+    if (Date.now() > deadline) assert.fail(`process ${count} was not started within ${limitMs} ms`)
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+}
+
+test('the wait for a spawn is bounded, and says why when the spawn never happens', async () => {
+  const never = new Promise(() => {})
+  assert.equal(await failureText(spawned([], 1, never, 20)), 'process 1 was not started within 20 ms')
+  assert.equal(await failureText(spawned([], 1, Promise.reject(new Error('refused')), 1000)), 'the command settled before starting process 1')
+  await spawned(['one'], 1, never)
+})
+
+async function failureText(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  return 'resolved'
+}
+
 test('times out and aborts at once, without waiting for the pipes to close', () =>
   withWorkspace(async (root) => {
     // A process whose pipes never close, even once killed.
@@ -1056,8 +1126,9 @@ test('times out and aborts at once, without waiting for the pipes to close', () 
     assert.ok(calls[0].child.killed)
     const controller = new AbortController()
     const pending = b2c.run(['logs', 'get'], { role: 'sandbox', signal: controller.signal })
-    // Aborts once the process has started: preparing it takes longer while other files run.
-    while (calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 1))
+    // Aborts once the process has started: preparing it takes longer while other files run. The
+    // wait is bounded, and fails at once if run() settles without ever starting the process.
+    await spawned(calls, 2, pending)
     controller.abort()
     assert.equal(await codeOf(pending), 'aborted')
     assert.ok(calls[1].child.killed)
@@ -1632,8 +1703,31 @@ test('refuses, by position, any argument of a .cmd or .bat that holds a cmd.exe 
 
 test('childEnvironment drops SFCC_* whatever its case', () => {
   const env = childEnvironment({ Sfcc_Server: 'x', SFCC_INSTANCE: 'y', PATH: 'p' }, { SFCC_SERVER: 'h.example.com' }, { platform: 'linux', homedir: '/home/someone', role: 'development' })
-  assert.deepEqual(env, { PATH: 'p', SFCC_CONFIG: '', SFCC_DOTENV_FILE: '', SFCC_AUTH_METHODS: 'client-credentials', SFCC_SERVER: 'h.example.com' })
+  assert.deepEqual(env, { PATH: 'p', NO_COLOR: '1', SFCC_CONFIG: '', SFCC_DOTENV_FILE: '', SFCC_AUTH_METHODS: 'client-credentials', SFCC_SERVER: 'h.example.com' })
 })
+
+test('the child never colours its output: NO_COLOR=1, and FORCE_COLOR and CLICOLOR_FORCE dropped whatever their case', () => {
+  const base = { PATH: 'p', FORCE_COLOR: '3', force_color: '1', CLICOLOR_FORCE: '1', Clicolor_Force: '1', no_color: '', NO_COLOR: '0', CLICOLOR: '1' }
+  for (const platform of ['linux', 'win32']) {
+    const env = childEnvironment(base, {}, { platform, homedir: '/home/someone' })
+    const colour = Object.entries(env).filter(([key]) => /COLOR/i.test(key))
+    assert.deepEqual(colour, [['CLICOLOR', '1'], ['NO_COLOR', '1']], platform)
+  }
+})
+
+test('through the runner, both one-shot and long-lived commands start with no colour forced', () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls } = runner(root, fakeSpawner(), { env: { PATH: '/fake/bin', HOME: '/home/someone', FORCE_COLOR: '3', CLICOLOR_FORCE: '1' } })
+    await b2c.run(['code', 'list'], { role: 'sandbox' })
+    const running = await b2c.start(['logs', 'tail'], { role: 'sandbox' })
+    running.stop()
+    for (const call of calls) {
+      assert.equal(call.options.env.NO_COLOR, '1')
+      assert.equal(call.options.env.FORCE_COLOR, undefined)
+      assert.equal(call.options.env.CLICOLOR_FORCE, undefined)
+    }
+    assert.equal(calls.length, 2)
+  }))
 
 test('on Windows, fills the profile folders a trimmed worker environment lacks, and keeps the ones it has', () => {
   const profile = { platform: 'win32', homedir: 'C:\\Users\\someone' }

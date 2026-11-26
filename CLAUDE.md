@@ -104,8 +104,11 @@ Changing it needs the owner's yes.
       already masked. `run()` results and stdout chunks are as `b2c` printed them, hosts
       included, because a piece needs the data: whatever a piece shows, logs, stores or sends to
       a panel of them goes through `b2c.mask(text)` first (it reads no file: join the rows and
-      mask once), and it finds its own instance in a list with `b2c.isHost(role, value)`, never
-      by holding the host.
+      mask once; it strips ANSI escape sequences before masking, and the child is started with
+      `NO_COLOR=1` and without `FORCE_COLOR` or `CLICOLOR_FORCE`, so `b2c` prints no colour that
+      a chunk could cut in two). The masker builds one pattern per change of the known values
+      and masks a text in one pass. A piece finds its own instance in a list with
+      `b2c.isHost(role, value)`, never by holding the host.
     - One workspace uploads, the one picked by hand; it never follows the focused workspace. A
       workspace on another host (`hostId` other than `local`) is never read as a local folder.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
