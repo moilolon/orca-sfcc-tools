@@ -1,6 +1,6 @@
 import { assert, test } from 'orca/testing'
 import { B2C_COMMANDS, B2C_VERSION } from './b2c-commands-fixture'
-import { ALLOWED_COMMANDS, ALLOWED_FLAGS, commandOf, flagOf, guard, isRole, refusedFlag, ROLES, suffixFor, topicOf } from './instances'
+import { ALLOWED_COMMANDS, ALLOWED_FLAGS, commandOf, DEBUGGER_CLIENT_ID, flagOf, guard, isRole, refusedFlag, ROLES, suffixFor, topicOf } from './instances'
 
 const SUFFIXES = { development: '-dev', staging: '-stg', production: '-prd' }
 
@@ -220,4 +220,45 @@ test('the allow list holds nothing that names a host, a user, a credential, a fi
   assert.equal(refusedFlag(['sandbox', 'start', 'abcd-001', '--timeout', '60']), 3)
   assert.equal(refusedFlag(['code', 'list', '--version']), 2)
   assert.equal(ALLOWED_FLAGS.size, 43)
+})
+
+test('--client-id passes only on debug, once, with exactly the debugger’s own id', () => {
+  assert.equal(DEBUGGER_CLIENT_ID, 'orca-sfcc-tools')
+  assert.ok(!ALLOWED_FLAGS.has('--client-id'), 'it is no flag of the allow list')
+  assert.equal(refusedFlag(['debug', '--client-id', 'orca-sfcc-tools']), -1)
+  assert.equal(refusedFlag(['debug', '--client-id=orca-sfcc-tools']), -1)
+  assert.equal(refusedFlag(['debug', '--cartridge-path', 'cartridges', '--client-id', 'orca-sfcc-tools']), -1)
+  // Any other value, form, count or command is refused, at the flag.
+  for (const args of [
+    ['debug', '--client-id', 'b2c-cli'],
+    ['debug', '--client-id', 'ORCA-SFCC-TOOLS'],
+    ['debug', '--client-id', 'orca-sfcc-tools2'],
+    ['debug', '--client-id', ' orca-sfcc-tools'],
+    ['debug', '--client-id'],
+    ['debug', '--client-id='],
+    ['debug', '--client-id=b2c-cli'],
+    ['debug', '--client-id=orca-sfcc-tools=x'],
+    ['debug', '--Client-Id', 'orca-sfcc-tools'],
+    ['debug', '--client-ID=orca-sfcc-tools'],
+    ['debug', '--client-id', '--client-id=orca-sfcc-tools'],
+    ['debug', '--clientid', 'orca-sfcc-tools'],
+    ['debug', '--client', 'orca-sfcc-tools'],
+    ['debug', '--client-id-x', 'orca-sfcc-tools'],
+    ['debug:cli', '--client-id', 'orca-sfcc-tools'],
+    ['logs', 'tail', '--client-id', 'orca-sfcc-tools'],
+    ['code', 'deploy', '--client-id=orca-sfcc-tools'],
+    ['sandbox', 'list', '--client-id', 'orca-sfcc-tools'],
+    ['docs', 'search', '--client-id', 'orca-sfcc-tools']
+  ]) {
+    const at = args.findIndex((arg) => /^--client/i.test(arg))
+    assert.equal(refusedFlag(args), at, args.join(' '))
+  }
+  // Twice, even both with the right value: the second one is refused too.
+  assert.equal(refusedFlag(['debug', '--client-id', 'orca-sfcc-tools', '--client-id=orca-sfcc-tools']), 1)
+  // `debug` itself stays a sandbox command: the guard refuses it on every other role.
+  for (const role of ['development', 'staging', 'production'] as const) {
+    assert.deepEqual(guard(['debug', '--client-id', 'orca-sfcc-tools'], role), { ok: false, code: 'role_refused' }, role)
+  }
+  assert.deepEqual(guard(['debug', '--client-id', 'orca-sfcc-tools'], undefined), { ok: false, code: 'role_required' })
+  assert.deepEqual(guard(['debug', '--client-id', 'orca-sfcc-tools'], 'sandbox'), { ok: true, needsRole: true })
 })

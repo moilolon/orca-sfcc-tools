@@ -2079,3 +2079,40 @@ test('through the installed b2c shim, an argument with a space arrives unchanged
     rmSync(cwd, { recursive: true, force: true })
   }
 })
+
+test('the debugger’s client id reaches b2c only on debug, on the sandbox, with its own value', () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls } = runner(root, fakeSpawner(() => {}))
+    for (const form of [['--client-id', 'orca-sfcc-tools'], ['--client-id=orca-sfcc-tools']]) {
+      for (const role of ROLE_OR_NONE) {
+        const args = ['debug', ...form]
+        const where = `${args.join(' ')} on ${role ?? 'no role'}`
+        if (role === 'sandbox') {
+          const running = await b2c.start(args, { role })
+          assert.deepEqual(calls.at(-1)?.args, args, where)
+          running.stop()
+        } else {
+          assert.equal(await codeOf(b2c.start(args, { role })), role ? 'role_refused' : 'role_required', where)
+          assert.equal(await codeOf(b2c.run(args, { role })), role ? 'role_refused' : 'role_required', `${where} (run)`)
+        }
+      }
+    }
+    assert.equal(calls.length, 2, 'only the sandbox started, once per form')
+    // Every other value, spelling or command is refused at the flag, on every role that may run the command.
+    for (const role of EVERY_ROLE) {
+      for (const args of [
+        ['debug', '--client-id', 'b2c-cli'],
+        ['debug', '--client-id', 'ORCA-SFCC-TOOLS'],
+        ['debug', '--client-id=other'],
+        ['debug', '--client-id'],
+        ['debug', '--client-id', 'orca-sfcc-tools', '--client-id=orca-sfcc-tools'],
+        ['logs', 'tail', '--client-id', 'orca-sfcc-tools'],
+        ['logs', 'get', '--client-id=orca-sfcc-tools']
+      ]) {
+        // `debug` is refused by role off the sandbox; anywhere else the flag is, at its first spelling.
+        const expected = args[0] === 'debug' && role !== 'sandbox' ? 'role_refused@null' : `flag_not_allowed@${args.findIndex((arg) => arg.startsWith('--client-id'))}`
+        assert.equal(await refusalOf(b2c.start(args, { role })), expected, `${args.join(' ')} on ${role}`)
+      }
+    }
+    assert.equal(calls.length, 2, 'nothing else started')
+  }, READY_DW))

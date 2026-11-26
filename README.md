@@ -28,12 +28,14 @@ one at a time.
 | ⬆️ | **Upload** | Uploads the cartridges to the sandbox on save, from one workspace at a time |
 | 🚦 | **Sandbox** | Its status and the active code version, in the status bar |
 | 🪵 | **Errors** | The new errors of the sandbox log, apart from the ones already seen |
+| 🐞 | **Debugger** | Breakpoints on the sandbox, and the threads, call stack and variables of a request halted on one, with continue and step |
 
 ---
 
 ## 🧭 How it works
 
-- **On the official CLI.** Upload, logs and the sandbox go through `b2c`, Salesforce's CLI.
+- **On the official CLI.** Upload, logs, the sandbox and debugging go through `b2c`,
+  Salesforce's CLI.
   It is the only thing the plugin needs installed: it ships no binaries of its own.
 - **Four environments.** The sandbox reads the plain keys of `dw.json`; development, staging
   and production read the same keys with a suffix (`-dev`, `-stg`, `-prd`, set in Settings).

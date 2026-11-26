@@ -69,6 +69,32 @@
         "default": "-prd"
       }
     ],
+    "commands": [
+      {
+        "id": "debugger.start",
+        "title": "SFCC: Start debugging the sandbox"
+      },
+      {
+        "id": "debugger.stop",
+        "title": "SFCC: Stop debugging"
+      },
+      {
+        "id": "debugger.continue",
+        "title": "SFCC: Continue (debugger)"
+      },
+      {
+        "id": "debugger.stepOver",
+        "title": "SFCC: Step over (debugger)"
+      },
+      {
+        "id": "debugger.stepIn",
+        "title": "SFCC: Step in (debugger)"
+      },
+      {
+        "id": "debugger.stepOut",
+        "title": "SFCC: Step out (debugger)"
+      }
+    ],
     "syntaxes": [
       {
         "id": "isml",
