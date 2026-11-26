@@ -1,10 +1,12 @@
 // The debugger's worker half over a mock host and the scripted fake adapter: the requests, the
 // commands, coalesced posts, the sandbox-only rule, the store of breakpoints, and the disconnect
 // when the worker goes away. No b2c runs.
+import { EventEmitter } from 'node:events'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import type { B2c } from '../../core/b2c'
 import { translator } from '../../core/i18n'
 import type { RoleState } from '../../core/instances'
+import { createOpenFile, type OpenFileChild } from '../../core/open-file'
 import type { Disposable, PieceContext, Workspace, Workspaces } from '../../core/piece'
 import { createStore } from '../../core/store'
 import { plainSettings } from '../../core/test-support'
@@ -39,11 +41,39 @@ const readDir: ReadDir = async (path) => {
   return (tree[rel] ?? []).map((name) => ({ name: name.replace(/\/$/, ''), isDirectory: () => name.endsWith('/'), isFile: () => !name.endsWith('/') }))
 }
 
+/** The Orca beside the running one, as src/core/open-file.ts finds it on this invented machine. */
+const ORCA_EXEC = '/opt/orca/orca'
+const ORCA_CLI = '/opt/orca/resources/bin/orca'
+
+/**
+ * `orca file open` over a fake process: `runs` exits 0, `fails` exits 1, `missing` has no Orca
+ * command line at all. Every call is recorded; nothing is started.
+ */
+function fakeOrca(behaviour: 'runs' | 'fails' | 'missing') {
+  const calls: { file: string; args: readonly string[] }[] = []
+  const openFile = createOpenFile({
+    platform: 'linux',
+    execPath: ORCA_EXEC,
+    env: { PATH: '/nowhere' },
+    homedir: '/home/someone',
+    isFile: async (path) => (path === ORCA_CLI ? behaviour !== 'missing' : path.startsWith(`${FAKE_ROOT}/`)),
+    realPath: async (path) => path,
+    spawn: (file, args) => {
+      calls.push({ file, args })
+      const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true })
+      queueMicrotask(() => child.emit('exit', behaviour === 'runs' ? 0 : 1))
+      return child as unknown as OpenFileChild
+    }
+  })
+  return { openFile, calls }
+}
+
 /**
  * The debugger's worker half over a mock host. `throughCore` starts it as the plugin's worker does
  * (src/worker/worker.ts, with this piece alone), so deactivation is core's own.
  */
-async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Workspace | null, storage = {} as Record<string, boolean>, throughCore = false } = {}) {
+async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Workspace | null, storage = {} as Record<string, boolean>, throughCore = false, orca = 'runs' as 'runs' | 'fails' | 'missing' } = {}) {
+  const opening = fakeOrca(orca)
   const adapter = new FakeAdapter({
     frames: [{ id: 70000, name: 'show()', source: { name: 'Page.js', path: `${FAKE_ROOT}/${PAGE}` }, line: 11 }],
     threads: [{ id: 7, name: 'Thread 7' }],
@@ -64,7 +94,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     instances: async () => ({ config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }),
     isHost: async () => false
   } as unknown as B2c
-  const options = { coalesceMs: 20, platform: 'linux', readDir, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
+  const options = { coalesceMs: 20, platform: 'linux', readDir, openFile: opening.openFile, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
   const module = throughCore
     ? {
         default: createActivate({
@@ -88,7 +118,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
       }
   const worker = await mountWorker(module, { host: mockHost({ capabilities: CAPABILITIES, storage, results: { 'editor.open': { opened: true } } }), commands: COMMANDS })
   const states = () => worker.posts.filter((post) => post.event === 'debugger.state').map((post) => post.payload as DebuggerState)
-  return { worker, adapter, logs, states }
+  return { worker, adapter, logs, states, opened: opening.calls }
 }
 
 async function codeOf(promise: Promise<unknown>): Promise<string> {
@@ -139,7 +169,7 @@ test('breakpoints are kept per workspace with relative paths; a bad one is refus
 })
 
 test('a whole session: start answers at once, posts are coalesced, a halt shows its stack, values come on demand, stop disconnects', async () => {
-  const { worker, adapter, states, logs } = await mount()
+  const { worker, adapter, states, logs, opened } = await mount()
   await worker.request('debugger.setBreakpoints', { path: PAGE, lines: [11] })
   const started = await worker.request('debugger.start', {})
   assert.equal(started.status, 'connecting')
@@ -163,11 +193,12 @@ test('a whole session: start answers at once, posts are coalesced, a halt shows 
   const scopes = await worker.request('debugger.variables', { frameId: 70000 })
   assert.deepEqual(await worker.request('debugger.variables', { reference: scopes[0].reference }), [{ name: 'host', value: 'https://***/', reference: 0, expensive: false }])
   assert.deepEqual(await worker.request('debugger.evaluate', { expression: 'req.host', frameId: 70000 }), { result: 'value of req.host at ***', reference: 0 })
-  // Jumping to a frame opens its file in the workspace.
+  // Jumping to a frame opens its file at its line, through Orca's command line, in the workspace.
   assert.deepEqual(await worker.request('debugger.open', { frameId: 70000 }), { opened: true })
-  // Orca takes the path relative to the workspace.
-  assert.deepEqual(worker.host.calls.filter((call) => call.method === 'editor.open').at(-1)?.params, { workspaceId: 'w1', path: PAGE })
+  assert.deepEqual(opened.at(-1), { file: ORCA_CLI, args: ['file', 'open', `${FAKE_ROOT}/${PAGE}`, '--worktree', `path:${FAKE_ROOT}`, '--line', '11', '--focus', '--json'] })
   assert.deepEqual(await worker.request('debugger.open', { path: PAGE, line: 3 }), { opened: true })
+  assert.deepEqual(opened.at(-1)?.args.slice(5, 7), ['--line', '3'])
+  assert.equal(worker.host.calls.filter((call) => call.method === 'editor.open').length, 0, 'no fallback while Orca’s command line runs')
   assert.deepEqual(worker.refusals, [])
 
   const stepped = await worker.request('debugger.step', { kind: 'over' })
@@ -183,6 +214,32 @@ test('a whole session: start answers at once, posts are coalesced, a halt shows 
   // Nothing of the host reached a post, storage or the log.
   const everything = JSON.stringify([worker.posts, worker.host.data().storage, logs])
   assert.ok(!everything.includes(FAKE_HOST), 'no host anywhere')
+})
+
+test('a frame opens at its line and column through orca file open, with the workspace’s folder as its root', async () => {
+  const { worker, adapter, states, opened } = await mount()
+  adapter.config.frames = [{ id: 1, name: 'show()', source: { name: 'Page.js', path: `${FAKE_ROOT}/${PAGE}` }, line: 24, column: 7 }]
+  await worker.request('debugger.start', {})
+  await until(() => states().some((state) => state.status === 'attached'), 'attached')
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => (states().at(-1)?.frames.length ?? 0) > 0, 'halted')
+  assert.deepEqual(await worker.request('debugger.open', { frameId: 1 }), { opened: true })
+  assert.deepEqual(opened.at(-1)?.args, ['file', 'open', `${FAKE_ROOT}/${PAGE}`, '--worktree', `path:${FAKE_ROOT}`, '--line', '24', '--column', '7', '--focus', '--json'])
+})
+
+test('when Orca’s command line cannot run, the file still opens through editor.open, at the top', async () => {
+  for (const orca of ['missing', 'fails'] as const) {
+    const { worker, opened } = await mount({ orca })
+    assert.deepEqual(await worker.request('debugger.open', { path: PAGE, line: 3 }), { opened: true }, orca)
+    assert.equal(opened.length, orca === 'missing' ? 0 : 1, `${orca}: started only when found`)
+    // editor.open takes the path relative to the workspace, and no line.
+    assert.deepEqual(worker.host.calls.filter((call) => call.method === 'editor.open').at(-1)?.params, { workspaceId: 'w1', path: PAGE }, orca)
+  }
+  // A path outside the workspace is refused before anything runs, and is no reason to fall back.
+  const { worker, opened } = await mount()
+  assert.equal(await codeOf(worker.request('debugger.open', { path: '../outside.js', line: 1 })), 'invalid_path')
+  assert.equal(opened.length, 0)
+  assert.equal(worker.host.calls.filter((call) => call.method === 'editor.open').length, 0)
 })
 
 test('the commands start, step and stop the session, and say when there is nothing to do', async () => {

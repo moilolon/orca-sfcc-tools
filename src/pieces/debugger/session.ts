@@ -144,7 +144,7 @@ export function createSession(deps: SessionDeps) {
   let state: SessionSnapshot = empty('idle')
   const halted = new Set<number>()
   /** Each frame's path in the workspace, as the adapter gave it, to open it; kept only while the session runs. */
-  let framePaths = new Map<number, string>()
+  let framePaths = new Map<number, { path: string; column: number }>()
   /** Raised on every stop and step, so an answer that arrives late never shows an old stack. */
   let generation = 0
 
@@ -452,7 +452,8 @@ export function createSession(deps: SessionDeps) {
       const source = asRecord(frame.source)
       const full = asText(source.path)
       const rel = full ? relative(full) : null
-      if (rel) framePaths.set(id, rel)
+      // The column too: 0 (or none) when the adapter does not know it, as it answers today.
+      if (rel) framePaths.set(id, { path: rel, column: asNumber(frame.column) ?? 0 })
       const fileName = asText(source.name) || (full ? paths.basename(full) : '')
       frames.push({
         id,
@@ -724,11 +725,15 @@ export function createSession(deps: SessionDeps) {
       released()
     },
 
-    /** The path (relative to the workspace) and line of a frame inside it, to open it; null otherwise. */
-    frameLocation(frameId: number): { path: string; line: number } | null {
-      const path = framePaths.get(frameId)
+    /**
+     * The path (relative to the workspace), line and column (when the adapter gave one) of a frame
+     * inside the workspace, to open it; null otherwise.
+     */
+    frameLocation(frameId: number): { path: string; line: number; column?: number } | null {
+      const known = framePaths.get(frameId)
       const frame = state.frames.find((each) => each.id === frameId)
-      return path && frame ? { path, line: frame.line } : null
+      if (!known || !frame) return null
+      return known.column > 0 ? { path: known.path, line: frame.line, column: known.column } : { path: known.path, line: frame.line }
     }
   }
 }

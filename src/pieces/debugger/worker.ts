@@ -11,6 +11,7 @@ import { messages } from './i18n'
 import type { DebuggerState, DebugWorkspaceState, StepKind } from './protocol'
 import { createSession, SessionError, type SessionSnapshot } from './session'
 import { DapError } from './dap-client'
+import { createOpenFile, type OpenFile } from '../../core/open-file'
 import { debugWorkspace, isLocal, openFile } from './workspace'
 
 /** The flag of a session that may have left a debugger client on the instance. */
@@ -32,6 +33,8 @@ export type DebuggerOptions = {
   timeouts?: Parameters<typeof createSession>[0]['timeouts']
   platform?: string
   readDir?: ReadDir
+  /** How a file is opened at a line; default src/core/open-file.ts. */
+  openFile?: OpenFile
 }
 
 const STEP_KINDS: readonly StepKind[] = ['continue', 'over', 'in', 'out']
@@ -53,6 +56,7 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
 
 export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {}): Disposable {
   const breakpoints = createBreakpoints(ctx.store)
+  const open = options.openFile ?? createOpenFile({ log: ctx.log })
   const coalesceMs = options.coalesceMs ?? COALESCE_MS
   let timer: ReturnType<typeof setTimeout> | null = null
   let disposed = false
@@ -233,11 +237,11 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
         if (typeof input?.frameId === 'number') {
           const location = session.frameLocation(input.frameId)
           if (!location) return { opened: false }
-          return { opened: await openFile(ctx.orca.host, workspace, location.path, location.line) }
+          return { opened: await openFile(open, ctx.orca.host, workspace, location) }
         }
         const path = normalizePath(input?.path)
         if (!path) throw new DebuggerError('invalid_path')
-        return { opened: await openFile(ctx.orca.host, workspace, path, typeof input?.line === 'number' ? input.line : null) }
+        return { opened: await openFile(open, ctx.orca.host, workspace, { path, line: typeof input?.line === 'number' ? input.line : null }) }
       })
     ),
     ctx.orca.commands.register('debugger.start', async () => {
