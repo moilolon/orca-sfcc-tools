@@ -12,9 +12,9 @@
     var price = dw.util.StringUtils.formatNumber(42.5, '#,##0.00'); // a line comment
     /* a block comment */
     var label = `Total: ${price} \u20AC`;
-    var quoted = 'it\'s "quoted"';
+    var quoted = 'it\'s "quoted"'.replace(/"/g, '');
 </isscript>
-<!-- An HTML comment with ${notAnExpression} in it -->
+<!-- ISML still runs in an HTML comment: ${pdict.count} <isprint value="${pdict.count}"/> -->
 <div class="product-tile ${product.available ? 'in-stock' : 'sold-out'}" data-pid="${product.ID}">
     <h1 title='${Resource.msg("label.title", "product", null)}'>${product.name}</h1>
     <isif condition="${!empty(product.images) && product.images.length > 0}">
@@ -31,7 +31,7 @@
         </isloop>
     </ul>
     <p>${'A } in a string, and an escaped \' quote'} and ${ {count: 1}.count }</p>
-    <isinclude url="${URLUtils.url('Product-Show', 'pid', product.ID)}"/>
+    <isinclude url="${URLUtils.url("Product-Show", "pid", product.ID)}"/>
     <isbadge label="${Resource.msg('badge.new', 'product', null)}"/>
     <isslot id="product-banner" context="global" description="An invented slot"/>
 </div>

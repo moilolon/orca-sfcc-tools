@@ -311,7 +311,8 @@ test('HTML: tags, attribute names, quoted and unquoted values, entities, the doc
   token(showcase, 23, '&amp;', 'constant.character.entity.html')
   token(showcase, 37, '</', 'punctuation.definition.tag.begin.html')
   token(showcase, 2, 'DOCTYPE', 'entity.name.tag.doctype.html')
-  token(showcase, 17, '<!-- An HTML comment with ${notAnExpression} in it -->', 'comment.block.html')
+  token(showcase, 17, '<!--', 'comment.block.html')
+  token(showcase, 17, '-->', 'comment.block.html')
   const unquoted = tokenize('<input type=checkbox checked>')
   token(unquoted, 1, 'checkbox', 'string.unquoted.html')
   token(unquoted, 1, 'checked', 'entity.other.attribute-name.html')
@@ -375,7 +376,7 @@ test('an expression in text and in attribute values, of HTML and ISML tags', () 
   // In ISML attributes.
   inside(showcase, 9, '${pdict.product}', 'meta.embedded.expression.isml')
   inside(showcase, 20, '${!empty(product.images) && product.images.length > 0}', 'meta.embedded.expression.isml')
-  inside(showcase, 34, "${URLUtils.url('Product-Show', 'pid', product.ID)}", 'meta.embedded.expression.isml')
+  inside(showcase, 34, '${URLUtils.url("Product-Show", "pid", product.ID)}', 'meta.embedded.expression.isml')
 })
 
 test('JavaScript in an expression: keywords, constants, operators, calls, properties and support names', () => {
@@ -417,6 +418,10 @@ test('an expression keeps a } that sits in a string or closes nested braces, and
   token(showcase, 15, "'it", 'string.quoted.single.js')
   token(showcase, 15, "\\'", 'constant.character.escape.js')
   token(showcase, 15, 's "quoted"\'', 'string.quoted.single.js')
+  // A double-quoted string inside an expression inside a double-quoted value.
+  token(showcase, 34, '"Product-Show"', 'string.quoted.double.js')
+  token(showcase, 34, '}', 'punctuation.section.embedded.end.isml')
+  token(showcase, 34, '"', 'string.quoted.double.isml', 6)
 })
 
 test('<isscript> is JavaScript', () => {
@@ -452,7 +457,11 @@ test('both kinds of comment, whatever they hold', () => {
   ] as const) {
     token(showcase, line, text, 'comment.block.isml')
   }
-  token(showcase, 17, '${notAnExpression}', 'comment.block.html')
+  // ISML runs inside an HTML comment: only the rest of it is comment.
+  token(showcase, 17, '<!-- ISML still runs in an HTML comment: ', 'comment.block.html')
+  token(showcase, 17, '${', 'punctuation.section.embedded.begin.isml')
+  token(showcase, 17, 'isprint', 'entity.name.tag.isml')
+  token(showcase, 17, ' -->', 'comment.block.html')
   token(showcase, 8, 'isdecorate', 'entity.name.tag.isml')
 })
 
@@ -501,4 +510,96 @@ test('an unclosed ${ stops at the end of the line, the closing quote or the clos
   token(doc, 7, "'", 'string.quoted.single.html', 2)
   token(doc, 7, 'Text', 'text.html.isml')
   token(doc, 8, 'p', 'entity.name.tag.html')
+})
+
+// ---------------------------------------------------------------------------------------------
+// The review's samples, on src/pieces/isml/fixtures/edges.isml
+
+const edges = fixture('edges.isml')
+
+test('the edge cases end at the top level, and only their blocks stay open', () => {
+  // <isscript with its > on the next line (10 and 11), its body (12), <iscomment split (14),
+  // the second <isscript> (17 to 21).
+  assert.deepEqual(edges.depthAfter, [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0])
+})
+
+test('ISML inside an HTML comment is ISML; the rest of the comment stays comment', () => {
+  token(edges, 1, '<!-- ', 'comment.block.html')
+  token(edges, 1, '${', 'punctuation.section.embedded.begin.isml')
+  token(edges, 1, 'pdict', 'support.variable.isml')
+  token(edges, 1, ' and ', 'comment.block.html')
+  token(edges, 1, 'isinclude', 'entity.name.tag.isml')
+  token(edges, 1, 'template', 'entity.other.attribute-name.isml')
+  token(edges, 1, ' stay ISML -->', 'comment.block.html')
+  inside(edges, 1, 'isinclude', 'comment.block.html')
+  token(edges, 2, 'p', 'entity.name.tag.html')
+})
+
+test('inside a quoted value, an expression closed on its line keeps its own strings of either quote', () => {
+  // <isif condition="${pdict.type == "a"}">: the value goes on after the expression.
+  token(edges, 3, '"a"', 'string.quoted.double.js')
+  token(edges, 3, '}', 'punctuation.section.embedded.end.isml')
+  token(edges, 3, '"', 'string.quoted.double.isml', 4)
+  token(edges, 3, '>', 'punctuation.definition.tag.end.isml')
+  token(edges, 3, 'A', 'text.html.isml')
+  for (const text of ['"Page-Include"', '"cid"', '"x"']) token(edges, 4, text, 'string.quoted.double.js')
+  token(edges, 4, '/>', 'punctuation.definition.tag.end.isml')
+  // The same with single quotes inside a single-quoted value.
+  token(edges, 7, "'k'", 'string.quoted.single.js')
+  token(edges, 7, "'", 'string.quoted.single.html', 6)
+  token(edges, 7, 'z', 'text.html.isml')
+  // One left open still stops at the quote of its value, even with a closed one after it.
+  token(edges, 5, '"', 'string.quoted.double.html', 2)
+  token(edges, 5, 'open', 'text.html.isml')
+  token(edges, 6, '"', 'string.quoted.double.html', 2)
+  token(edges, 6, 'x', 'text.html.isml')
+  token(edges, 6, 'b', 'variable.other.readwrite.js', 2)
+  token(edges, 6, 'y', 'text.html.isml')
+})
+
+test('HTML raw-text tags in any letter case', () => {
+  token(edges, 8, 'Script', 'entity.name.tag.html')
+  token(edges, 8, 'var', 'storage.type.js')
+  token(edges, 8, '"<p>"', 'string.quoted.double.js')
+  token(edges, 8, 'Script', 'entity.name.tag.html', 2)
+  token(edges, 9, 'STYLE', 'entity.name.tag.html')
+  token(edges, 9, 'p { color: red; }', 'source.css.embedded.html')
+  token(edges, 9, 'STYLE', 'entity.name.tag.html', 2)
+})
+
+test('<isscript and <iscomment open their block when the rest of the tag is on the next line', () => {
+  token(edges, 10, 'isscript', 'entity.name.tag.isml')
+  token(edges, 11, 'type', 'entity.other.attribute-name.isml')
+  token(edges, 11, '>', 'punctuation.definition.tag.end.isml')
+  token(edges, 12, 'var', 'storage.type.js')
+  inside(edges, 12, 'a = 1', 'source.js.embedded.isml')
+  token(edges, 13, 'isscript', 'entity.name.tag.isml')
+  token(edges, 14, '<iscomment', 'comment.block.isml')
+  token(edges, 15, '>hidden <p>x</p></iscomment>', 'comment.block.isml')
+})
+
+test('template strings inside an expression', () => {
+  token(edges, 16, '`a}b`', 'string.template.js')
+  token(edges, 16, '}', 'punctuation.section.embedded.end.isml', 2)
+  token(edges, 16, ' and ', 'text.html.isml')
+  token(edges, 16, '`x ', 'string.template.js')
+  token(edges, 16, '${', 'punctuation.definition.template-expression.begin.js', 3)
+  token(edges, 16, 'pdict', 'support.variable.isml')
+  token(edges, 16, ' z`', 'string.template.js')
+  token(edges, 16, '}', 'punctuation.section.embedded.end.isml', 4)
+})
+
+test('regular-expression literals in <isscript> where a / cannot be division', () => {
+  token(edges, 18, "/'/g", 'string.regexp.js')
+  token(edges, 18, "''", 'string.quoted.single.js')
+  token(edges, 19, '/^https?:\\/\\//', 'string.regexp.js')
+  token(edges, 19, 'test', 'entity.name.function.js')
+  token(edges, 19, 'var', 'storage.type.js')
+  token(edges, 21, 'return', 'keyword.control.js')
+  token(edges, 21, '/x[/]y/i', 'string.regexp.js')
+  // Division stays an operator.
+  token(edges, 20, '/', 'keyword.operator.js')
+  token(edges, 20, '/', 'keyword.operator.js', 2)
+  token(edges, 20, 'c', 'variable.other.readwrite.js')
+  token(edges, 23, 'p', 'entity.name.tag.html')
 })
