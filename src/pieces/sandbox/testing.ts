@@ -66,6 +66,12 @@ export class FakeB2c implements B2c {
   hold = new Set<string>()
   /** Commands that fail, by their first words, with a code. */
   fail = new Map<string, string>()
+  /** The workspace folders that have a configuration file. */
+  configured = new Set<string>()
+
+  async hasConfig(root: string): Promise<boolean> {
+    return this.configured.has(root)
+  }
 
   private matches(args: readonly string[], key: string): boolean {
     return args.slice(0, key.split(' ').length).join(' ') === key
