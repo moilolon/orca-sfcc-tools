@@ -95,7 +95,7 @@ function SandboxGroup({ current, locale, ready, busy }: { current: SandboxStatus
       {ready && !following && (state === 'stopped' || state === 'started') ? (
         <Actions>
           {state === 'stopped' ? (
-            <Button size="sm" variant="solid" icon="play" tooltip={w('tipStart')} disabled={busy} onPress={() => void act('sandbox.start')}>
+            <Button size="sm" variant="solid" icon="play" disabled={busy} onPress={() => void act('sandbox.start')}>
               {w('start')}
             </Button>
           ) : (
@@ -153,7 +153,7 @@ function UploadGroup({ current, locale, ready, busy }: { current: SandboxStatus;
           size="sm"
           variant={failed && !lost ? 'solid' : 'outline'}
           icon="upload"
-          tooltip={w('tipDeploy')}
+         
           disabled={busy || deploying || lost || !ready}
           onPress={() => void act('sandbox.deploy')}
         >
@@ -229,7 +229,7 @@ function WorkspacesGroup({ current, locale, ready, busy }: { current: SandboxSta
       )}
       {candidate ? (
         <Actions>
-          <Button size="sm" variant="solid" icon="upload" tooltip={w('tipPick')} disabled={busy || !ready} onPress={() => void act('sandbox.pick', candidate.id)}>
+          <Button size="sm" variant="solid" icon="upload" disabled={busy || !ready} onPress={() => void act('sandbox.pick', candidate.id)}>
             {w('uploadFromThis')}
           </Button>
         </Actions>
