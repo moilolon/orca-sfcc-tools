@@ -22,7 +22,7 @@ import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { extname, posix } from 'node:path'
 import { DW_KEYS, loadConfig, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
-import { commandOf, guard, refusedFlag, ROLES, topicOf, type ConfigState, type Role, type RoleState } from './instances'
+import { commandOf, guard, isRole, refusedFlag, ROLES, topicOf, type ConfigState, type Role, type RoleState } from './instances'
 import type { Logger } from './piece'
 import type { Settings } from './settings'
 
@@ -43,7 +43,7 @@ export type B2cErrorCode =
 
 /**
  * Its message is its code and nothing else. `detail` is b2c's own error text when it gave one,
- * with every role's values and anything shaped like a host masked. `argument` is the position
+ * with every value read from a dw.json masked. `argument` is the position
  * (from 0) of the argument a `flag_not_allowed` or `unsafe_argument` refused, never its text.
  */
 export class B2cError extends Error {
@@ -113,7 +113,9 @@ export type RunResult = { stdout: string; stderr: string; json: unknown }
 
 /**
  * One line of a long-lived command's stderr: its JSON event, or the raw text. Both arrive
- * masked: the text, and every string of the JSON (b2c names the host in its messages).
+ * masked, once the line is whole: the text, and every string of the JSON at any depth, keys
+ * included (b2c names the host in its messages). Only the values of dw.json are masked: a file
+ * name, a code version or a cartridge name in an event is as b2c wrote it.
  */
 export type B2cEvent = { json: unknown } | { text: string }
 
@@ -169,16 +171,18 @@ export type B2c = {
   /** The state of dw.json and of each role. The only thing the rest of the plugin learns of it. */
   instances(): Promise<InstancesState>
   /**
-   * `text` as it may be shown: every value dw.json holds for any role, the home folder and
-   * anything shaped like a host are masked. For what a piece takes from a `run()` result or
-   * from stdout; error details and stderr events are masked already.
+   * `text` as it may be shown: every value the runner has read from a dw.json since the worker
+   * started is masked, for every role and whichever workspace is focused now, and the home
+   * folder. By exact value, never by shape: other names stay whole. For what a piece takes from
+   * a `run()` result or from stdout; error details and stderr events are masked already.
    */
   mask(text: string): Promise<string>
   /**
-   * Whether `value` is the host of `role`, in any case. It lets a piece find its own instance
-   * in a list b2c returns without ever holding the host.
+   * Whether `value` is the host of `role`: the whole of it, in any letter case. False for
+   * anything that is not a text, and it never throws. It lets a piece find its own instance in
+   * a list b2c returns without ever holding the host.
    */
-  isHost(role: Role, value: string): Promise<boolean>
+  isHost(role: Role, value: unknown): Promise<boolean>
 }
 
 export type B2cDeps = {
@@ -369,28 +373,28 @@ export function childEnvironment(
 }
 
 /**
- * A value this short is common inside ordinary words (a one-letter user name is in every
- * sentence), so in a text it is masked only where it stands alone.
- */
-const SHORT_VALUE = 4
-
-/**
- * From this length a value is looked for anywhere inside an argument. A shorter one is an
- * ordinary word as often as not (a user called `admin`, a code version called `admin-fix`).
+ * From this length a value of dw.json is looked for anywhere inside an argument or a text. A
+ * shorter one is an ordinary word as often as not (a user called `admin`, a code version called
+ * `admin-fix`), so it counts only where it stands alone.
  */
 const LONG_VALUE = 8
 
+/** From this length the first label of a host names the instance, and is masked with the host. */
+const INSTANCE_LABEL = 6
+
 /**
- * The position of the first argument that holds a value read from dw.json, or -1. A value of
- * eight characters or more is looked for anywhere in the argument; a shorter one only as the
- * whole argument or the whole value of a `--flag=value`, so it does not block unrelated ones.
+ * The position of the first argument that holds a value read from dw.json, or -1, in any letter
+ * case. A value of eight characters or more is looked for anywhere in the argument; a shorter
+ * one only as the whole argument or the whole value of a `--flag=value`, so it does not block
+ * unrelated ones.
  */
 export function argumentWithValue(args: readonly string[], values: readonly string[]): number {
-  const known = values.filter(Boolean)
+  const known = values.filter(Boolean).map((value) => value.toLowerCase())
   return args.findIndex((arg) => {
-    const equals = arg.startsWith('-') ? arg.indexOf('=') : -1
-    const flagValue = equals === -1 ? null : arg.slice(equals + 1)
-    return known.some((value) => (value.length >= LONG_VALUE ? arg.includes(value) : arg === value || flagValue === value))
+    const lower = arg.toLowerCase()
+    const equals = lower.startsWith('-') ? lower.indexOf('=') : -1
+    const flagValue = equals === -1 ? null : lower.slice(equals + 1)
+    return known.some((value) => (value.length >= LONG_VALUE ? lower.includes(value) : lower === value || flagValue === value))
   })
 }
 
@@ -408,49 +412,110 @@ function parseJson(text: string): unknown {
   }
 }
 
-/**
- * A host name as it is written in a message: three or more labels in lower case (an underscore
- * counts, some internal names have one), the last alphabetic. A name of two labels is as often
- * a method or a file (`Site.current`, `Cart.js`), and one with a capital in it is an API name
- * (`dw.catalog.ProductMgr`): neither is masked. A host the file holds is masked as a value,
- * whatever its shape.
- */
-const HOST = /(?<![A-Za-z0-9_.-])(?:[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?\.){2,}[a-z]{2,}(?![A-Za-z0-9_-])/g
-const IPV4 = /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/g
-/** Four or more groups, or a form shortened with `::`; a time (`12:34:56`) is neither. */
-const IPV6 = /(?<![0-9a-z:])(?:(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})(?![0-9a-z:])/gi
-
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-/**
- * `text` with each of `values` masked, in any case, then anything shaped like a host: an IP
- * address or a name of three or more labels. A value shorter than four characters is masked
- * only where it stands alone, never inside a word. `home`, the user's folder (its last part is
- * usually the account name), becomes `~`.
- */
-export function redact(text: string, values: readonly string[], home?: string): string {
-  let out = text
-  for (const value of [...new Set(values)].filter(Boolean).sort((a, b) => b.length - a.length)) {
-    // A host is often printed in lower case, however the file spells it.
-    if (value.length >= SHORT_VALUE) out = out.replace(new RegExp(escapeRegExp(value), 'giu'), '***')
-    else out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(value)}(?![\\p{L}\\p{N}_])`, 'gu'), '***')
+/** Where a short value stands alone: not inside a word, a hyphenated name or a dotted one. */
+const ALONE_BEFORE = '(?<![\\p{L}\\p{N}_-])(?<![\\p{L}\\p{N}_-]\\.)'
+const ALONE_AFTER = '(?![\\p{L}\\p{N}_-])(?!\\.[\\p{L}\\p{N}_-])'
+
+function percentEncoded(value: string): string {
+  try {
+    return encodeURIComponent(value)
+  } catch {
+    return value
   }
-  const root = home?.replace(/[\\/]+$/, '')
-  if (root && root.length > 1) out = out.replace(new RegExp(escapeRegExp(root).replace(/\\\\|\//g, '[\\\\/]'), 'gi'), '~')
-  return out
-    .replace(IPV4, '<host>')
-    .replace(IPV6, '<host>')
-    .replace(HOST, '<host>')
 }
 
-/** A parsed JSON value with every string in it passed through `mask`: keys stay, values are masked. */
+/**
+ * What hides the values of dw.json in a text. It masks by exact value and never by shape:
+ * guessing what looks like a host destroys ordinary names (`jquery.min.js`,
+ * `dw.order.calculate`, a Java package in a stack trace) that a piece needs whole.
+ *
+ * It remembers every value it is given and never forgets one, so a text is masked the same
+ * whichever workspace is focused when it is masked. What is masked:
+ * - each value, as it is written in the file; a host in any letter case;
+ * - the first label of a host, when it has six characters or more: it names the instance;
+ * - the percent-encoded and the JSON-escaped form of a value, where they differ from it;
+ * - `home`, the user's folder (its last part is usually the account name), as `~`.
+ * A value shorter than eight characters is masked only where it stands alone: a user called
+ * `admin` leaves `admin-fix`, `bm_admin_tools` and `Administrator` as they are.
+ */
+export function createMasker(home?: string) {
+  const values = new Set<string>()
+  const hosts = new Set<string>()
+  let patterns: RegExp[] | null = null
+
+  function compile(): RegExp[] {
+    const needles = new Map<string, { text: string; anyCase: boolean; alone: boolean }>()
+    const add = (text: string, anyCase: boolean, alone: boolean) => {
+      const key = anyCase ? text.toLowerCase() : text
+      const same = needles.get(key)
+      // The widest reading wins: any case over exact, anywhere over alone.
+      if (text) needles.set(key, { text, anyCase: anyCase || !!same?.anyCase, alone: alone && (same?.alone ?? true) })
+    }
+    for (const value of values) {
+      const host = hosts.has(value)
+      const alone = value.length < LONG_VALUE
+      add(value, host, alone)
+      const encoded = percentEncoded(value)
+      // The hexadecimal digits of an encoded character come in either case.
+      if (encoded !== value) add(encoded, true, alone)
+      const escaped = JSON.stringify(value).slice(1, -1)
+      if (escaped !== value) add(escaped, host, alone)
+      const label = host ? value.split('.')[0] : ''
+      if (label.length >= INSTANCE_LABEL && label !== value) add(label, true, label.length < LONG_VALUE)
+    }
+    // The longest first, so a value is masked whole before a shorter one that is part of it.
+    return [...needles.values()]
+      .sort((a, b) => b.text.length - a.text.length)
+      .map(({ text, anyCase, alone }) => new RegExp(alone ? `${ALONE_BEFORE}${escapeRegExp(text)}${ALONE_AFTER}` : escapeRegExp(text), anyCase ? 'giu' : 'gu'))
+  }
+
+  const root = home?.replace(/[\\/]+$/, '')
+  const homePattern = root && root.length > 1 ? new RegExp(escapeRegExp(root).replace(/\\\\|\//g, '[\\\\/]'), 'gi') : null
+
+  return {
+    /** Adds the values of one role, as dw.json has them. The host is the one b2c is sent to. */
+    remember(vars: B2cEnvironment): void {
+      for (const [variable, value] of Object.entries(vars)) {
+        if (!value) continue
+        if (!values.has(value) || (variable === 'SFCC_SERVER' && !hosts.has(value))) patterns = null
+        values.add(value)
+        if (variable === 'SFCC_SERVER') hosts.add(value)
+      }
+    },
+    /** `text` with everything remembered masked. Anything that is not a text comes back as it is. */
+    mask(text: string): string {
+      if (typeof text !== 'string') return text
+      patterns ??= compile()
+      let out = text
+      for (const pattern of patterns) out = out.replace(pattern, '***')
+      return homePattern ? out.replace(homePattern, '~') : out
+    }
+  }
+}
+
+/**
+ * A parsed JSON value with every string in it passed through `mask`, at any depth, keys
+ * included (a host can be the key of a map as well as a value). Two keys that mask alike are
+ * both kept, the later one numbered.
+ */
 function maskDeep(value: unknown, mask: (text: string) => string): unknown {
   if (typeof value === 'string') return mask(value)
   if (Array.isArray(value)) return value.map((item) => maskDeep(item, mask))
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, maskDeep(item, mask)]))
-  return value
+  if (!value || typeof value !== 'object') return value
+  const used = new Set<string>()
+  const entries: [string, unknown][] = []
+  for (const [key, item] of Object.entries(value)) {
+    const masked = mask(key)
+    let name = masked
+    for (let count = 2; used.has(name); count++) name = `${masked} ${count}`
+    used.add(name)
+    entries.push([name, maskDeep(item, mask)])
+  }
+  return Object.fromEntries(entries)
 }
 
 /**
@@ -542,14 +607,24 @@ export function createB2c(deps: B2cDeps): B2c {
   const home = deps.homedir ?? homedir()
   const pipeGraceMs = deps.pipeGraceMs ?? DEFAULT_PIPE_GRACE_MS
 
-  /** Every value the file holds, of every role: all of them are masked, not only the ones a command gets. */
+  /**
+   * Every value read from a dw.json since the worker started, whichever workspace it came from:
+   * masking must not depend on the workspace focused at the moment a text is masked.
+   */
+  const masker = createMasker(home)
+  let everRead = false
+
+  /** Every value the file holds, of every role: none of them may be in an argument. */
   function valuesOf(config: LoadedConfig): string[] {
     return ROLES.flatMap((each) => Object.values(config.roles[each].vars)).filter((value): value is string => !!value)
   }
 
   async function readConfig(): Promise<LoadedConfig> {
     const values = await deps.settings.read()
-    return loadConfig({ root: await deps.configRoot(), configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
+    const config = await loadConfig({ root: await deps.configRoot(), configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
+    for (const role of ROLES) masker.remember(config.roles[role].vars)
+    everRead = true
+    return config
   }
 
   /**
@@ -565,7 +640,7 @@ export function createB2c(deps: B2cDeps): B2c {
     if (flagAt !== -1) throw new B2cError('flag_not_allowed', { argument: flagAt })
     const config = await readConfig()
     const known = valuesOf(config)
-    const mask = (text: string) => redact(text, known, home)
+    const mask = masker.mask
     let vars: B2cEnvironment = {}
     if (verdict.needsRole && role) {
       if (config.state === 'invalid') throw new B2cError('config_invalid')
@@ -778,12 +853,20 @@ export function createB2c(deps: B2cDeps): B2c {
     },
 
     async mask(text) {
-      return redact(text, valuesOf(await readConfig()), home)
+      // Whatever b2c printed, it printed after the runner read the file it was started with. The
+      // file is read here only when nothing has been read yet since the worker started.
+      if (!everRead) await readConfig()
+      return masker.mask(text)
     },
 
     async isHost(role, value) {
-      const host = (await readConfig()).roles[role].vars.SFCC_SERVER
-      return !!host && host.trim().toLowerCase() === value.trim().toLowerCase()
+      if (typeof value !== 'string' || !isRole(role)) return false
+      try {
+        const host = (await readConfig()).roles[role].vars.SFCC_SERVER
+        return !!host && host.trim().toLowerCase() === value.trim().toLowerCase()
+      } catch {
+        return false
+      }
     }
   }
   return api

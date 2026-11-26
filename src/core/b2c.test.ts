@@ -3,7 +3,7 @@
 // shim that echoes what it received and over the b2c shim installed on the machine.
 import { assert, test } from 'orca/testing'
 import { exec, spawn as nodeSpawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -13,11 +13,11 @@ import {
   childEnvironment,
   commandFor,
   createB2c,
+  createMasker,
   errorMessageOf,
   escapeShimArgument,
   parseVersion,
   quoteWindowsArgument,
-  redact,
   resolveExecutable,
   unsafeShimArgument,
   type B2c,
@@ -25,6 +25,7 @@ import {
   type Spawner
 } from './b2c'
 import { B2C_COMMANDS, B2C_VERSION } from './b2c-commands-fixture'
+import type { FileSystem } from './dw-config'
 import { ALLOWED_FLAGS, type Role } from './instances'
 import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, plainSettings } from './test-support'
 
@@ -543,6 +544,13 @@ test('a value of eight characters or more blocks an argument that contains it; a
   assert.equal(argumentWithValue(['logs', 'get', '--search=xstoremanx'], values), 2)
   assert.equal(argumentWithValue(['logs', 'get', '--search', 'x-invented-long-secret-x'], values), 3)
   assert.equal(argumentWithValue(['code', 'activate', 'storema'], values), -1)
+  // In any letter case, as masking is for a host: the file says Sandbox-41.Example.com.
+  const cased = ['Sandbox-41.Example.com', 'Admin']
+  assert.equal(argumentWithValue(['code', 'activate', 'x-sandbox-41.example.com'], cased), 2)
+  assert.equal(argumentWithValue(['logs', 'get', '--search=SANDBOX-41.EXAMPLE.COM'], cased), 2)
+  assert.equal(argumentWithValue(['code', 'activate', 'admin'], cased), 2)
+  assert.equal(argumentWithValue(['logs', 'get', '--SEARCH=ADMIN'], cased), 2)
+  assert.equal(argumentWithValue(['code', 'activate', 'admin-fix'], cased), -1)
   assert.equal(argumentWithValue(['code', 'activate', 'v1'], ['', 'ab']), -1)
 })
 
@@ -556,6 +564,9 @@ test('through the runner: a user called admin lets admin-fix through, and an eig
       assert.equal(await refusalOf(b2c.run(['code', 'activate', 'admin'], { role: 'sandbox' })), 'unsafe_argument@2')
       assert.equal(await refusalOf(b2c.run(['code', 'activate', 'fix-secret88-b'], { role: 'sandbox' })), 'unsafe_argument@2')
       assert.equal(await refusalOf(b2c.run(['logs', 'get', '--search=xsecret88x'], { role: 'development' })), 'unsafe_argument@2')
+      // The host in another letter case than the file's is the host all the same.
+      assert.equal(await refusalOf(b2c.run(['code', 'activate', 'x-SANDBOX-04.example.com'], { role: 'sandbox' })), 'unsafe_argument@2')
+      assert.equal(await refusalOf(b2c.run(['code', 'activate', 'ADMIN'], { role: 'sandbox' })), 'unsafe_argument@2')
       assert.equal(calls.length, 2)
     },
     { hostname: 'sandbox-04.example.com', username: 'admin', password: 'secret88', 'hostname-dev': 'dev-04.example.com', 'client-id-dev': 'invented-dev-client-id', 'client-secret-dev': 'invented-dev-client-secret' }
@@ -691,7 +702,7 @@ test('reads b2c’s error from the last JSON line of stderr, else its last ERROR
   assert.equal(errorMessageOf(''), null)
 })
 
-test('errors carry their code, and b2c’s message with hosts and the values of every role masked', () =>
+test('errors carry their code, and b2c’s message with the values of every role masked', () =>
   withWorkspace(async (root) => {
     // b2c's message names what it was given (the child's own host, user and secret) and, here,
     // values of the other roles too: another role's client id, and one of a role with no host.
@@ -715,11 +726,12 @@ test('errors carry their code, and b2c’s message with hosts and the values of 
       errors.push(failure)
     }
     assert.deepEqual(errors.map((error) => error.code), ['b2c_failed', 'b2c_failed', 'b2c_failed', 'role_refused', 'role_not_configured', 'credentials_missing'])
-    // The role's own host is one of its values; any other host-shaped name is masked too.
-    assert.equal(errors[0].detail, 'cannot reach *** (also <host>) as *** with ***, not *** or ***')
-    assert.equal(errors[1].detail, 'cannot reach *** (also <host>) as *** with ***, not *** or ***')
+    // Every value of the file is masked, whichever role it belongs to. A host the file does not
+    // hold is not: masking goes by value, never by what a name looks like.
+    assert.equal(errors[0].detail, 'cannot reach *** (also edge.cdn.example.com) as *** with ***, not *** or ***')
+    assert.equal(errors[1].detail, 'cannot reach *** (also edge.cdn.example.com) as *** with ***, not *** or ***')
     // A command with no role has no credentials, yet what it reports is masked all the same.
-    assert.equal(errors[2].detail, 'cannot reach undefined (also <host>) as undefined with undefined, not *** or ***')
+    assert.equal(errors[2].detail, 'cannot reach undefined (also edge.cdn.example.com) as undefined with undefined, not *** or ***')
     for (const error of errors) {
       assertNoSecrets(error.message, 'an error message')
       assertNoSecrets(String(error.detail), 'an error detail')
@@ -730,39 +742,111 @@ test('errors carry their code, and b2c’s message with hosts and the values of 
     assertNoSecrets(logs.join('\n'), 'the log')
   }))
 
-test('redact masks what the file holds, names of three or more labels and IP addresses', () => {
-  assert.equal(redact('a secret-value at x.y.example.com and 10.0.0.1:443', ['secret-value']), 'a *** at <host> and <host>:443')
-  assert.equal(redact('HTTPS request to https://edge-01.cdn.example.com/on/demandware.store failed', []), 'HTTPS request to https://<host>/on/demandware.store failed')
-  assert.equal(redact('connect to [2001:db8::1]:443, fe80::1, ::1 or 2001:db8:0:0:0:0:0:1', []), 'connect to [<host>]:443, <host>, <host> or <host>')
-  // A host with an underscore is masked whole, not from its second label on.
-  assert.equal(redact('cannot reach my_box.example.com or a.my_box.example.com.', []), 'cannot reach <host> or <host>.')
-  // A host of two labels is masked when the file holds it, in whatever case it is printed.
-  assert.equal(redact('cannot resolve shop.internal or SHOP.Internal', ['Shop.internal']), 'cannot resolve *** or ***')
-  assert.equal(redact('cannot resolve shop.internal', []), 'cannot resolve shop.internal')
-})
+// ---------------------------------------------------------------------------------------------
+// Masking: by exact value, never by shape
 
-test('redact leaves the names of the API and of files alone', () => {
+/** Texts that hold no value of any file. Nothing may change them, whatever a file holds. */
+const NOT_VALUES = [
   // The sentence of the review, word for word.
-  const sentence = 'No documentation found for dw.catalog.ProductMgr; did you mean ProductMgr.getProduct or Site.current?'
-  assert.equal(redact(sentence, []), sentence)
-  assert.equal(redact(sentence, ['invented-secret', 'sandbox-01.example.com'], 'C:\\Users\\someone'), sentence)
-  const kept = 'no hosts here: file.isml, Cart.js and dw.json, dw.system.Site.current, Cart.test.js, version 2.11.0 at 12:34:56, e.g. this.'
-  assert.equal(redact(kept, []), kept)
+  'No documentation found for dw.catalog.ProductMgr; did you mean ProductMgr.getProduct or Site.current?',
+  'static/default/js/jquery.min.js',
+  'dw.order.calculate',
+  'at com.example.shop.Cart.add(Cart.java:42)',
+  'main.bundle.js.map and styles.min.css',
+  'app.payment.processor.default, label.input.email, custom.checkout.payment',
+  'dw.ocapi.shop.basket.afterPOST and dw.extensions.applepay.ApplePayHooks',
+  'com.demandware.beehive.core.capi.pipeline.PipelineExecutionException',
+  'Chrome/120.0.0.0 at 10.0.0.7:443, [2001:db8::1] and other-09.sandbox.example.com',
+  'bm_admin_tools, admin-fix, Administrator, sysadmin, admin.tools and my.admin'
+]
+
+/** An invented file as the runner would have read it: two roles, a user called `admin`. */
+const MASKED_FILE = {
+  sandbox: { SFCC_SERVER: 'Sandbox-41.Example.com', SFCC_USERNAME: 'admin', SFCC_PASSWORD: 'p@ss word/1"x', SFCC_CLIENT_ID: 'invented-client-id-0041', SFCC_CLIENT_SECRET: 'invented-secret-0041' },
+  development: { SFCC_SERVER: 'dev-box.example.com', SFCC_CLIENT_ID: 'first.last@example.com', SFCC_CLIENT_SECRET: 'abcd1234' }
+}
+
+function inventedMasker(home?: string) {
+  const masker = createMasker(home)
+  masker.remember(MASKED_FILE.sandbox)
+  masker.remember(MASKED_FILE.development)
+  return masker
+}
+
+test('masking leaves every name that is not a value of the file as it is: API names, files, packages, other hosts', () => {
+  const masker = inventedMasker('C:\\Users\\someone')
+  for (const text of NOT_VALUES) {
+    assert.equal(masker.mask(text), text)
+    assert.equal(createMasker().mask(text), text)
+  }
+  assert.equal(masker.mask(NOT_VALUES.join('\n')), NOT_VALUES.join('\n'))
+  assert.equal(masker.mask(''), '')
+  // Anything that is not a text comes back as it is, and nothing throws.
+  assert.equal(masker.mask(undefined as unknown as string), undefined)
+  assert.equal(masker.mask(42 as unknown as string), 42)
 })
 
-test('redact masks a short value only where it stands alone, never inside a word', () => {
-  assert.equal(redact('Unauthorized: bad credentials for a', ['a']), 'Unauthorized: bad credentials for ***')
-  assert.equal(redact('user ab, cab, ab-1 and (ab)', ['ab']), 'user ***, cab, ***-1 and (***)')
-  // Four characters or more: wherever it is, and the longest value first.
-  assert.equal(redact('token=abcd1234 and abcd', ['abcd', 'abcd1234']), 'token=*** and ***')
-  assert.equal(redact('nothing to mask', ['', 'zz']), 'nothing to mask')
+test('a host of the file is masked in any letter case, inside a URL, in an encoded URL and by its first label', () => {
+  const { mask } = inventedMasker()
+  assert.equal(mask('cannot reach Sandbox-41.Example.com'), 'cannot reach ***')
+  assert.equal(mask('cannot reach sandbox-41.example.com or SANDBOX-41.EXAMPLE.COM.'), 'cannot reach *** or ***.')
+  assert.equal(mask('GET https://sandbox-41.example.com:443/on/demandware.store/Sites-Site failed'), 'GET https://***:443/on/demandware.store/Sites-Site failed')
+  assert.equal(mask('redirect=https%3A%2F%2Fsandbox-41.example.com%2Fon%2Fdemandware.store'), 'redirect=https%3A%2F%2F***%2Fon%2Fdemandware.store')
+  assert.equal(mask('webdav.sandbox-41.example.com and x-sandbox-41.example.com-y'), 'webdav.*** and x-***-y')
+  // The first label names the instance: six characters or more, in any case.
+  assert.equal(mask('instance sandbox-41 is stopped; SANDBOX-41 too'), 'instance *** is stopped; *** too')
+  // One of fewer than eight is masked only where it stands alone.
+  assert.equal(mask('dev-box is stopped, my-dev-box-2 is not'), '*** is stopped, my-dev-box-2 is not')
+  // A label of fewer than six characters is an ordinary word.
+  const short = createMasker()
+  short.remember({ SFCC_SERVER: 'shop.internal' })
+  assert.equal(short.mask('shop.internal, SHOP.INTERNAL, the shop and shop.other'), '***, ***, the shop and shop.other')
 })
 
-test('redact turns the home folder into ~, whatever its slashes or case', () => {
-  assert.equal(redact('ENOENT: C:\\Users\\someone\\AppData\\cache.log', [], 'C:\\Users\\someone'), 'ENOENT: ~\\AppData\\cache.log')
-  assert.equal(redact('ENOENT: c:/users/someone/AppData/cache.log', [], 'C:\\Users\\someone\\'), 'ENOENT: ~/AppData/cache.log')
-  assert.equal(redact('open /home/someone/work', [], '/home/someone'), 'open ~/work')
-  assert.equal(redact('open /var/x', [], '/'), 'open /var/x')
+test('a value is masked in its percent-encoded and JSON-escaped forms too', () => {
+  const { mask } = inventedMasker()
+  assert.equal(mask('login as first.last@example.com'), 'login as ***')
+  assert.equal(mask('POST /token?login=first.last%40example.com&grant=x'), 'POST /token?login=***&grant=x')
+  // The hexadecimal digits come in either case.
+  assert.equal(mask('pw=p%40ss%20word%2F1%22x; pw=p%40ss%20word%2f1%22x'), 'pw=***; pw=***')
+  assert.equal(mask('sent {"password":"p@ss word/1\\"x","ok":true}'), 'sent {"password":"***","ok":true}')
+  assert.equal(mask('raw p@ss word/1"x'), 'raw ***')
+})
+
+test('a value shorter than eight characters is masked only where it stands alone, never inside a word', () => {
+  const { mask } = inventedMasker()
+  // A user called admin does not turn admin-fix into a masked text.
+  for (const text of ['admin-fix', 'bm_admin_tools', 'Administrator', 'sysadmins', 'admin.tools', 'my.admin', 'x-admin', 'admin_1', 'Admin']) assert.equal(mask(text), text)
+  assert.equal(mask('code version admin-fix uploaded by admin'), 'code version admin-fix uploaded by ***')
+  assert.equal(mask('user admin, "admin", (admin), user=admin, /admin/ and admin@example.com by admin.'), 'user ***, "***", (***), user=***, /***/ and ***@example.com by ***.')
+  // Eight characters or more: wherever it is, in its own case, and the longest value first.
+  assert.equal(mask('xabcd1234x and token=invented-secret-0041!'), 'x***x and token=***!')
+  assert.equal(mask('ABCD1234 is not abcd1234'), 'ABCD1234 is not ***')
+  const nested = createMasker()
+  nested.remember({ SFCC_CLIENT_ID: 'abcd1234', SFCC_CLIENT_SECRET: 'abcd1234-and-more' })
+  assert.equal(nested.mask('abcd1234-and-more, then abcd1234'), '***, then ***')
+})
+
+test('the masker never forgets: what one file held is still masked after another is read', () => {
+  const masker = createMasker()
+  masker.remember({ SFCC_SERVER: 'first-box.example.com', SFCC_CLIENT_SECRET: 'invented-first-secret' })
+  const text = 'first-box.example.com with invented-first-secret, then second-box.example.com'
+  assert.equal(masker.mask(text), '*** with ***, then second-box.example.com')
+  masker.remember({ SFCC_SERVER: 'second-box.example.com' })
+  masker.remember({})
+  assert.equal(masker.mask(text), '*** with ***, then ***')
+  // A value that is a host for one role is one everywhere.
+  masker.remember({ SFCC_USERNAME: 'Third-Box.example.com' })
+  assert.equal(masker.mask('third-box.example.com'), 'third-box.example.com')
+  masker.remember({ SFCC_SERVER: 'Third-Box.example.com' })
+  assert.equal(masker.mask('third-box.example.com'), '***')
+})
+
+test('masking turns the home folder into ~, whatever its slashes or case', () => {
+  assert.equal(createMasker('C:\\Users\\someone').mask('ENOENT: C:\\Users\\someone\\AppData\\cache.log'), 'ENOENT: ~\\AppData\\cache.log')
+  assert.equal(createMasker('C:\\Users\\someone\\').mask('ENOENT: c:/users/someone/AppData/cache.log'), 'ENOENT: ~/AppData/cache.log')
+  assert.equal(createMasker('/home/someone').mask('open /home/someone/work'), 'open ~/work')
+  assert.equal(createMasker('/').mask('open /var/x'), 'open /var/x')
 })
 
 test('times out and aborts at once, without waiting for the pipes to close', () =>
@@ -892,25 +976,44 @@ test('a long-lived command hands over stderr line by line and stops at once; --j
     assert.deepEqual(calls[1].args, ['debug'])
   }))
 
-test('the stderr events of a long-lived command arrive masked: raw lines, and every string of a JSON line', () =>
+/** An invented dw.json with a host written in capitals and a user called `admin`. */
+const ADMIN_DW = {
+  hostname: 'Sandbox-41.Example.com',
+  username: 'admin',
+  password: 'invented-password-41',
+  'client-id': 'invented-client-id-0041',
+  'client-secret': 'invented-secret-0041',
+  'hostname-dev': 'dev-box.example.com',
+  'client-id-dev': 'first.last@example.com',
+  'client-secret-dev': 'invented-dev-secret-41'
+}
+
+function assertNothingOf(dw: Record<string, string>, text: string, where: string): void {
+  for (const value of Object.values(dw)) {
+    if (value.length >= 8) assert.ok(!text.toLowerCase().includes(value.toLowerCase()), `${where} holds a value of the file`)
+  }
+}
+
+test('the stderr events of a long-lived command arrive masked: raw lines, and the strings and keys of a JSON line at any depth', () =>
   withWorkspace(async (root) => {
     const { b2c, calls, logs } = runner(root, fakeSpawner(() => {}))
     const events: B2cEvent[] = []
     const chunks: Uint8Array[] = []
     const running = await b2c.start(['code', 'watch'], { role: 'sandbox', jsonl: true, onEvent: (event) => events.push(event), onStdout: (chunk) => chunks.push(chunk) })
     const child = calls[0].child
-    const host = INVENTED_DW.hostname
-    // As b2c writes them: the host in the message and in other fields, of this role and of others.
+    const host = 'sandbox-41.example.com'
+    // As b2c writes them: the host in the message, in other fields, as a key; of this role and of others.
     const line = {
       level: 50,
       time: 1,
       command: 'code:watch',
       msg: `HTTPS request to ${host} failed`,
-      err: { message: `connect ECONNREFUSED 10.0.0.7:443 (${host.toUpperCase()})`, hosts: [host, INVENTED_DW['hostname-dev'], 'edge.cdn.example.com'], attempts: 3, ok: false, nothing: null },
-      user: INVENTED_DW.username,
-      [`key-${host}`]: 'a key is not a value'
+      err: { message: `connect ECONNREFUSED 10.0.0.7:443 (${host.toUpperCase()})`, hosts: [host, 'dev-box.example.com', 'edge.cdn.example.com'], attempts: 3, ok: false, nothing: null },
+      user: 'admin',
+      hosts: { [host]: { state: 'started', by: ['first.last@example.com'] }, [host.toUpperCase()]: { state: 'stopped' } },
+      'invented-client-id-0041': true
     }
-    child.stderr.emit('data', Buffer.from(`${JSON.stringify(line)}\nERROR: HTTPS request to ${host} failed for ${INVENTED_DW['client-id-prd']}\n » dw.catalog.ProductMgr is fine\n`))
+    child.stderr.emit('data', Buffer.from(`${JSON.stringify(line)}\nERROR: HTTPS request to https://${host}/on failed for invented-dev-secret-41\n`))
     assert.deepEqual(events, [
       {
         json: {
@@ -918,64 +1021,142 @@ test('the stderr events of a long-lived command arrive masked: raw lines, and ev
           time: 1,
           command: 'code:watch',
           msg: 'HTTPS request to *** failed',
-          err: { message: 'connect ECONNREFUSED <host>:443 (***)', hosts: ['***', '***', '<host>'], attempts: 3, ok: false, nothing: null },
+          err: { message: 'connect ECONNREFUSED 10.0.0.7:443 (***)', hosts: ['***', '***', 'edge.cdn.example.com'], attempts: 3, ok: false, nothing: null },
           user: '***',
-          [`key-${host}`]: 'a key is not a value'
+          // Two keys that mask alike are both kept.
+          hosts: { '***': { state: 'started', by: ['***'] }, '*** 2': { state: 'stopped' } },
+          '***': true
         }
       },
-      { text: 'ERROR: HTTPS request to *** failed for ***' },
-      { text: ' » dw.catalog.ProductMgr is fine' }
+      { text: 'ERROR: HTTPS request to https://***/on failed for ***' }
     ])
-    const values = JSON.stringify(events.map((event) => ('json' in event ? Object.values(event.json as object) : event.text)))
-    assertNoSecrets(values, 'an event')
+    assertNothingOf(ADMIN_DW, JSON.stringify(events), 'an event')
+
+    // What is not a value of the file is the data of the event: it arrives as b2c wrote it.
+    events.length = 0
+    const upload = { file: 'C:\\work\\cartridges\\app_storefront\\cartridge\\static\\default\\css\\styles.min.css', cartridge: 'bm_admin_tools', codeVersion: 'admin-fix', hook: 'dw.order.calculate' }
+    child.stderr.emit('data', Buffer.from(`${JSON.stringify(upload)}\n${NOT_VALUES.join('\n')}\n`))
+    assert.deepEqual(events, [{ json: upload }, ...NOT_VALUES.map((text) => ({ text }))])
+
+    // A value cut between two chunks is masked all the same: the line is masked once it is whole.
+    events.length = 0
+    child.stderr.emit('data', Buffer.from('ERROR: cannot reach sandbox-41.exa'))
+    assert.deepEqual(events, [])
+    child.stderr.emit('data', Buffer.from('mple.com today\n{"msg":"token invented-sec'))
+    child.stderr.emit('data', Buffer.from('ret-0041 refused","user":"adm'))
+    child.stderr.emit('data', Buffer.from('in"}\n'))
+    assert.deepEqual(events, [{ text: 'ERROR: cannot reach *** today' }, { json: { msg: 'token *** refused', user: '***' } }])
+
     // Stdout is the caller's to mask: it is handed over as it came.
     child.stdout.emit('data', Buffer.from(host))
     assert.equal(Buffer.concat(chunks).toString(), host)
     running.stop()
     await running.exited
-    assertNoSecrets(logs.join('\n'), 'the log')
-  }))
+    assertNothingOf(ADMIN_DW, logs.join('\n'), 'the log')
+  }, ADMIN_DW))
 
-test('mask() hides every value of the file, for any role, and what looks like a host; isHost() finds a role’s host without giving it', () =>
+test('an error detail keeps what is not a value of the file, and masks a host of it in a URL', () =>
+  withWorkspace(async (root) => {
+    const message = `${NOT_VALUES.join(' | ')} | https://SANDBOX-41.example.com/on by admin for admin-fix`
+    const { b2c } = runner(root, fakeSpawner((call) => call.child.finish(1, '', `${JSON.stringify({ error: { message } })}\n`)))
+    const failure = await failureOf(b2c.run(['code', 'activate', 'admin-fix'], { role: 'sandbox' }))
+    assert.ok(failure instanceof B2cError)
+    assert.equal(failure.detail, `${NOT_VALUES.join(' | ')} | https://***/on by *** for admin-fix`)
+  }, ADMIN_DW))
+
+test('mask() hides every value the runner has read, whichever workspace is focused when it is asked', async () => {
+  const first = makeWorkspace(ADMIN_DW)
+  const second = makeWorkspace({ hostname: 'other-box.example.com', 'client-id': 'invented-other-client-id', 'client-secret': 'invented-other-secret' })
+  try {
+    let root: string | null = first
+    let reads = 0
+    const files: FileSystem = {
+      async readText(path) {
+        reads++
+        return existsSync(path) ? readFileSync(path, 'utf8') : null
+      }
+    }
+    const { b2c, calls } = runner(null, fakeSpawner(), { configRoot: async () => root, fs: files, homedir: 'C:\\Users\\someone' })
+    // A result taken while the first workspace was the one read.
+    await b2c.run(['code', 'list'], { role: 'sandbox' })
+    const listed = 'Sandbox-41.Example.com (SANDBOX-41.EXAMPLE.COM, https://sandbox-41.example.com/x, https%3A%2F%2Fsandbox-41.example.com) by admin and first.last%40example.com, invented-client-id-0041, other.sandbox.example.com, 10.1.2.3 in C:\\Users\\someone\\work'
+    const masked = '*** (***, https://***/x, https%3A%2F%2F***) by *** and ***, ***, other.sandbox.example.com, 10.1.2.3 in ~\\work'
+    assert.equal(await b2c.mask(listed), masked)
+
+    // The focus moves to a workspace with another file, then to none: the text is masked the same.
+    root = second
+    assert.equal(await b2c.mask(listed), masked)
+    root = null
+    assert.equal(await b2c.mask(listed), masked)
+    assertNothingOf(ADMIN_DW, await b2c.mask(listed), 'masked text')
+
+    // Once the second file has been read, its values are masked too, and the first one's still are.
+    root = second
+    assert.equal(await b2c.mask('other-box.example.com'), 'other-box.example.com', 'not read yet, and not b2c’s to have printed')
+    await b2c.instances()
+    root = first
+    assert.equal(await b2c.mask('other-box.example.com with invented-other-secret; Sandbox-41.Example.com'), '*** with ***; ***')
+
+    // Masking reads no file: fifty texts cost nothing.
+    const before = reads
+    for (let i = 0; i < 50; i++) await b2c.mask(listed)
+    assert.equal(reads, before)
+    for (const text of NOT_VALUES) assert.equal(await b2c.mask(text), text)
+    assert.equal(await b2c.mask('code version admin-fix by admin'), 'code version admin-fix by ***')
+    assert.equal(calls.length, 1, 'only the command ran')
+
+    // A runner that has read nothing yet reads the file of the moment before it masks.
+    const fresh = runner(first).b2c
+    assert.equal(await fresh.mask('SANDBOX-41.example.com and invented-secret-0041'), '*** and ***')
+    assert.equal(await runner(null).b2c.mask(listed), listed, 'with no file there is nothing to mask')
+  } finally {
+    rmSync(first, { recursive: true, force: true })
+    rmSync(second, { recursive: true, force: true })
+  }
+})
+
+test('isHost() is true for the whole host of the role in any letter case, false for anything else, and never throws', () =>
   withWorkspace(async (root) => {
     const { b2c, calls } = runner(root)
-    // What a piece might take from a run() result before showing it.
-    const listed = `${INVENTED_DW.hostname} (${INVENTED_DW['hostname-dev'].toUpperCase()}) by ${INVENTED_DW.username}, ${INVENTED_DW['client-id-prd']}, other.sandbox.example.com, 10.1.2.3 in C:\\Users\\someone\\work, dw.catalog.ProductMgr`
-    const masked = await runner(root, fakeSpawner(), { homedir: 'C:\\Users\\someone' }).b2c.mask(listed)
-    assert.equal(masked, '*** (***) by ***, ***, <host>, <host> in ~\\work, dw.catalog.ProductMgr')
-    assertNoSecrets(masked, 'masked text')
-    assert.equal(await b2c.mask('nothing to hide'), 'nothing to hide')
-    // With no file there are no values, and hosts are still masked by their shape.
-    assert.equal(await runner(null).b2c.mask(`${INVENTED_DW.hostname} and ${INVENTED_DW.username}`), `<host> and ${INVENTED_DW.username}`)
+    const host = 'Sandbox-41.Example.com'
+    for (const value of [host, host.toLowerCase(), host.toUpperCase(), ` ${host} `]) assert.equal(await b2c.isHost('sandbox', value), true, value)
+    assert.equal(await b2c.isHost('development', 'DEV-BOX.example.com'), true)
+    // A host that contains the role's host, or is contained in it, is another host.
+    for (const value of [`x.${host}`, `x${host}`, `${host}.x`, `${host}:443`, `https://${host}`, `${host}/`, 'sandbox-41', 'example.com', '41.example.com', 'sandbox-41.example.co', '']) {
+      assert.equal(await b2c.isHost('sandbox', value), false, value)
+    }
+    // Each role answers for its own host only; a role with no host has none.
+    assert.equal(await b2c.isHost('sandbox', 'dev-box.example.com'), false)
+    assert.equal(await b2c.isHost('development', host), false)
+    assert.equal(await b2c.isHost('production', host), false)
+    // Another value of the file is not the host.
+    assert.equal(await b2c.isHost('sandbox', 'admin'), false)
+    // What a list entry without a host would give: not a string, so not the host.
+    for (const value of [undefined, null, 42, true, {}, [], [host], { toString: () => host }, Symbol('x')]) assert.equal(await b2c.isHost('sandbox', value), false, String(typeof value))
+    assert.equal(await b2c.isHost('nowhere' as Role, host), false)
+    assert.equal(await b2c.isHost(undefined as unknown as Role, host), false)
+    assert.equal(await runner(null).b2c.isHost('sandbox', host), false)
+    // Even when the settings cannot be read.
+    const broken = createB2c({ settings: { read: () => Promise.reject(new Error('no settings')), suffixes: () => Promise.reject(new Error('no settings')), onDidChange: () => ({ dispose() {} }) }, configRoot: async () => root })
+    assert.equal(await broken.isHost('sandbox', host), false)
+    assert.equal(calls.length, 0, 'it starts no process')
+  }, ADMIN_DW))
 
-    assert.equal(await b2c.isHost('sandbox', INVENTED_DW.hostname), true)
-    assert.equal(await b2c.isHost('sandbox', ` ${INVENTED_DW.hostname.toUpperCase()} `), true)
-    assert.equal(await b2c.isHost('development', INVENTED_DW['hostname-dev']), true)
-    // An incomplete role has a host too; an absent one has none.
-    assert.equal(await b2c.isHost('staging', INVENTED_DW['hostname-stg']), true)
-    assert.equal(await b2c.isHost('production', INVENTED_DW.hostname), false)
-    assert.equal(await b2c.isHost('production', ''), false)
-    // Each role answers for its own host only, and for the whole of it.
-    assert.equal(await b2c.isHost('sandbox', INVENTED_DW['hostname-dev']), false)
-    assert.equal(await b2c.isHost('sandbox', `x${INVENTED_DW.hostname}`), false)
-    assert.equal(await b2c.isHost('sandbox', INVENTED_DW.hostname.replace('.example.com', '')), false)
-    assert.equal(await runner(null).b2c.isHost('sandbox', INVENTED_DW.hostname), false)
-    assert.equal(calls.length, 0, 'neither starts a process')
-  }))
-
-test('a piece finds its own sandbox in a list b2c returns, and shows the list with nothing unmasked', () =>
+test('a piece finds its own sandbox in a list b2c returns, and shows the list with nothing of the file unmasked', () =>
   withWorkspace(async (root) => {
     // What `sandbox list --json` might answer: run() hands it over as b2c printed it.
-    const answer = { data: [{ id: 'abcd-001', hostName: 'other-09.sandbox.example.com', state: 'stopped' }, { id: 'abcd-002', hostName: INVENTED_DW.hostname.toUpperCase(), state: 'started' }] }
+    const answer = { data: [{ id: 'abcd-001', hostName: 'other-09.sandbox.example.com', state: 'stopped' }, { id: 'abcd-002', hostName: INVENTED_DW.hostname.toUpperCase(), state: 'started' }, { id: 'abcd-003', state: 'creating' }] }
     const { b2c } = runner(root, fakeSpawner((call) => call.child.finish(0, JSON.stringify(answer))))
     const result = await b2c.run(['sandbox', 'list'], { role: 'sandbox' })
     assert.deepEqual(result.json, answer, 'the result is the data, unmasked')
-    const rows = (result.json as typeof answer).data
+    const rows = (result.json as { data: { id: string; hostName?: string; state: string }[] }).data
     const own = []
+    // The third row has no host yet: isHost answers false for it instead of throwing.
     for (const row of rows) if (await b2c.isHost('sandbox', row.hostName)) own.push(row.id)
     assert.deepEqual(own, ['abcd-002'])
-    const shown = await b2c.mask(rows.map((row) => `${row.id} ${row.hostName} ${row.state}`).join('; '))
-    assert.equal(shown, 'abcd-001 <host> stopped; abcd-002 *** started')
+    const shown = await b2c.mask(rows.map((row) => `${row.id} ${row.hostName ?? '-'} ${row.state}`).join('; '))
+    // Another sandbox's host is not a value of the file: it is the data, and stays.
+    assert.equal(shown, 'abcd-001 other-09.sandbox.example.com stopped; abcd-002 *** started; abcd-003 - creating')
   }))
 
 test('a long-lived command gets stdout in raw chunks and a stdin to write and close', () =>

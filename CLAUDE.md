@@ -71,8 +71,9 @@ Changing it needs the owner's yes.
       otherwise): nothing that names a host, a user, a credential, an instance, a configuration
       or `.env` file, a project folder, a certificate or a sign-in method goes in it, and
       `--wait` is left out on purpose with its `--poll-interval` and `--timeout`. No argument
-      may hold a value of `dw.json` (one of eight characters or more anywhere in it, a shorter
-      one as the whole argument or the whole value of `--flag=value`), and when `b2c` is a
+      may hold a value of `dw.json`, in any letter case (one of eight characters or more
+      anywhere in it, a shorter one as the whole argument or the whole value of
+      `--flag=value`), and when `b2c` is a
       `.cmd` or `.bat` none may hold `" % ^ & | < > !` or a control character
       (`unsafe_argument`, with the position of the argument): a version manager's shim would
       let it run another command.
@@ -82,14 +83,22 @@ Changing it needs the owner's yes.
       carries a `reason` (`b2c_not_found`, `cwd_not_found`, `b2c_failed`) when the process could
       not be started. Output is decoded as a stream, so a character cut between two chunks
       arrives whole.
-    - Masking: error details, the stderr events of `start()` (raw lines and every string of a
-      JSON line) and the runner's own log lines are already masked: every value the file holds
-      for any role, the home folder, IP addresses and names of three or more lower-case labels
-      (`dw.catalog.ProductMgr` and `Site.current` are not hosts). `run()` results and stdout
-      chunks are as `b2c` printed them, hosts included, because a piece needs the data: whatever
-      a piece shows, logs, stores or sends to a panel of them goes through `b2c.mask(text)`
-      first, and it finds its own instance in a list with `b2c.isHost(role, value)`, never by
-      holding the host.
+    - Masking is by exact value, never by shape: guessing what looks like a host destroys
+      ordinary names (`jquery.min.js`, `dw.order.calculate`, a Java package in a stack trace).
+      What is masked is every value the runner has read from a `dw.json` since the worker
+      started, for every role and from every file, so it does not depend on the workspace
+      focused at the moment: each value as written; a host in any letter case, and its first
+      label when it has six characters or more; the percent-encoded and JSON-escaped forms of a
+      value; the home folder as `~`. A value shorter than eight characters is masked only where
+      it stands alone (a user `admin` leaves `admin-fix` whole). A host the file does not hold,
+      or an IP address, is not masked.
+    - Error details, the stderr events of `start()` (raw lines, and the strings and keys of a
+      JSON line at any depth, once the line is whole) and the runner's own log lines are
+      already masked. `run()` results and stdout chunks are as `b2c` printed them, hosts
+      included, because a piece needs the data: whatever a piece shows, logs, stores or sends to
+      a panel of them goes through `b2c.mask(text)` first (it reads no file: join the rows and
+      mask once), and it finds its own instance in a list with `b2c.isHost(role, value)`, never
+      by holding the host.
     - One workspace uploads, the one picked by hand; it never follows the focused workspace. A
       workspace on another host (`hostId` other than `local`) is never read as a local folder.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
