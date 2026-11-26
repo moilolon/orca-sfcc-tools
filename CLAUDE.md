@@ -40,7 +40,10 @@ Changing it needs the owner's yes.
       (`isml`). Pieces: `isml`, `sandbox`, `errors`, `debugger`, `engine`, `editor`. A phase works
       inside its own piece folder: the three registries (`src/worker/pieces.ts`,
       `src/panel/sections.ts`, `src/panel/checks.ts`) and `src/protocol.ts` already list every
-      piece, and a test fails when any other shared module imports one.
+      piece, and a test fails when any other shared module imports one. The shared tests
+      (`src/panel/panel.test.tsx`, `src/worker/worker.test.ts`) expect nothing of what the
+      pieces are today: keep them that way, and test a piece beside its own files. A section
+      whose `setup` throws is shown as not started until the panel is opened again.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
@@ -66,16 +69,27 @@ Changing it needs the owner's yes.
       open a browser sign-in.
     - Arguments: a flag passes only when it is in `ALLOWED_FLAGS` (`flag_not_allowed`
       otherwise): nothing that names a host, a user, a credential, an instance, a configuration
-      or `.env` file, a project folder, a certificate or a sign-in method goes in it. No
-      argument may hold a value of `dw.json`, and when `b2c` is a `.cmd` or `.bat` none may hold
-      `" % ^ & | < > !` or a control character (`unsafe_argument`, with the position of the
-      argument): a version manager's shim would let it run another command.
+      or `.env` file, a project folder, a certificate or a sign-in method goes in it, and
+      `--wait` is left out on purpose with its `--poll-interval` and `--timeout`. No argument
+      may hold a value of `dw.json` (one of eight characters or more anywhere in it, a shorter
+      one as the whole argument or the whole value of `--flag=value`), and when `b2c` is a
+      `.cmd` or `.bat` none may hold `" % ^ & | < > !` or a control character
+      (`unsafe_argument`, with the position of the argument): a version manager's shim would
+      let it run another command.
     - `run()` is for one-shot commands and adds `--json`. `start()` is for long-lived ones: it
       hands over stderr line by line and stdout in raw chunks, takes `write()` and `end()` for
       stdin, always reads both streams, and adds `--jsonl` only with `jsonl: true`; its `exited`
       carries a `reason` (`b2c_not_found`, `cwd_not_found`, `b2c_failed`) when the process could
       not be started. Output is decoded as a stream, so a character cut between two chunks
       arrives whole.
+    - Masking: error details, the stderr events of `start()` (raw lines and every string of a
+      JSON line) and the runner's own log lines are already masked: every value the file holds
+      for any role, the home folder, IP addresses and names of three or more lower-case labels
+      (`dw.catalog.ProductMgr` and `Site.current` are not hosts). `run()` results and stdout
+      chunks are as `b2c` printed them, hosts included, because a piece needs the data: whatever
+      a piece shows, logs, stores or sends to a panel of them goes through `b2c.mask(text)`
+      first, and it finds its own instance in a list with `b2c.isHost(role, value)`, never by
+      holding the host.
     - One workspace uploads, the one picked by hand; it never follows the focused workspace. A
       workspace on another host (`hostId` other than `local`) is never read as a local folder.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials

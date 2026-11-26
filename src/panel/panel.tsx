@@ -25,14 +25,19 @@ import {
 } from 'orca'
 import { CORE_MESSAGES, t, wordError, type CoreMessageKey } from '../core/i18n'
 import { ROLES, type Role, type RoleState } from '../core/instances'
-import type { PanelSection } from '../core/piece'
+import type { PanelSection, PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import { SECTIONS } from './sections'
 
 const status = atom<CoreStatus | null>(null)
 const loading = atom(false)
-/** An error code, the worker's or the host's, worded when drawn. */
+/** An error code, the worker's or the host's, worded when drawn. The next good answer clears it. */
 const problem = atom<string | null>(null)
+/**
+ * The pieces whose section could not start. Nothing clears it but opening the panel again: a
+ * section that did not start listens to nothing, so what it would draw is not to be trusted.
+ */
+const broken = atom<readonly PieceId[]>([])
 
 const ROLE_KEYS: Record<Role, CoreMessageKey> = {
   sandbox: 'roleSandbox',
@@ -118,16 +123,21 @@ function Instances({ config, value }: { config: CoreStatus['config']; value: Cor
   )
 }
 
-function Pieces({ sections, locale }: { sections: readonly PanelSection[]; locale: string }) {
+function Pieces({ sections, failed, locale }: { sections: readonly PanelSection[]; failed: readonly PieceId[]; locale: string }) {
   return (
     <Card title={text('pieces')}>
       <Stack gap="xs">
-        {sections.map((section) => (
-          <Row key={section.id} justify="between">
-            <Text>{section.title(locale)}</Text>
-            <Badge tone={section.delivered ? 'success' : 'neutral'}>{text(section.delivered ? 'pieceDelivered' : 'pieceComing')}</Badge>
-          </Row>
-        ))}
+        {sections.map((section) => {
+          // A piece whose section did not start is not available, whatever it says of itself.
+          const state = failed.includes(section.id) ? 'failed' : section.delivered ? 'delivered' : 'coming'
+          const badge = { failed: ['pieceFailed', 'danger'], delivered: ['pieceDelivered', 'success'], coming: ['pieceComing', 'neutral'] } as const
+          return (
+            <Row key={section.id} justify="between">
+              <Text>{section.title(locale)}</Text>
+              <Badge tone={badge[state][1]}>{text(badge[state][0])}</Badge>
+            </Row>
+          )
+        })}
       </Stack>
     </Card>
   )
@@ -141,21 +151,24 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
   return {
     setup(ctx) {
       ctx.subscriptions.push(plugin.on('core.changed', () => void load()))
+      const failed: PieceId[] = []
       for (const section of sections) {
         // A section that fails to start must not take the panel, or the other sections, with it.
         try {
           const cleanup = section.setup?.(ctx)
           if (typeof cleanup === 'function') ctx.subscriptions.push({ dispose: cleanup })
         } catch {
-          set(problem, 'action_failed')
+          failed.push(section.id)
         }
       }
+      set(broken, failed)
       void load()
     },
     Panel() {
       const current = read(status)
       const busy = read(loading)
       const failure = read(problem)
+      const failed = read(broken)
       const locale = env.locale
       return (
         <Stack gap="md">
@@ -168,17 +181,24 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
               <Text>{wordError(locale, failure)}</Text>
             </Callout>
           ) : null}
+          {sections
+            .filter((section) => failed.includes(section.id))
+            .map((section) => (
+              <Callout key={section.id} tone="danger" icon="error" title={text('sectionFailedTitle', { piece: section.title(locale) })}>
+                <Text>{text('sectionFailedBody')}</Text>
+              </Callout>
+            ))}
           {current ? (
             <Stack gap="md">
               <B2cState value={current.b2c} />
               <Instances config={current.config} value={current.instances} />
-              <Pieces sections={sections} locale={locale} />
+              <Pieces sections={sections} failed={failed} locale={locale} />
             </Stack>
           ) : failure ? null : (
             <Skeleton lines={4} label={text('loading')} />
           )}
           {sections.map((section) => {
-            const body = section.render(locale)
+            const body = failed.includes(section.id) ? null : section.render(locale)
             return body === null || body === undefined ? null : (
               <Card key={section.id} title={section.title(locale)}>
                 {body}

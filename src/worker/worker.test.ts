@@ -49,9 +49,12 @@ test('core.status: b2c found, the state of dw.json and of each role, every piece
       instances: { sandbox: 'ready', development: 'ready', staging: 'incomplete', production: 'absent' },
       pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor']
     })
-    assert.equal(calls.length, 1, 'only b2c --version ran')
-    assert.deepEqual(calls[0].args, ['--version'])
-    assert.equal(calls[0].options.cwd, '/home/someone')
+    // The status asks b2c for its version, once. A piece may have asked for something of its
+    // own when it started: that is its business, and its own tests'.
+    const version = calls.filter((call) => call.args[0] === '--version')
+    assert.equal(version.length, 1, 'b2c --version ran once')
+    assert.deepEqual(version[0].args, ['--version'])
+    assert.equal(version[0].options.cwd, '/home/someone')
     // The panel's language is kept for notifications, under core's namespace.
     assert.equal(worker.host.data().storage['core.locale'], 'es-ES')
     assert.deepEqual(worker.refusals, [])

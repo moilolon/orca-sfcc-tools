@@ -80,6 +80,33 @@ test('a piece is wired by its folder alone: no shared module names a piece outsi
   }
 })
 
+/** The test files of a folder and of the folders below it. */
+function testsIn(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) return testsIn(path)
+    return /\.test\.tsx?$/.test(entry.name) ? [path] : []
+  })
+}
+
+/** A request or event of a piece, as its protocol names them: `sandbox.status`, `errors.changed`. */
+export function namesOfPieces(source: string): string[] {
+  return [...source.matchAll(new RegExp(`['"\`]((?:${PIECE_IDS.join('|')})\\.[a-z][\\w.]*)['"\`]`, 'g'))].map((match) => match[1])
+}
+
+test('the tests of the panel and of the worker borrow no request or event name of a piece', () => {
+  // A piece types its own names in its protocol. A shared test that mounts the panel or the
+  // worker and used one with a payload of its own would stop compiling the day the piece is
+  // delivered, and the phase would have to edit a file outside its folder.
+  assert.deepEqual(namesOfPieces(`plugin.on('sandbox.changed', x); request("errors.list"); post(\`isml.x\`)`), ['sandbox.changed', 'errors.list', 'isml.x'])
+  assert.deepEqual(namesOfPieces(`plugin.on('probe.changed', x); 'core.status'; 'sandbox'; 'sandboxWatching'; 'x.sandbox.y'`), [])
+  const shared = [...testsIn(join(SRC, 'panel')), ...testsIn(join(SRC, 'worker'))]
+  assert.ok(shared.length >= 2, 'the shared tests were found')
+  for (const file of shared) {
+    assert.deepEqual(namesOfPieces(readFileSync(file, 'utf8')), [], `${relative(SRC, file).replace(/\\/g, '/')} uses a piece's own names`)
+  }
+})
+
 test('only src/core/b2c.ts reads dw.json through dw-config, and only it starts a process', () => {
   for (const file of sourceFiles(SRC)) {
     const name = relative(SRC, file).replace(/\\/g, '/')
