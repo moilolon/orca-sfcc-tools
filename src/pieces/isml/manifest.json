@@ -1,1 +1,14 @@
-{}
+{
+  "contributes": {
+    "syntaxes": [
+      {
+        "id": "isml",
+        "title": "ISML",
+        "scopeName": "text.html.isml",
+        "path": "src/pieces/isml/isml.tmLanguage.json",
+        "configuration": "src/pieces/isml/language-configuration.json",
+        "extensions": [".isml"]
+      }
+    ]
+  }
+}

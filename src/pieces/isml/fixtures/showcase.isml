@@ -1,0 +1,48 @@
+<iscontent type="text/html" charset="UTF-8" compact="true"/>
+<!DOCTYPE html>
+<ismodule template="components/badge" name="badge" attribute="label"/>
+<iscomment>
+    An invented page that holds every construct the grammar knows.
+    <isif condition="${notCode}">Still a comment</isif>
+</iscomment>
+<isdecorate template="common/layout/page">
+<isset name="product" value="${pdict.product}" scope="page"/>
+<isscript>
+    var Site = require('dw/system/Site');
+    var price = dw.util.StringUtils.formatNumber(42.5, '#,##0.00'); // a line comment
+    /* a block comment */
+    var label = `Total: ${price} \u20AC`;
+    var quoted = 'it\'s "quoted"';
+</isscript>
+<!-- An HTML comment with ${notAnExpression} in it -->
+<div class="product-tile ${product.available ? 'in-stock' : 'sold-out'}" data-pid="${product.ID}">
+    <h1 title='${Resource.msg("label.title", "product", null)}'>${product.name}</h1>
+    <isif condition="${!empty(product.images) && product.images.length > 0}">
+        <img src="${product.images[0].url}" alt="${product.name}"/>
+    <iselseif condition="${session.customer.authenticated}">
+        <p>Signed in &amp; ready</p>
+    <iselse>
+        <isprint value="${Resource.msg('label.none', 'product', null)}" encoding="on"/>
+    </isif>
+    <ul>
+        <isloop items="${product.variants}" var="variant" status="loopState">
+            <isif condition="${loopState.first}"><iscontinue/></isif>
+            <li class="<isif condition="${variant.ID == pdict.selectedID}">selected</isif>">${variant.name}</li>
+        </isloop>
+    </ul>
+    <p>${'A } in a string, and an escaped \' quote'} and ${ {count: 1}.count }</p>
+    <isinclude url="${URLUtils.url('Product-Show', 'pid', product.ID)}"/>
+    <isbadge label="${Resource.msg('badge.new', 'product', null)}"/>
+    <isslot id="product-banner" context="global" description="An invented slot"/>
+</div>
+<script>
+    var config = { url: '${URLUtils.url("Cart-Show")}', count: ${pdict.count} };
+    if (config.count > 0) { window.alert('Items'); }
+</script>
+<style>
+    .product-tile { color: #333; } /* a style comment */
+</style>
+<p>An unclosed ${pdict.product.name expression stops at the closing tag</p>
+<a href="${URLUtils.url('Home-Show')">and in a value, at the closing quote</a>
+<p class="after">Plain HTML again</p>
+</isdecorate>

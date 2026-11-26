@@ -1,0 +1,8 @@
+<p>An expression left open at the end of the line ${pdict.product.name
+<p class="next">The next line starts clean</p>
+<span title="${'a string left open}">Text</span>
+<span class="after-string">Still HTML</span>
+<isif condition="${pdict.count == 1">One</isif>
+<p class="after-condition">Still HTML</p>
+<div data-x='${ {open: 1 '>Text</div>
+<p class="after-braces">Still HTML</p>
