@@ -55,7 +55,10 @@ declare module 'orca' {
   interface PluginRequests {
     /** The environment's seen list and the state of its reads. */
     'errors.list': { input: { role: Role }; output: RoleErrors }
-    /** Reads the environment's log now (or joins the read running) and answers the list after it. */
+    /**
+     * Starts a read of the environment's log (or joins the one running) and answers at once, with
+     * `reading` true; `errors.changed` tells when the read ended. One read per environment at a time.
+     */
     'errors.refresh': { input: { role: Role }; output: RoleErrors }
     /** Marks signatures as seen for good. */
     'errors.mark': { input: { role: Role; signatures: string[] }; output: RoleErrors }

@@ -1,10 +1,11 @@
 // The errors piece's worker over a mock host, a fake b2c and an invented dw.json: what a read asks
 // b2c, what it keeps, what it tells the person, and the sandbox's timer.
-import { assert, mockHost, mountWorker, test, type MockHost } from 'orca/testing'
+import { assert, mockHost, mountWorker, test, type MockHost, type TestWorker } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createB2c, type B2c } from '../../core/b2c'
+import type { Role } from '../../core/instances'
 import type { OpenFileRequest } from '../../core/open-file'
 import { translator } from '../../core/i18n'
 import type { PieceContext } from '../../core/piece'
@@ -116,6 +117,22 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
+/** The role's list once no read of it is running. */
+async function readEnded(worker: TestWorker, role: Role): Promise<RoleErrors> {
+  for (let i = 0; i < 5_000; i++) {
+    const list = await worker.request('errors.list', { role })
+    if (!list.reading) return list
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  throw new Error(`the ${role} read never ended`)
+}
+
+/** What *Read now* does: starts a read, which answers at once, then waits for it to end. */
+async function readNow(worker: TestWorker, { role }: { role: Role }): Promise<RoleErrors> {
+  await worker.request('errors.refresh', { role })
+  return readEnded(worker, role)
+}
+
 /** Lets the worker run until `done` holds; fails after a while. */
 async function until(done: () => boolean, what: string): Promise<void> {
   for (let i = 0; i < 2_000 && !done(); i++) await new Promise((resolve) => setImmediate(resolve))
@@ -131,7 +148,7 @@ test('a read asks b2c for error-level entries since the last read, bounded, and 
   const root = makeWorkspace()
   try {
     const { worker, logsCalls } = await mountPiece(hostFor(root), b2cAnswering())
-    const list = await worker.request('errors.refresh', { role: 'sandbox' })
+    const list = await readNow(worker, { role: 'sandbox' })
     const [first] = logsCalls()
     assert.deepEqual(first.args, [
       'logs',
@@ -154,7 +171,7 @@ test('a read asks b2c for error-level entries since the last read, bounded, and 
     assert.equal(list.state, 'ready')
 
     // The next read starts a few minutes before the newest entry read, and counts nothing twice.
-    const again = await worker.request('errors.refresh', { role: 'sandbox' })
+    const again = await readNow(worker, { role: 'sandbox' })
     const newest = Math.max(...LOGS_GET.entries.map((entry) => Date.parse(entry.timestamp.replace(' GMT', 'Z').replace(' ', 'T'))))
     assert.ok(logsCalls()[1].args.includes(`--since=${new Date(newest - OVERLAP_MS).toISOString()}`))
     assert.equal(again.missedSince, null)
@@ -177,19 +194,19 @@ test('a new error appears once however many times it repeats, and stays seen onc
         return { entries: Array.from({ length: 4 }, (_, i) => cartError({ at: at(batch * 10 + i), pid: String(1000 + batch * 10 + i) })) }
       })
     )
-    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    let list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.rows.length, 1)
     assert.equal(list.rows[0].count, 4)
     assert.equal(newCount(list), 1)
     list = await worker.request('errors.mark', { role: 'sandbox', signatures: [list.rows[0].signature] })
     assert.equal(newCount(list), 0)
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.rows.length, 1)
     assert.equal(list.rows[0].count, 8)
     assert.equal(newCount(list), 0, 'it repeated, and stays seen')
     list = await worker.request('errors.forget', { role: 'sandbox', signature: list.rows[0].signature })
     assert.equal(list.rows.length, 0)
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(newCount(list), 1, 'forgotten, it comes back as new')
     await worker.deactivate()
   } finally {
@@ -202,7 +219,7 @@ test('marking persists across a worker restart', async () => {
   try {
     const host = hostFor(root)
     const first = await mountPlugin(host)
-    const list = await first.worker.request('errors.refresh', { role: 'sandbox' })
+    const list = await readNow(first.worker, { role: 'sandbox' })
     const marked = list.rows[0].signature
     await first.worker.request('errors.mark', { role: 'sandbox', signatures: [marked] })
     await first.worker.deactivate()
@@ -223,8 +240,8 @@ test('the lists of two environments are independent', async () => {
   const root = makeWorkspace()
   try {
     const { worker } = await mountPiece(hostFor(root), b2cAnswering())
-    const sandbox = await worker.request('errors.refresh', { role: 'sandbox' })
-    const development = await worker.request('errors.refresh', { role: 'development' })
+    const sandbox = await readNow(worker, { role: 'sandbox' })
+    const development = await readNow(worker, { role: 'development' })
     assert.equal(development.rows.length, sandbox.rows.length)
     await worker.request('errors.mark', { role: 'sandbox', signatures: sandbox.rows.map((row) => row.signature) })
     assert.equal(newCount(await worker.request('errors.list', { role: 'sandbox' })), 0)
@@ -242,7 +259,7 @@ test('a role that is not ready is not read, and says so', async () => {
     const { worker, logsCalls } = await mountPiece(hostFor(root), b2cAnswering())
     // Staging has no secret, production no host.
     for (const role of ['staging', 'production'] as const) {
-      const list = await worker.request('errors.refresh', { role })
+      const list = await readNow(worker, { role })
       assert.notEqual(list.state, 'ready', role)
       assert.equal(list.rows.length, 0)
       assert.equal(list.lastRead, null)
@@ -262,16 +279,16 @@ test('a read that fails keeps its code, and the rows read before', async () => {
       if (call.args[0] === 'logs' && fail) call.child.finish(126, '', `ERROR: Cannot read logs from ${INVENTED_DW.hostname}\n`)
       else b2cAnswering()(call)
     })
-    const before = await worker.request('errors.refresh', { role: 'sandbox' })
+    const before = await readNow(worker, { role: 'sandbox' })
     fail = true
-    const after = await worker.request('errors.refresh', { role: 'sandbox' })
+    const after = await readNow(worker, { role: 'sandbox' })
     assert.equal(after.error, 'b2c_failed')
     assert.equal(after.lastRead, before.lastRead)
     assert.equal(after.rows.length, before.rows.length)
     assertNoSecrets(JSON.stringify(after), 'the list')
     assertNoSecrets(worker.logs.join('\n'), 'the log')
     fail = false
-    assert.equal((await worker.request('errors.refresh', { role: 'sandbox' })).error, null, 'a good read clears it')
+    assert.equal((await readNow(worker, { role: 'sandbox' })).error, null, 'a good read clears it')
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -285,7 +302,7 @@ test('what is stored is the counters and a masked, bounded sample: never a raw e
     secretEntry.message = secretEntry.message.replace('Payment authorization failed', `Payment authorization failed at ${INVENTED_DW.hostname} for ${INVENTED_DW['client-id']}`) + 'x'.repeat(5000)
     secretEntry.raw = `[${secretEntry.timestamp}] ERROR ${secretEntry.message}`
     const { worker } = await mountPiece(hostFor(root), b2cAnswering(() => ({ entries: [...LOGS_GET.entries, secretEntry] })))
-    await worker.request('errors.refresh', { role: 'sandbox' })
+    await readNow(worker, { role: 'sandbox' })
     const storage = worker.host.data().storage
     const stored = JSON.stringify(storage)
     assertNoSecrets(stored, 'storage')
@@ -321,7 +338,7 @@ test('the sample is masked before it is normalised and again after', async () =>
         return b2c.mask(text)
       }
     }))
-    const list = await worker.request('errors.refresh', { role: 'sandbox' })
+    const list = await readNow(worker, { role: 'sandbox' })
     assert.equal(masked.length, 2)
     assert.match(masked[0], /https:\/\/www\.example\.com/, 'first the text as written')
     assert.ok(masked[1].includes(list.rows[0].message), 'then the normalised sample, as stored')
@@ -336,7 +353,7 @@ test('a read that finds new signatures notifies how many, never what', async () 
   const root = makeWorkspace()
   try {
     const { worker } = await mountPiece(hostFor(root), b2cAnswering())
-    await worker.request('errors.refresh', { role: 'sandbox' })
+    await readNow(worker, { role: 'sandbox' })
     const notifications = paramsOf(worker.host, 'notifications.show')
     assert.equal(notifications.length, 1)
     assert.deepEqual(notifications[0], { title: 'New errors on Sandbox', body: '5 new errors in the log. Open the Errors view of the SFCC panel to see them.' })
@@ -344,7 +361,7 @@ test('a read that finds new signatures notifies how many, never what', async () 
     for (const piece of ['Cannot read', 'cartHelper', 'Payment', 'custom.', 'system.', 'example', 'TypeError', '<q>']) assert.ok(!said.includes(piece), piece)
 
     // Nothing new: no notification.
-    await worker.request('errors.refresh', { role: 'sandbox' })
+    await readNow(worker, { role: 'sandbox' })
     assert.equal(paramsOf(worker.host, 'notifications.show').length, 1)
     await worker.deactivate()
   } finally {
@@ -359,10 +376,10 @@ test('the status bar counts the sandbox’s new errors, hidden at zero', async (
     await settle()
     const updates = () => paramsOf(worker.host, 'statusBar.update') as { id: string; text: string; visible: boolean }[]
     assert.deepEqual(updates().at(-1), { id: STATUS_ITEM, text: '0', tooltip: 'New errors on the sandbox: 0', visible: false })
-    const list = await worker.request('errors.refresh', { role: 'sandbox' })
+    const list = await readNow(worker, { role: 'sandbox' })
     assert.deepEqual(updates().at(-1), { id: STATUS_ITEM, text: '5', tooltip: 'New errors on the sandbox: 5', visible: true })
     const before = updates().length
-    await worker.request('errors.refresh', { role: 'development' })
+    await readNow(worker, { role: 'development' })
     assert.equal(updates().length, before, 'another environment leaves it alone')
     await worker.request('errors.mark', { role: 'sandbox', signatures: list.rows.map((row) => row.signature) })
     assert.equal(updates().at(-1)?.visible, false)
@@ -377,10 +394,47 @@ test('each change is posted to the panel with the environment and its new count'
   const root = makeWorkspace()
   try {
     const { worker } = await mountPiece(hostFor(root), b2cAnswering())
-    await worker.request('errors.refresh', { role: 'development' })
+    await readNow(worker, { role: 'development' })
     const posts = worker.posts.filter((post) => post.event === 'errors.changed')
     assert.deepEqual(posts.at(-1)?.payload, { role: 'development', newCount: 5 })
     assertNoSecrets(JSON.stringify(worker.posts), 'the posts')
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Read now answers at once while a slow read goes on, and the end of the read is posted', async () => {
+  const root = makeWorkspace()
+  try {
+    const pending: SpawnCall[] = []
+    const { worker, logsCalls } = await mountPiece(hostFor(root), (call) => {
+      if (call.args[0] === 'logs' && call.args[1] === 'get') pending.push(call)
+      else b2cAnswering()(call)
+    })
+    // b2c has not answered: the request does not wait for it, so it cannot time out.
+    const started = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(started.reading, true)
+    assert.equal(started.rows.length, 0)
+    await until(() => logsCalls().length === 1, 'the read started')
+    assert.deepEqual(worker.posts.filter((post) => post.event === 'errors.changed').at(-1)?.payload, { role: 'sandbox', newCount: 0 })
+
+    // Asked again meanwhile: the same read, not a second one.
+    const again = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(again.reading, true)
+    await settle()
+    assert.equal(logsCalls().length, 1)
+
+    // Another environment reads alongside, on its own.
+    await worker.request('errors.refresh', { role: 'development' })
+    await until(() => logsCalls().length === 2, 'development reads too')
+
+    pending.shift()?.child.finish(0, JSON.stringify(LOGS_GET))
+    const done = await readEnded(worker, 'sandbox')
+    assert.equal(done.rows.length, 5)
+    assert.deepEqual(worker.posts.filter((post) => post.event === 'errors.changed').at(-1)?.payload, { role: 'sandbox', newCount: 5 })
+    pending.shift()?.child.finish(0, JSON.stringify({ entries: [] }))
+    await readEnded(worker, 'development')
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -421,11 +475,12 @@ test('the timer reads the sandbox every interval and never overlaps two reads', 
     assert.equal(live().length, 0, 'no next tick while the read runs')
 
     // A person asks meanwhile: the request joins the running read.
-    const asked = worker.request('errors.refresh', { role: 'sandbox' })
+    const asked = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(asked.reading, true)
     await settle()
     assert.equal(logsCalls().length, 1)
     pending.shift()?.child.finish(0, JSON.stringify(LOGS_GET))
-    const list = await asked
+    const list = await readEnded(worker, 'sandbox')
     assert.equal(list.rows.length, 5)
     await until(() => live().length === 1, 'the next tick is scheduled once the read ended')
     assert.equal(live()[0].ms, 5 * 60_000)
@@ -473,7 +528,7 @@ test('a frame opens its file when its script is in a cartridge of the workspace'
         return { opened: true }
       }
     })
-    const list = await worker.request('errors.refresh', { role: 'sandbox' })
+    const list = await readNow(worker, { role: 'sandbox' })
     const cart = list.rows.find((row) => row.frames[0]?.file === 'app_example/cartridge/scripts/helpers/cartHelper.js')
     assert.ok(cart)
     // Two frames are in the workspace; the controller is not, nor are Java frames.
@@ -524,7 +579,7 @@ test('entries of any other level than ERROR and FATAL are never read as errors',
     const warning = { ...paymentError(at, '1', 'a@example.com', '1'), level: 'WARN', file: 'custom-payment-blade0.log' }
     const info = { ...paymentError(at, '2', 'b@example.com', '2'), level: 'INFO', file: 'custom-payment-blade0.log' }
     const { worker, logsCalls } = await mountPiece(hostFor(root, { errorsFilter: 'custom-' }), b2cAnswering(() => ({ entries: [warning, info] })))
-    const list = await worker.request('errors.refresh', { role: 'sandbox' })
+    const list = await readNow(worker, { role: 'sandbox' })
     assert.ok(logsCalls()[0].args.includes('--filter=custom-') && logsCalls()[0].args.includes('--level=ERROR') && logsCalls()[0].args.includes('--level=FATAL'))
     assert.equal(list.rows.length, 0)
     assert.equal(JSON.stringify(worker.host.data().storage).includes('Payment'), false, 'nothing of them is stored')
@@ -541,7 +596,7 @@ test('a read that may have skipped entries says so in the view, and never notifi
     let answer: () => unknown = () => ({ entries: Array.from({ length: MAX_ENTRIES }, (_, i) => cartError({ at: at(i) })) })
     const { worker } = await mountPiece(hostFor(root), b2cAnswering(() => answer()))
     // As many entries as b2c keeps.
-    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    let list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.missedSince, NOW - FIRST_READ_MS, 'since the start of the read')
     assert.equal(list.rows.length, 1)
     const notifications = paramsOf(worker.host, 'notifications.show')
@@ -549,7 +604,7 @@ test('a read that may have skipped entries says so in the view, and never notifi
 
     // A read that got everything clears it.
     answer = () => ({ entries: [] })
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.missedSince, null)
 
     // Nearly a whole 64 KB window of one file, in few entries: since the newest entry read before.
@@ -559,7 +614,7 @@ test('a read that may have skipped entries says so in the view, and never notifi
       return { ...entry, raw: entry.raw + ' '.repeat(Math.ceil(FULL_WINDOW_BYTES / 10)) }
     }
     answer = () => ({ entries: Array.from({ length: 10 }, (_, i) => big(i)) })
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.missedSince, before)
     assert.equal(paramsOf(worker.host, 'notifications.show').length, 2, 'one more for the new payment error, none for the gap')
     assert.ok(!JSON.stringify(paramsOf(worker.host, 'notifications.show')).match(/miss/i))
@@ -578,21 +633,21 @@ test('a file that grew past its 64 KB window is flagged, even when warnings fill
     let answer = oneError('2026-11-26 11:00:00.000 GMT')
     let listed = { count: 1, files: [{ name: file, prefix: 'error', size: 20_000, lastModified: '2026-11-26T11:00:00.000Z', path: `logs/${file}` }] }
     const { worker, listCalls } = await mountPiece(hostFor(root), b2cAnswering(() => answer, () => listed))
-    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    let list = await readNow(worker, { role: 'sandbox' })
     assert.deepEqual(listCalls()[0].args, ['logs', 'list', '--filter=error', '--filter=customerror', '--json'])
     assert.equal(list.missedSince, null, 'a small file, read whole')
 
     // 200 KB of warnings since: the error entries are tiny, the file grew past its window.
     answer = oneError('2026-11-26 11:30:00.000 GMT')
     listed = { ...listed, files: [{ ...listed.files[0], size: 220_000 }] }
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.missedSince, Date.UTC(2026, 10, 26, 11), 'since the newest entry read before')
     assert.ok(!JSON.stringify(paramsOf(worker.host, 'notifications.show')).match(/miss/i), 'never notified')
 
     // Grown by less than a window: nothing missed.
     answer = { entries: [] } as unknown as typeof answer
     listed = { ...listed, files: [{ ...listed.files[0], size: 250_000 }] }
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.missedSince, null)
 
     // A file not seen before, already past its window and written since the last read: flagged.
@@ -605,10 +660,10 @@ test('a file that grew past its 64 KB window is flagged, even when warnings fill
         { name: 'error-blade0-1-appserver-20261120.log', prefix: 'error', size: 900_000, lastModified: '2026-11-20T23:59:00.000Z', path: 'logs/y' }
       ]
     }
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.notEqual(list.missedSince, null)
     listed = { ...listed, files: [listed.files[0], listed.files[2]] }
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.missedSince, null, 'the old file alone flags nothing')
     await worker.deactivate()
   } finally {
@@ -626,15 +681,15 @@ test('a listing that fails changes nothing: the read goes on and the last sizes 
       if (call.args[1] === 'list' && listFails) call.child.finish(126, '', 'ERROR: listing refused\n')
       else b2cAnswering(() => LOGS_GET, () => ({ files: [{ name: file, size, lastModified: '2026-11-26T11:00:00.000Z' }] }))(call)
     })
-    await worker.request('errors.refresh', { role: 'sandbox' })
+    await readNow(worker, { role: 'sandbox' })
     listFails = true
     size = 500_000
-    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    let list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.error, null)
     assert.equal(list.missedSince, null)
     // The next listing that works compares with the last sizes known.
     listFails = false
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.notEqual(list.missedSince, null)
     await worker.deactivate()
   } finally {
@@ -648,18 +703,18 @@ test('an entry another server wrote late is read; one read before from its own f
     const entry = (file: string, at: string, order: string) => ({ ...paymentError(at, order, 'd@example.com', '1'), file })
     let answer: unknown = { entries: [entry('customerror-blade0-1.log', '2026-11-26 11:00:00.000 GMT', '1')] }
     const { worker, logsCalls } = await mountPiece(hostFor(root), b2cAnswering(() => answer))
-    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    let list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.rows[0].count, 1)
     // The next read starts five minutes before: blade0's entry comes back and is not counted again;
     // blade1 wrote one a minute earlier than blade0's, but later.
     answer = {
       entries: [entry('customerror-blade0-1.log', '2026-11-26 11:00:00.000 GMT', '1'), entry('customerror-blade1-1.log', '2026-11-26 10:59:00.000 GMT', '2')]
     }
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.ok(logsCalls()[1].args.includes(`--since=${new Date(Date.UTC(2026, 10, 26, 11) - OVERLAP_MS).toISOString()}`))
     assert.equal(list.rows[0].count, 2)
     // Read again: neither is counted again.
-    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    list = await readNow(worker, { role: 'sandbox' })
     assert.equal(list.rows[0].count, 2)
     await worker.deactivate()
   } finally {

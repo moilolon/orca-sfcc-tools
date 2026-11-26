@@ -152,6 +152,23 @@ test('picking another environment asks the worker for it', async () => {
   assert.equal(panel.persisted.plugin.errorsRole, 'staging')
 })
 
+test('Read now shows the read running at once, and its rows when the worker tells it ended', async () => {
+  let state: Partial<RoleErrors> = {}
+  const { panel, sent } = await open((role) => answer(role, state))
+  // The worker answers the request at once, still reading.
+  state = { reading: true }
+  await panel.press({ type: 'Button', text: 'Read now' })
+  assert.deepEqual(sent.at(-1), { name: 'errors.refresh', input: { role: 'sandbox' } })
+  const button = panel.find({ type: 'Button', text: 'Reading…' })
+  assert.ok(button)
+  assert.equal(button.disabled, true)
+  // The read ends: the event brings the list.
+  state = { reading: false, rows: [row('late')] }
+  await panel.post('errors.changed', { role: 'sandbox', newCount: 1 })
+  assert.ok(panel.find({ text: 'TypeError: late is undefined' }))
+  assert.ok(panel.find({ type: 'Button', text: 'Read now' }))
+})
+
 test('the worker telling of a change redraws the environment on screen', async () => {
   let rows: ErrorRow[] = []
   const { panel } = await open((role) => answer(role, { rows }))

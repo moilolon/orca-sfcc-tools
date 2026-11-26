@@ -67,8 +67,8 @@ async function act(role: Role, name: string, send: () => Promise<RoleErrors>): P
 }
 
 function refresh(role: Role): Promise<void> {
-  // A read waits up to 90 s for b2c; the request may wait 120.
-  return act(role, 'refresh', () => plugin.request('errors.refresh', { role }, { timeoutMs: 120_000 }))
+  // The worker answers at once, reading; `errors.changed` brings the list once the read ended.
+  return act(role, 'refresh', () => plugin.request('errors.refresh', { role }))
 }
 
 function mark(role: Role, signatures: string[], name: string): Promise<void> {

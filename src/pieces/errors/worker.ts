@@ -47,7 +47,9 @@ const FILE_CURSOR_MS = 2 * 24 * 60 * 60 * 1000
 export const FIRST_READ_MS = 24 * 60 * 60 * 1000
 /** How long after the worker starts the timer's first read runs. */
 export const START_DELAY_MS = 5_000
-// Under the 120 s a panel request may wait, so a read the panel asked for answers in time.
+// How long each b2c call of a read may take. A read runs on its own, never inside a panel's
+// request (`errors.refresh` starts it and answers at once), so the two calls together may take
+// longer than a request may wait.
 const READ_TIMEOUT_MS = 90_000
 /** The status bar item, declared in this piece's manifest. */
 export const STATUS_ITEM = 'errors-new'
@@ -381,6 +383,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   async function list(role: Role): Promise<RoleErrors> {
+    // Taken first: an answer that says it is not reading holds nothing older than the last read.
+    const reading = reads.has(role)
     const [{ instances }, rows, status, settings, root] = await Promise.all([ctx.b2c.instances(), seen.list(role), readStatus(role), rawSettings(), frameRoot()])
     const out: ErrorRow[] = []
     for (const row of rows) {
@@ -401,7 +405,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     return {
       role,
       state: instances[role],
-      reading: reads.has(role),
+      reading,
       lastRead: status.lastRead,
       error: status.error,
       missedSince: status.missedSince,
@@ -447,9 +451,10 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
 
   const disposables: Disposable[] = [
     ctx.orca.panels.handle('errors.list', (input) => list(roleOf(input))),
-    ctx.orca.panels.handle('errors.refresh', async (input) => {
+    ctx.orca.panels.handle('errors.refresh', (input) => {
       const role = roleOf(input)
-      await refresh(role)
+      // Started, not awaited: the answer says it is reading, and `errors.changed` brings the rest.
+      void refresh(role)
       return list(role)
     }),
     ctx.orca.panels.handle('errors.mark', async (input) => {
