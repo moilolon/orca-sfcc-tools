@@ -39,10 +39,14 @@ function hostFor(root: string, settings: Record<string, string | number> = {}, s
   })
 }
 
-/** b2c answering `logs get` with `answer` (the invented fixtures by default) and its version. */
-function b2cAnswering(answer: () => unknown = () => LOGS_GET) {
+/**
+ * b2c answering `logs get` with `answer` (the invented fixtures by default), `logs list` with
+ * `files` (none by default) and its version.
+ */
+function b2cAnswering(answer: () => unknown = () => LOGS_GET, files: () => unknown = () => ({ count: 0, files: [] })) {
   return (call: SpawnCall) => {
     if (call.args[0] === '--version') call.child.finish(0, '@salesforce/b2c-cli/9.8.7 linux-x64 node-v24.0.0\n')
+    else if (call.args[0] === 'logs' && call.args[1] === 'list') call.child.finish(0, JSON.stringify(files()))
     else if (call.args[0] === 'logs') call.child.finish(0, JSON.stringify(answer()))
     else call.child.finish(1, '', 'ERROR: unexpected\n')
   }
@@ -93,12 +97,13 @@ async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, dep
     },
     { host }
   )
-  const logsCalls = () => spawn.calls.filter((call) => call.args[0] === 'logs')
+  const logsCalls = () => spawn.calls.filter((call) => call.args[0] === 'logs' && call.args[1] === 'get')
+  const listCalls = () => spawn.calls.filter((call) => call.args[0] === 'logs' && call.args[1] === 'list')
   const orca = (): OrcaWorkerApi => {
     if (!api) throw new Error('the worker did not start')
     return api
   }
-  return { worker, orca, calls: spawn.calls, logsCalls, timers, live: () => timers.filter((timer) => !timer.cleared && !timer.fired) }
+  return { worker, orca, calls: spawn.calls, logsCalls, listCalls, timers, live: () => timers.filter((timer) => !timer.cleared && !timer.fired) }
 }
 
 /** The params of every call of `method` that reached the host. */
@@ -402,7 +407,7 @@ test('the timer reads the sandbox every interval and never overlaps two reads', 
   try {
     const pending: SpawnCall[] = []
     const { worker, live, logsCalls } = await mountPiece(hostFor(root, { errorsInterval: 5 }), (call) => {
-      if (call.args[0] === 'logs') pending.push(call)
+      if (call.args[0] === 'logs' && call.args[1] === 'get') pending.push(call)
       else b2cAnswering()(call)
     })
     await settle()
@@ -558,6 +563,79 @@ test('a read that may have skipped entries says so in the view, and never notifi
     assert.equal(list.missedSince, before)
     assert.equal(paramsOf(worker.host, 'notifications.show').length, 2, 'one more for the new payment error, none for the gap')
     assert.ok(!JSON.stringify(paramsOf(worker.host, 'notifications.show')).match(/miss/i))
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a file that grew past its 64 KB window is flagged, even when warnings filled it', async () => {
+  const root = makeWorkspace()
+  try {
+    const file = 'error-blade0-1-appserver-20261126.log'
+    // One small ERROR entry is all b2c returns: warnings fill the rest of the file's window.
+    const oneError = (at: string) => ({ entries: [{ ...paymentError(at, '1', 'e@example.com', '1'), file }] })
+    let answer = oneError('2026-11-26 11:00:00.000 GMT')
+    let listed = { count: 1, files: [{ name: file, prefix: 'error', size: 20_000, lastModified: '2026-11-26T11:00:00.000Z', path: `logs/${file}` }] }
+    const { worker, listCalls } = await mountPiece(hostFor(root), b2cAnswering(() => answer, () => listed))
+    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.deepEqual(listCalls()[0].args, ['logs', 'list', '--filter=error', '--filter=customerror', '--json'])
+    assert.equal(list.missedSince, null, 'a small file, read whole')
+
+    // 200 KB of warnings since: the error entries are tiny, the file grew past its window.
+    answer = oneError('2026-11-26 11:30:00.000 GMT')
+    listed = { ...listed, files: [{ ...listed.files[0], size: 220_000 }] }
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.missedSince, Date.UTC(2026, 10, 26, 11), 'since the newest entry read before')
+    assert.ok(!JSON.stringify(paramsOf(worker.host, 'notifications.show')).match(/miss/i), 'never notified')
+
+    // Grown by less than a window: nothing missed.
+    answer = { entries: [] } as unknown as typeof answer
+    listed = { ...listed, files: [{ ...listed.files[0], size: 250_000 }] }
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.missedSince, null)
+
+    // A file not seen before, already past its window and written since the last read: flagged.
+    // One past its window but untouched since long before: not.
+    listed = {
+      count: 3,
+      files: [
+        { ...listed.files[0], size: 250_000 },
+        { name: 'error-blade1-1-appserver-20261126.log', prefix: 'error', size: 90_000, lastModified: '2026-11-26T11:45:00.000Z', path: 'logs/x' },
+        { name: 'error-blade0-1-appserver-20261120.log', prefix: 'error', size: 900_000, lastModified: '2026-11-20T23:59:00.000Z', path: 'logs/y' }
+      ]
+    }
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.notEqual(list.missedSince, null)
+    listed = { ...listed, files: [listed.files[0], listed.files[2]] }
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.missedSince, null, 'the old file alone flags nothing')
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a listing that fails changes nothing: the read goes on and the last sizes are kept', async () => {
+  const root = makeWorkspace()
+  try {
+    const file = 'error-blade0-1-appserver-20261126.log'
+    let listFails = false
+    let size = 10_000
+    const { worker } = await mountPiece(hostFor(root), (call) => {
+      if (call.args[1] === 'list' && listFails) call.child.finish(126, '', 'ERROR: listing refused\n')
+      else b2cAnswering(() => LOGS_GET, () => ({ files: [{ name: file, size, lastModified: '2026-11-26T11:00:00.000Z' }] }))(call)
+    })
+    await worker.request('errors.refresh', { role: 'sandbox' })
+    listFails = true
+    size = 500_000
+    let list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(list.error, null)
+    assert.equal(list.missedSince, null)
+    // The next listing that works compares with the last sizes known.
+    listFails = false
+    list = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.notEqual(list.missedSince, null)
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })

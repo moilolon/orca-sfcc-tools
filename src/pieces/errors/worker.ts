@@ -13,8 +13,14 @@
 //
 // b2c's `logs get` reads only the last 64 KB of each log file (not a flag) and keeps at most
 // `--count` entries, so a busy log can hold entries no read ever sees. That cannot be fixed here;
-// it is detected: a read that got `MAX_ENTRIES` entries, or nearly a whole window of one file,
-// marks the environment "some entries may have been missed since <time>" in the view.
+// it is detected, and the environment is marked "some entries may have been missed since <time>"
+// in the view, when:
+//   - a read got `MAX_ENTRIES` entries;
+//   - the error entries of one file add up to nearly a whole window (`FULL_WINDOW_BYTES`);
+//   - a file grew by more than its window since the last read, by `logs list`, which runs before
+//     each read for the same files: whatever the level of its lines, so a window that warnings
+//     or info lines filled counts too. A file not seen before counts when it is already larger
+//     than its window and was written since the read's start.
 import { B2cError } from '../../core/b2c'
 import { isRole, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
@@ -60,17 +66,57 @@ export type ErrorsDeps = {
 
 type ReadStatus = { lastRead: number | null; error: string | null; missedSince: number | null }
 
-/** Where reading stopped: the newest entry read, overall and per file. */
-type Cursor = { at: number; files: Record<string, number> }
+/**
+ * Where reading stopped: the newest entry read, overall (null before any) and per file, and each
+ * file's size as `logs list` gave it at the last read.
+ */
+type Cursor = { at: number | null; files: Record<string, number>; sizes: Record<string, number> }
+
+function numbersOf(value: unknown): Record<string, number> {
+  const out: Record<string, number> = {}
+  if (value && typeof value === 'object') for (const [key, item] of Object.entries(value)) if (typeof item === 'number') out[key] = item
+  return out
+}
 
 function cursorOf(value: unknown): Cursor | null {
   // An older worker kept one number.
-  if (typeof value === 'number') return { at: value, files: {} }
-  if (!value || typeof value !== 'object' || typeof (value as { at?: unknown }).at !== 'number') return null
-  const files: Record<string, number> = {}
-  const stored = (value as { files?: unknown }).files
-  if (stored && typeof stored === 'object') for (const [file, at] of Object.entries(stored)) if (typeof at === 'number') files[file] = at
-  return { at: (value as { at: number }).at, files }
+  if (typeof value === 'number') return { at: value, files: {}, sizes: {} }
+  if (!value || typeof value !== 'object') return null
+  const at = (value as { at?: unknown }).at
+  if (typeof at !== 'number' && at !== null) return null
+  return { at, files: numbersOf((value as { files?: unknown }).files), sizes: numbersOf((value as { sizes?: unknown }).sizes) }
+}
+
+/** Each log file's size and last change, from a `logs list --json` answer. */
+export function fileSizesOf(json: unknown): Map<string, { size: number; modified: number | null }> {
+  const files = json && typeof json === 'object' ? (json as { files?: unknown }).files : undefined
+  const out = new Map<string, { size: number; modified: number | null }>()
+  if (!Array.isArray(files)) return out
+  for (const file of files) {
+    if (!file || typeof file !== 'object') continue
+    const { name, size, lastModified } = file as Record<string, unknown>
+    if (typeof name !== 'string' || typeof size !== 'number') continue
+    const modified = typeof lastModified === 'string' ? Date.parse(lastModified) : Number.NaN
+    out.set(name, { size, modified: Number.isNaN(modified) ? null : modified })
+  }
+  return out
+}
+
+/**
+ * Whether a file outgrew b2c's window since the last read: it grew by more than the window, or,
+ * not seen before (or shorter than before, so a new file under the same name), it is larger than
+ * the window and was written since `since`.
+ */
+export function outgrewWindow(previous: Record<string, number>, current: Map<string, { size: number; modified: number | null }>, since: number): boolean {
+  for (const [name, { size, modified }] of current) {
+    const before = previous[name]
+    if (before !== undefined && size >= before) {
+      if (size - before > FILE_WINDOW_BYTES) return true
+    } else if (size > FILE_WINDOW_BYTES && (modified === null || modified >= since)) {
+      return true
+    }
+  }
+  return false
 }
 
 /** The number of entries b2c returned, whatever their level. */
@@ -109,6 +155,11 @@ export function readArguments(filters: readonly string[], since: number): string
     `--count=${MAX_ENTRIES}`,
     `--since=${new Date(since).toISOString()}`
   ]
+}
+
+/** The arguments of the listing that comes before each read: the same files. */
+export function listArguments(filters: readonly string[]): string[] {
+  return ['logs', 'list', ...filters.map((filter) => `--filter=${filter}`)]
 }
 
 export function createErrorsPiece(deps: ErrorsDeps = {}): WorkerPiece {
@@ -242,10 +293,18 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     if (instances[role] !== 'ready') return
     const settings = await rawSettings()
     const cursor = cursorOf(await ctx.store.get<SeenJson>(cursorKey(role), null))
-    const since = cursor ? cursor.at - OVERLAP_MS : now() - FIRST_READ_MS
+    const since = cursor?.at != null ? cursor.at - OVERLAP_MS : now() - FIRST_READ_MS
+    const filters = filtersOf(settings[SETTING_FILTER])
+    // The files' sizes first: growth during the read then counts at the next one, never lost.
+    let sizes: Map<string, { size: number; modified: number | null }> | null = null
+    try {
+      sizes = fileSizesOf((await ctx.b2c.run(listArguments(filters), { role, timeoutMs: READ_TIMEOUT_MS })).json)
+    } catch (error) {
+      ctx.log(`listing the ${role} log files failed: ${error instanceof B2cError ? error.code : 'error'}`)
+    }
     let json: unknown
     try {
-      json = (await ctx.b2c.run(readArguments(filtersOf(settings[SETTING_FILTER]), since), { role, timeoutMs: READ_TIMEOUT_MS })).json
+      json = (await ctx.b2c.run(readArguments(filters, since), { role, timeoutMs: READ_TIMEOUT_MS })).json
     } catch (error) {
       const code = error instanceof B2cError ? error.code : 'b2c_failed'
       ctx.log(`reading the ${role} log failed: ${code}`)
@@ -269,18 +328,24 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     const recorded: Occurrence[] = occurrences.map(({ signature, at }) => ({ signature, at, sample: samples.get(signature) as Sample }))
     const { added } = await seen.record(role, recorded)
 
-    if (all.length > 0) {
-      const newestAt = Math.max(cursor?.at ?? 0, ...all.map((entry) => entry.timestamp))
+    if (all.length > 0 || sizes !== null) {
+      const newestAt = all.length > 0 ? Math.max(cursor?.at ?? 0, ...all.map((entry) => entry.timestamp)) : (cursor?.at ?? null)
       const files: Record<string, number> = {}
-      for (const [file, at] of Object.entries(cursor?.files ?? {})) if (at >= newestAt - FILE_CURSOR_MS) files[file] = at
+      const keepAfter = (newestAt ?? now()) - FILE_CURSOR_MS
+      for (const [file, at] of Object.entries(cursor?.files ?? {})) if (at >= keepAfter) files[file] = at
       for (const entry of all) files[entry.file] = Math.max(files[entry.file] ?? 0, entry.timestamp)
-      await ctx.store.set(cursorKey(role), { at: newestAt, files })
+      // The sizes of the files listed now; a failed listing keeps the last ones.
+      const fileSizes = sizes ? Object.fromEntries([...sizes].map(([name, { size }]) => [name, size])) : (cursor?.sizes ?? {})
+      await ctx.store.set(cursorKey(role), { at: newestAt, files, sizes: fileSizes })
     }
-    // b2c kept at most MAX_ENTRIES, and read only the end of each file: either cut means entries
+    // b2c kept at most MAX_ENTRIES, and read only the end of each file: any cut means entries
     // since the last read may never be seen. It is said in the view, never notified.
     const bytesPerFile = new Map<string, number>()
     for (const entry of all) bytesPerFile.set(entry.file, (bytesPerFile.get(entry.file) ?? 0) + entry.bytes)
-    const cut = returnedCount(json) >= MAX_ENTRIES || [...bytesPerFile.values()].some((bytes) => bytes >= FULL_WINDOW_BYTES)
+    const cut =
+      returnedCount(json) >= MAX_ENTRIES ||
+      [...bytesPerFile.values()].some((bytes) => bytes >= FULL_WINDOW_BYTES) ||
+      (sizes !== null && outgrewWindow(cursor?.sizes ?? {}, sizes, since))
     await ctx.store.set(statusKey(role), { lastRead: now(), error: null, missedSince: cut ? (cursor?.at ?? since) : null })
     if (cut) ctx.log(`the ${role} read may have missed entries`)
     if (added.length > 0 && !stopped) {
