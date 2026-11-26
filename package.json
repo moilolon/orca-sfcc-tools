@@ -7,7 +7,7 @@
   "volta": { "node": "24.22.3" },
   "scripts": {
     "types": "orca plugin types .",
-    "typecheck": "tsc -p . --noEmit",
+    "typecheck": "orca plugin types . && tsc -p . --noEmit",
     "test": "orca plugin test .",
     "check": "orca plugin check .",
     "validate": "orca plugin validate .",
