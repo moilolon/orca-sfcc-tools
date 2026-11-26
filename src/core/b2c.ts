@@ -119,13 +119,23 @@ export type StartOptions = Omit<RunOptions, 'timeoutMs'> & {
   onStdout?: (chunk: Uint8Array) => void
 }
 
+/** Why a process could not be started, in the codes `run()` throws for the same failures. */
+export type StartFailure = Extract<B2cErrorCode, 'b2c_not_found' | 'cwd_not_found' | 'b2c_failed'>
+
+/**
+ * How a long-lived command ended: by itself with `exitCode`, by `stop()`, or, with `reason`,
+ * because the process could not be started at all (there is then no exit code and no output).
+ */
+export type Exit = { exitCode: number | null; stopped: boolean; reason?: StartFailure }
+
 export type Running = {
   /**
    * Resolves when the process ended and its output was handed over, or at once when `stop()` is
-   * called. A process whose pipes stay open after it ended (a grandchild holds them) is not
-   * waited for longer than a moment.
+   * called or the process fails to start. A process whose pipes stay open after it ended (a
+   * grandchild holds them) is not waited for longer than a moment. Nothing reaches `onEvent` or
+   * `onStdout` once it has resolved.
    */
-  readonly exited: Promise<{ exitCode: number | null; stopped: boolean }>
+  readonly exited: Promise<Exit>
   /** Writes to the child's stdin. False once the process ended or its stdin was closed. */
   write(data: string | Uint8Array): boolean
   /** Closes the child's stdin. */
@@ -457,8 +467,18 @@ function defaultKillTree(child: ChildLike): void {
   }
 }
 
-function textOf(chunk: Chunk): string {
-  return typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+/**
+ * Decodes the chunks of one stream as one text. A pipe cuts its output anywhere, so a character
+ * of several bytes can arrive in two chunks: its first bytes are kept until the rest comes,
+ * where decoding each chunk alone would give replacement characters.
+ */
+function streamDecoder() {
+  const decoder = new TextDecoder('utf-8')
+  return {
+    push: (chunk: Chunk): string => (typeof chunk === 'string' ? decoder.decode() + chunk : decoder.decode(chunk, { stream: true })),
+    /** What is left when the stream ends: nothing, unless it stopped in the middle of a character. */
+    end: (): string => decoder.decode()
+  }
 }
 
 function bytesOf(chunk: Chunk): Uint8Array {
@@ -542,7 +562,7 @@ export function createB2c(deps: B2cDeps): B2c {
   }
 
   /** Why a process could not start: a folder that went away gives the same ENOENT as a file. */
-  async function startFailure(prepared: Prepared, error: { code?: string }): Promise<B2cErrorCode> {
+  async function startFailure(prepared: Prepared, error: { code?: string }): Promise<StartFailure> {
     if (error.code !== 'ENOENT') return 'b2c_failed'
     return (await isDirectory(prepared.cwd)) ? 'b2c_not_found' : 'cwd_not_found'
   }
@@ -554,11 +574,15 @@ export function createB2c(deps: B2cDeps): B2c {
       const child = launch(prepared, 'ignore')
       let stdout = ''
       let stderr = ''
+      const out = streamDecoder()
+      const err = streamDecoder()
       child.stdout?.on('data', (chunk) => {
-        if (stdout.length < MAX_OUTPUT_CHARS) stdout += textOf(chunk)
+        const text = out.push(chunk)
+        if (stdout.length < MAX_OUTPUT_CHARS) stdout += text
       })
       child.stderr?.on('data', (chunk) => {
-        if (stderr.length < MAX_OUTPUT_CHARS) stderr += textOf(chunk)
+        const text = err.push(chunk)
+        if (stderr.length < MAX_OUTPUT_CHARS) stderr += text
       })
       return new Promise<RunResult>((resolve, reject) => {
         let settled = false
@@ -592,6 +616,8 @@ export function createB2c(deps: B2cDeps): B2c {
           const exitCode = code ?? -1
           log(`${prepared.label}: exit ${exitCode}`)
           finish(() => {
+            stdout += out.end()
+            stderr += err.end()
             if (exitCode === 0) {
               resolve({ stdout, stderr, json: parseJson(stdout) })
             } else {
@@ -614,9 +640,10 @@ export function createB2c(deps: B2cDeps): B2c {
         const json = parseJson(line)
         options.onEvent?.(json === undefined ? { text: line } : { json })
       })
+      const decoder = streamDecoder()
       // Both streams are read whether or not anyone listens: a full pipe would block the process.
       child.stderr?.on('data', (chunk) => {
-        if (!done) lines.push(textOf(chunk))
+        if (!done) lines.push(decoder.push(chunk))
       })
       child.stdout?.on('data', (chunk) => {
         if (!done) options.onStdout?.(bytesOf(chunk))
@@ -625,19 +652,21 @@ export function createB2c(deps: B2cDeps): B2c {
       child.stdin?.on('error', () => {
         stdinOpen = false
       })
-      let resolveExit: (value: { exitCode: number | null; stopped: boolean }) => void = () => {}
-      const exited = new Promise<{ exitCode: number | null; stopped: boolean }>((resolve) => {
+      let resolveExit: (value: Exit) => void = () => {}
+      const exited = new Promise<Exit>((resolve) => {
         resolveExit = resolve
       })
-      const end = (exitCode: number | null, stopped: boolean) => {
+      const end = (exitCode: number | null, stopped: boolean, reason?: StartFailure) => {
         if (done) return
+        // What the pipe still held is handed over first; then nothing more is.
+        lines.push(decoder.end())
         lines.flush()
         done = true
         stdinOpen = false
         clearTimeout(grace)
         options.signal?.removeEventListener('abort', stop)
-        log(`${prepared.label}: ${stopped ? 'stopped' : `exit ${exitCode ?? -1}`}`)
-        resolveExit({ exitCode, stopped })
+        log(`${prepared.label}: ${stopped ? 'stopped' : reason ? `failed (${reason})` : `exit ${exitCode ?? -1}`}`)
+        resolveExit(reason ? { exitCode, stopped, reason } : { exitCode, stopped })
       }
       function stop() {
         if (done) return
@@ -645,19 +674,27 @@ export function createB2c(deps: B2cDeps): B2c {
         end(null, true)
       }
       options.signal?.addEventListener('abort', stop, { once: true })
+      // A process that could not start has no exit code: `exited` says why instead, at once and
+      // without waiting for pipes that will never carry anything. It also closes: the failure is
+      // reported once, as itself.
+      let failed = false
       child.on('error', (error) => {
+        if (done || failed) return
+        failed = true
         log(`${prepared.label}: could not start (${codeOfThrown(error)})`)
-        end(null, false)
+        void startFailure(prepared, error).then((reason) => end(null, false, reason))
       })
       // The process has ended but its pipes may still hold output: wait for them to close, though
       // not for long, since the pipes of a tree that left a process behind stay open.
       let exitCode: number | null = null
       child.on('exit', (code) => {
-        if (done || grace) return
+        if (done || failed || grace) return
         exitCode = code
         grace = setTimeout(() => end(code, false), pipeGraceMs)
       })
-      child.on('close', (code) => end(exitCode ?? code, false))
+      child.on('close', (code) => {
+        if (!failed) end(exitCode ?? code, false)
+      })
       return {
         exited,
         write(data) {

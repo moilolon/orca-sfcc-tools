@@ -2,10 +2,11 @@
 // real Node children (a flood of stdout, an echo of stdin), and on Windows over a real `.cmd`
 // shim that echoes what it received and over the b2c shim installed on the machine.
 import { assert, test } from 'orca/testing'
-import { spawn as nodeSpawn } from 'node:child_process'
+import { exec, spawn as nodeSpawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import {
   argumentWithValue,
   B2cError,
@@ -23,6 +24,7 @@ import {
   type B2cEvent,
   type Spawner
 } from './b2c'
+import { B2C_COMMANDS, B2C_VERSION } from './b2c-commands-fixture'
 import { ALLOWED_FLAGS, type Role } from './instances'
 import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, plainSettings } from './test-support'
 
@@ -121,6 +123,161 @@ test('the other roles read logs and nothing else; unknown topics are refused eve
     assert.equal(await codeOf(b2c.run(['code', 'list'])), 'role_required')
     assert.equal(calls.length, 3)
   }))
+
+/** What each role may run, as it was decided; `none` needs no role. Nothing else starts a process. */
+const MAY_RUN: Record<string, string[]> = {
+  sandbox: ['code list', 'code deploy', 'code watch', 'code activate', 'code delete', 'logs get', 'logs list', 'logs tail', 'sandbox list', 'sandbox start', 'sandbox stop', 'debug'],
+  development: ['logs get', 'logs list', 'logs tail'],
+  staging: ['logs get', 'logs list', 'logs tail'],
+  production: ['logs get', 'logs list', 'logs tail'],
+  none: ['docs read', 'docs search']
+}
+const ROLE_OR_NONE: (Role | undefined)[] = [...EVERY_ROLE, undefined]
+/** A dw.json with every role ready, so nothing but the guard can refuse a command. */
+const READY_DW = { ...INVENTED_DW, 'client-secret-stg': 'invented-stg-client-secret', 'hostname-prd': 'production-01.example.com' }
+
+function mayRun(command: string, role: Role | undefined): boolean {
+  return MAY_RUN.none.includes(command) || (role !== undefined && MAY_RUN[role].includes(command))
+}
+
+function isRefusal(code: string): boolean {
+  return code === 'role_refused' || code === 'role_required'
+}
+
+test('each role starts the commands of its list, whole, and only those', () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls } = runner(root)
+    for (const role of EVERY_ROLE) {
+      for (const command of MAY_RUN.sandbox) {
+        const expected = MAY_RUN[role].includes(command) ? 'resolved' : 'role_refused'
+        assert.equal(await codeOf(b2c.run(command.split(' '), { role })), expected, `${command} on ${role}`)
+        assert.equal(await codeOf(b2c.run([command.split(' ').join(':')], { role })), expected, `${command} with a colon on ${role}`)
+      }
+    }
+    for (const command of MAY_RUN.none) assert.equal(await codeOf(b2c.run([...command.split(' '), 'x'])), 'resolved', command)
+    // Twelve on the sandbox and three on each other role, twice each; the two that need no role.
+    assert.equal(calls.length, (12 + 3 * 3) * 2 + 2)
+    assert.deepEqual(calls[1].args, ['code:list', '--json'])
+  }, READY_DW))
+
+test('refuses the ods alias and every command that deletes, resets, creates or downloads, on every role', () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls } = runner(root)
+    const named = [
+      ['sandbox', 'delete', 'abcd-001'],
+      ['sandbox', 'reset', 'abcd-001'],
+      ['sandbox', 'create'],
+      ['sandbox', 'restart', 'abcd-001'],
+      ['sandbox', 'update', 'abcd-001'],
+      ['code', 'download'],
+      ['setup', 'inspect'],
+      ['setup', 'instance', 'create', 'x'],
+      ['auth', 'login'],
+      ['auth', 'token'],
+      ['webdav', 'rm', 'x'],
+      ['webdav', 'put', 'x', 'y'],
+      ['job', 'run', 'x'],
+      ['job', 'import', 'x'],
+      ['debug', 'cli'],
+      ['ods', 'list'],
+      ['ods', 'start', 'abcd-001'],
+      ['ods', 'stop', 'abcd-001'],
+      ['ods', 'delete', 'abcd-001']
+    ]
+    for (const args of named) {
+      for (const role of ROLE_OR_NONE) {
+        const where = `${args.join(' ')} on ${role ?? 'no role'}`
+        assert.equal(await codeOf(b2c.run(args, { role })), 'role_refused', where)
+        assert.equal(await codeOf(b2c.start(args, { role })), 'role_refused', `${where} (start)`)
+        assert.equal(await codeOf(b2c.run([args.slice(0, 2).join(':'), ...args.slice(2), '--force'], { role })), 'role_refused', `${where} (colon)`)
+      }
+    }
+    assert.equal(calls.length, 0, 'no process was started')
+  }, READY_DW))
+
+test(`walks every command of b2c ${B2C_VERSION}: none outside the list starts a process, on any role, in either spelling`, () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls } = runner(root)
+    let refused = 0
+    for (const id of B2C_COMMANDS) {
+      const words = id.split(':')
+      for (const role of ROLE_OR_NONE) {
+        if (mayRun(words.join(' '), role)) continue
+        for (const args of [words, [id], [...words, 'x'], [id, '--force']]) {
+          const where = `${args.join(' ')} on ${role ?? 'no role'}`
+          const ran = await codeOf(b2c.run(args, { role }))
+          assert.ok(isRefusal(ran), `run ${where}: ${ran}`)
+          const started = await codeOf(b2c.start(args, { role }))
+          assert.ok(isRefusal(started), `start ${where}: ${started}`)
+          refused++
+        }
+      }
+    }
+    assert.equal(calls.length, 0, 'no process was started')
+    // 411 commands, five ways of asking (four roles and none), four spellings; less the 31 allowed.
+    assert.equal(refused, (B2C_COMMANDS.length * 5 - 31) * 4)
+  }, READY_DW))
+
+/** The names a help screen of b2c lists under TOPICS and COMMANDS, as it prints them. */
+function listedIn(help: string): { topics: string[]; commands: string[] } {
+  const listed = { topics: [] as string[], commands: [] as string[] }
+  let section: 'topics' | 'commands' | null = null
+  for (const line of help.split(/\r?\n/)) {
+    if (/^\S/.test(line)) section = line.trim() === 'TOPICS' ? 'topics' : line.trim() === 'COMMANDS' ? 'commands' : null
+    // A name starts two spaces in; a description that wraps is indented further.
+    const name = section ? line.match(/^ {2}([a-z0-9_-]+(?: [a-z0-9_-]+)*)(?: {2,}.*)?$/)?.[1] : undefined
+    if (section && name) listed[section].push(name)
+  }
+  return listed
+}
+
+test('reads the topics and commands off a help screen', () => {
+  const help = ['Manage things', '', 'USAGE', '  $ b2c sandbox COMMAND', '', 'TOPICS', '  sandbox alias       Create an alias', '  sandbox realm       Get the configuration', '', 'COMMANDS', '  sandbox create    Create a sandbox', '  sandbox reset     Reset a sandbox to clean state (clears all data but', '                    preserves configuration)', '  sandbox list', '', 'SKILL', '  b2c docs skill b2c-sandbox'].join('\n')
+  assert.deepEqual(listedIn(help), { topics: ['sandbox alias', 'sandbox realm'], commands: ['sandbox create', 'sandbox reset', 'sandbox list'] })
+})
+
+test('walks what b2c --help lists on this machine: each topic and command outside the list is refused on every role', async () => {
+  if (!(await installedB2c())) return // Skipped where b2c is not installed; the committed list above is walked everywhere.
+  const run = promisify(exec)
+  // Names come from a help screen and hold only letters, digits, `-` and `_`.
+  const helpOf = async (topic: string) => (await run(`b2c ${topic} --help`.replace('  ', ' '), { cwd: tmpdir(), timeout: 120_000, windowsHide: true })).stdout
+  const top = await helpOf('')
+  const version = top.match(/b2c-cli\/(\d+\.\d+\.\d+)/)?.[1]
+  const first = listedIn(top)
+  assert.ok(first.topics.includes('sandbox') && first.topics.includes('code') && first.commands.includes('debug'), 'the help screen was read')
+  // The help of every topic, a few at a time.
+  const names = new Set([...first.topics, ...first.commands])
+  const pending = [...first.topics]
+  await Promise.all(
+    Array.from({ length: 6 }, async () => {
+      for (let topic = pending.pop(); topic !== undefined; topic = pending.pop()) {
+        const listed = listedIn(await helpOf(topic))
+        for (const name of [...listed.topics, ...listed.commands]) names.add(name)
+      }
+    })
+  )
+  assert.ok(names.has('sandbox delete') && names.has('sandbox reset') && names.has('code download') && names.has('ods list'), 'the topics were read')
+
+  const { b2c, calls } = runner(null)
+  const known = new Set(B2C_COMMANDS.flatMap((id) => id.split(':').map((_, i, words) => words.slice(0, i + 1).join(' '))))
+  let allowed = 0
+  for (const name of names) {
+    if (version === B2C_VERSION) assert.ok(known.has(name), `${name} is missing from the committed list of b2c ${B2C_VERSION}`)
+    for (const role of ROLE_OR_NONE) {
+      if (mayRun(name, role)) {
+        allowed++
+        continue
+      }
+      for (const args of [name.split(' '), [name.split(' ').join(':')], [...name.split(' '), 'x']]) {
+        const code = await codeOf(b2c.run(args, { role }))
+        assert.ok(isRefusal(code), `${args.join(' ')} on ${role ?? 'no role'}: ${code}`)
+      }
+    }
+  }
+  assert.equal(calls.length, 0, 'no process was started')
+  // Every allowed command is one this b2c really has.
+  if (version === B2C_VERSION) assert.equal(allowed, 31)
+})
 
 // ---------------------------------------------------------------------------------------------
 // The three states of a role
@@ -345,7 +502,7 @@ test('refuses any argument that holds a value of dw.json, whichever role it belo
     const refused: [Role, string[], number][] = [
       ['sandbox', ['logs', 'get', `--filter=${INVENTED_DW['client-id']}`], 2],
       ['sandbox', ['logs', 'get', '--search', `x${INVENTED_DW.password}x`], 3],
-      ['sandbox', ['logs', 'get', INVENTED_DW.hostname], 2],
+      ['sandbox', ['code', 'activate', INVENTED_DW.hostname], 2],
       // A value of another role, even of one with no host, is still a value of the file.
       ['development', ['logs', 'get', '--search', INVENTED_DW['client-secret']], 3],
       ['sandbox', ['code', 'activate', INVENTED_DW['client-secret-prd']], 2]
@@ -381,22 +538,106 @@ test('success is exit 0 alone: JSON parsed from stdout, an empty stdout is no va
       // Even exit 0 is success when stdout is not JSON; there is just no value.
       text: [0, 'done', '']
     }
-    const { b2c, calls } = runner(root, fakeSpawner((call) => call.child.finish(...outputs[call.args[1]])))
-    assert.deepEqual((await b2c.run(['code', 'list'], { role: 'sandbox' })).json, { versions: ['v1'] })
+    // The code version named picks what the fake process answers.
+    const { b2c, calls } = runner(root, fakeSpawner((call) => call.child.finish(...outputs[call.args[2]])))
+    const answer = (version: string) => b2c.run(['code', 'activate', version], { role: 'sandbox' })
+    assert.deepEqual((await answer('list')).json, { versions: ['v1'] })
     // A one-shot command has no stdin to wait on.
     assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe'])
-    const activated = await b2c.run(['code', 'activate'], { role: 'sandbox' })
+    const activated = await answer('activate')
     assert.equal(activated.json, undefined)
     assert.equal(activated.stdout, '')
-    const shim = await failureOf(b2c.run(['code', 'shim'], { role: 'sandbox' }))
+    const shim = await failureOf(answer('shim'))
     assert.ok(shim instanceof B2cError)
     assert.equal(shim.code, 'b2c_failed')
     assert.equal(shim.exitCode, 126)
     assert.equal(shim.detail, 'Unauthorized')
-    const one = await failureOf(b2c.run(['code', 'one'], { role: 'sandbox' }))
+    const one = await failureOf(answer('one'))
     assert.ok(one instanceof B2cError)
     assert.equal(one.detail, null)
-    assert.equal((await b2c.run(['code', 'text'], { role: 'sandbox' })).json, undefined)
+    assert.equal((await answer('text')).json, undefined)
+  }))
+
+// ---------------------------------------------------------------------------------------------
+// Output cut anywhere
+
+/** An accented letter (two bytes) and an emoji (four), in JSON as b2c prints it and in plain text. */
+const ACCENTED = '{"msg":"café señor 😀 ok"}'
+const ACCENTED_BYTES = Buffer.from(`${ACCENTED}\n`, 'utf8')
+
+/** `bytes` cut in two at `at`, or one byte at a time when `at` is 0. */
+function cut(bytes: Buffer, at: number): Buffer[] {
+  if (at === 0) return [...bytes].map((byte) => Buffer.from([byte]))
+  return [bytes.subarray(0, at), bytes.subarray(at)]
+}
+
+test('run() puts together a character cut between two chunks, at every byte of an accent and an emoji', () =>
+  withWorkspace(async (root) => {
+    assert.ok(ACCENTED_BYTES.length > ACCENTED.length + 4, 'the text has characters of several bytes')
+    // 0 is every boundary at once: one byte per chunk.
+    for (let at = 0; at < ACCENTED_BYTES.length; at++) {
+      const pieces = cut(ACCENTED_BYTES, at)
+      const speaking = fakeSpawner((call) => {
+        for (const piece of pieces) call.child.stdout.emit('data', piece)
+        for (const piece of pieces) call.child.stderr.emit('data', piece)
+        call.child.finish(0)
+      })
+      const result = await runner(root, speaking).b2c.run(['code', 'list'], { role: 'sandbox' })
+      assert.equal(result.stdout, `${ACCENTED}\n`, `stdout cut at ${at}`)
+      assert.equal(result.stderr, `${ACCENTED}\n`, `stderr cut at ${at}`)
+      assert.deepEqual(result.json, { msg: 'café señor 😀 ok' }, `json cut at ${at}`)
+      assert.ok(!`${result.stdout}${result.stderr}`.includes('�'), `no replacement character, cut at ${at}`)
+
+      // The same in the message of a failure, which is read from stderr.
+      const error = Buffer.from(`${JSON.stringify({ error: { message: 'no está 😀', code: 1 } })}\n`, 'utf8')
+      const failing = fakeSpawner((call) => {
+        for (const piece of cut(error, Math.min(at, error.length - 1))) call.child.stderr.emit('data', piece)
+        call.child.finish(1)
+      })
+      const failure = await failureOf(runner(root, failing).b2c.run(['code', 'list'], { role: 'sandbox' }))
+      assert.ok(failure instanceof B2cError)
+      assert.equal(failure.detail, 'no está 😀', `detail cut at ${at}`)
+    }
+  }))
+
+test('run() ends a stream that stops in the middle of a character with one replacement, and takes text chunks as they are', () =>
+  withWorkspace(async (root) => {
+    const euro = Buffer.from('€', 'utf8')
+    const broken = fakeSpawner((call) => {
+      call.child.stdout.emit('data', Buffer.from('price '))
+      call.child.stdout.emit('data', euro.subarray(0, 2))
+      call.child.stderr.emit('data', 'año ')
+      call.child.stderr.emit('data', Buffer.from('😀', 'utf8'))
+      call.child.finish(0)
+    })
+    const result = await runner(root, broken).b2c.run(['code', 'list'], { role: 'sandbox' })
+    assert.equal(result.stdout, 'price �')
+    assert.equal(result.stderr, 'año 😀')
+  }))
+
+test('start() puts together the characters of its stderr lines the same way', () =>
+  withWorkspace(async (root) => {
+    const lines = Buffer.from(`${ACCENTED}\n » aviso: señal 😀 perdida\n`, 'utf8')
+    for (let at = 0; at < lines.length; at++) {
+      const { b2c, calls } = runner(root, fakeSpawner(() => {}))
+      const events: B2cEvent[] = []
+      const running = await b2c.start(['logs', 'tail'], { role: 'sandbox', onEvent: (event) => events.push(event) })
+      for (const piece of cut(lines, at)) calls[0].child.stderr.emit('data', piece)
+      assert.deepEqual(events, [{ json: { msg: 'café señor 😀 ok' } }, { text: ' » aviso: señal 😀 perdida' }], `cut at ${at}`)
+      calls[0].child.finish(0)
+      assert.deepEqual(await running.exited, { exitCode: 0, stopped: false })
+    }
+    // A last line with no line break, cut inside its last character, still arrives whole.
+    const { b2c, calls } = runner(root, fakeSpawner(() => {}))
+    const events: B2cEvent[] = []
+    const running = await b2c.start(['logs', 'tail'], { role: 'sandbox', onEvent: (event) => events.push(event) })
+    const last = Buffer.from('adiós 😀', 'utf8')
+    calls[0].child.stderr.emit('data', last.subarray(0, last.length - 2))
+    assert.deepEqual(events, [])
+    calls[0].child.stderr.emit('data', last.subarray(last.length - 2))
+    calls[0].child.finish(0)
+    await running.exited
+    assert.deepEqual(events, [{ text: 'adiós 😀' }])
   }))
 
 test('reads b2c’s error from the last JSON line of stderr, else its last ERROR: line', () => {
@@ -633,11 +874,63 @@ test('a long-lived command that ends by itself reports its exit code, even if it
     calls[0].child.stderr.emit('data', Buffer.from('last words'))
     assert.deepEqual(await running.exited, { exitCode: 3, stopped: false })
     assert.deepEqual(events, [{ text: 'last words' }])
-    // A failure to start ends it too.
-    const failing = await b2c.start(['debug'], { role: 'sandbox' })
-    calls[1].child.emit('error', Object.assign(new Error('spawn failed'), { code: 'EACCES' }))
-    assert.deepEqual(await failing.exited, { exitCode: null, stopped: false })
   }))
+
+test('a long-lived process that fails to start says why through exited, at once, and nothing more reaches onEvent', () =>
+  withWorkspace(async (root) => {
+    // Pipes that never close and a long wait for them: neither may delay the answer.
+    let folderExists = true
+    const { b2c, calls, logs } = runner(root, fakeSpawner(() => {}), { pipeGraceMs: 60_000, isDirectory: async () => folderExists })
+    const failures: [string, boolean, string][] = [
+      ['EACCES', true, 'b2c_failed'],
+      ['ENOENT', true, 'b2c_not_found'],
+      // The folder went away between the check and the start.
+      ['ENOENT', false, 'cwd_not_found']
+    ]
+    for (const [code, folderStays, reason] of failures) {
+      folderExists = true
+      const events: B2cEvent[] = []
+      const chunks: Uint8Array[] = []
+      const running = await b2c.start(['code', 'watch'], { role: 'sandbox', jsonl: true, onEvent: (event) => events.push(event), onStdout: (chunk) => chunks.push(chunk) })
+      const child = calls[calls.length - 1].child
+      folderExists = folderStays
+      const started = Date.now()
+      child.emit('error', Object.assign(new Error(`spawn ${code} ${INVENTED_DW['client-secret']}`), { code }))
+      // As Node does it: the process that never ran also exits and closes.
+      child.emit('exit', -4058)
+      child.emit('close', -4058)
+      assert.deepEqual(await running.exited, { exitCode: null, stopped: false, reason }, code)
+      assert.ok(Date.now() - started < 5_000, 'no wait for the pipes')
+      // Nothing is left to wait for: no event came, none will, and stdin is closed.
+      child.stderr.emit('data', Buffer.from('{"msg":"too late"}\n'))
+      child.stdout.emit('data', Buffer.from('too late'))
+      assert.deepEqual(events, [], code)
+      assert.deepEqual(chunks, [], code)
+      assert.equal(running.write('x'), false)
+      assert.ok(!child.killed, 'there is nothing to kill')
+      running.stop()
+      assert.deepEqual(await running.exited, { exitCode: null, stopped: false, reason })
+    }
+    assert.deepEqual(
+      logs.filter((line) => line.includes('failed')),
+      ['b2c code (sandbox): failed (b2c_failed)', 'b2c code (sandbox): failed (b2c_not_found)', 'b2c code (sandbox): failed (cwd_not_found)']
+    )
+    assertNoSecrets(logs.join('\n'), 'the log')
+  }))
+
+test('a real program that does not exist fails a long-lived command with b2c_not_found', async () => {
+  // The real spawn of a file that is not there: Node reports it after start() has returned.
+  const spawn: Spawner = (_file, _args, options) => nodeSpawn(join(tmpdir(), 'sfcc-tools-no-such-program.exe'), [], options)
+  const b2c = createB2c({ settings: plainSettings({ b2cPath: process.execPath }), configRoot: async () => null, spawn, homedir: tmpdir() })
+  const events: B2cEvent[] = []
+  const running = await b2c.start(['docs', 'read', 'x'], { onEvent: (event) => events.push(event) })
+  assert.deepEqual(await running.exited, { exitCode: null, stopped: false, reason: 'b2c_not_found' })
+  assert.deepEqual(events, [])
+  assert.equal(running.write('x'), false)
+  // A process that starts and ends has no reason, only its exit code.
+  const ok = await nodeRunner('process.exit(3)').start(['docs', 'read', 'x'])
+  assert.deepEqual(await ok.exited, { exitCode: 3, stopped: false })
+})
 
 /** A runner whose every process is a real Node child running `script`, with the runner's own stdio. */
 function nodeRunner(script: string): B2c {
@@ -858,8 +1151,8 @@ test('on Windows, a .cmd shim gets arguments with spaces whole, and is never sta
     assert.deepEqual(all.json, ['docs', 'search', ...AWKWARD, '--json'])
     assert.ok(existsSync(started))
     for (const arg of AWKWARD) {
-      const one = await b2c.run(['docs', arg], { cwd, timeoutMs: 30_000 })
-      assert.deepEqual(one.json, ['docs', arg, '--json'], JSON.stringify(arg))
+      const one = await b2c.run(['docs', 'read', arg], { cwd, timeoutMs: 30_000 })
+      assert.deepEqual(one.json, ['docs', 'read', arg, '--json'], JSON.stringify(arg))
     }
     assert.deepEqual(readdirSync(cwd), [])
   })

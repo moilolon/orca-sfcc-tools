@@ -24,12 +24,31 @@ export function suffixFor(role: Role, suffixes: Suffixes): string | null {
   return others.some((other) => suffixes[other] === own) ? null : own
 }
 
-/** Commands that run with no environment and get no credentials. */
-const ROLELESS = new Set(['docs', '--version'])
-/** What the sandbox may run: upload, debugging, the sandbox itself (`ods` is its alias), logs. */
-const SANDBOX_TOPICS = new Set(['code', 'debug', 'sandbox', 'ods', 'logs'])
-/** What development, staging and production may run: reading logs, nothing else. */
-const READ_ONLY_TOPICS = new Set(['logs'])
+/** Reading logs: all that development, staging and production may be asked. */
+const READ_LOGS = ['logs get', 'logs list', 'logs tail'] as const
+
+/**
+ * Every command the plugin may run, whole, by who may run it: an allow list. A topic is not
+ * enough: `sandbox` also deletes and resets a sandbox, `code` also downloads one. Whatever is not
+ * here is refused for every role, the `ods` alias of `sandbox` included. `none` needs no role
+ * and gets no credentials.
+ */
+export const ALLOWED_COMMANDS: Readonly<Record<Role | 'none', readonly string[]>> = {
+  sandbox: ['code list', 'code deploy', 'code watch', 'code activate', 'code delete', ...READ_LOGS, 'sandbox list', 'sandbox start', 'sandbox stop', 'debug'],
+  development: READ_LOGS,
+  staging: READ_LOGS,
+  production: READ_LOGS,
+  none: ['docs read', 'docs search', '--version']
+}
+
+/**
+ * The allowed commands that take a value of their own right after their name: a folder, a code
+ * version, a sandbox id, a query. After any other one only a flag may follow: a plain word there
+ * could only name a longer command (`debug cli`), which b2c would run instead.
+ */
+const TAKES_VALUE: ReadonlySet<string> = new Set(['code deploy', 'code watch', 'code activate', 'code delete', 'sandbox start', 'sandbox stop', 'docs read', 'docs search'])
+
+const EVERY_COMMAND: readonly string[] = [...new Set(Object.values(ALLOWED_COMMANDS).flat())]
 
 /** The command's topic: `code` for `code deploy` and for oclif's `code:deploy` form. */
 export function topicOf(args: readonly string[]): string {
@@ -37,22 +56,38 @@ export function topicOf(args: readonly string[]): string {
   return first.startsWith('-') ? first : first.split(':')[0]
 }
 
+/**
+ * The allowed command `args` begin with, or null. Its words must be the first arguments, as
+ * written in the list; oclif's colon spelling of them (`code:deploy`) counts as the same
+ * command, nothing more of it does (`code:deploy:x`). `--version` stands alone.
+ */
+export function commandOf(args: readonly string[]): string | null {
+  const [first = '', ...rest] = args
+  if (first.startsWith('-')) return first === '--version' && rest.length === 0 ? first : null
+  const head = first.split(':')
+  for (const command of EVERY_COMMAND) {
+    const words = command.split(' ')
+    const tail = words.slice(head.length)
+    if (head.length > words.length || head.some((word, i) => word !== words[i]) || tail.some((word, i) => word !== rest[i])) continue
+    const next = rest[tail.length]
+    if (next === undefined || next.startsWith('-') || TAKES_VALUE.has(command)) return command
+  }
+  return null
+}
+
 export type GuardResult = { ok: true; needsRole: boolean } | { ok: false; code: 'role_refused' | 'role_required' }
 
 /**
- * Whether `args` may run for `role`. An allow list: a topic not named here is refused, whatever
- * the role. `docs` and `--version` need no role and are run without credentials.
+ * Whether `args` may run for `role`: only a command of `ALLOWED_COMMANDS`, and only for a role
+ * that lists it. `docs read`, `docs search` and `--version` need no role and are run without
+ * credentials.
  */
 export function guard(args: readonly string[], role: Role | undefined): GuardResult {
-  const topic = topicOf(args)
-  if (ROLELESS.has(topic)) {
-    // `--version` alone; `docs` with anything after it.
-    if (topic === '--version' && args.length !== 1) return { ok: false, code: 'role_refused' }
-    return { ok: true, needsRole: false }
-  }
+  const command = commandOf(args)
+  if (command === null) return { ok: false, code: 'role_refused' }
+  if (ALLOWED_COMMANDS.none.includes(command)) return { ok: true, needsRole: false }
   if (!role) return { ok: false, code: 'role_required' }
-  const allowed = role === 'sandbox' ? SANDBOX_TOPICS : READ_ONLY_TOPICS
-  return allowed.has(topic) ? { ok: true, needsRole: true } : { ok: false, code: 'role_refused' }
+  return ALLOWED_COMMANDS[role].includes(command) ? { ok: true, needsRole: true } : { ok: false, code: 'role_refused' }
 }
 
 /** What dw.json holds for a role: a host and credentials b2c can use, a host alone, or nothing. */
