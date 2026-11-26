@@ -17,8 +17,9 @@
 ## ✨ What this is
 
 What it takes to work on a Salesforce Commerce Cloud project from
-[Orca](https://github.com/stablyai/orca), in one plugin. The repository has just started:
-today it holds only the base, and the pieces in the table are added one at a time.
+[Orca](https://github.com/stablyai/orca), in one plugin. Today it holds the base: an **SFCC**
+panel that shows whether `b2c` is installed and which environments the workspace's `dw.json`
+configures. The pieces in the table are added one at a time.
 
 | | Piece | What it does |
 |---|---|---|
@@ -33,6 +34,9 @@ today it holds only the base, and the pieces in the table are added one at a tim
 
 - **On the official CLI.** Upload, logs and the sandbox go through `b2c`, Salesforce's CLI.
   It is the only thing the plugin needs installed: it ships no binaries of its own.
+- **Four environments.** The sandbox reads the plain keys of `dw.json`; development, staging
+  and production read the same keys with a suffix (`-dev`, `-stg`, `-prd`, set in Settings).
+  Only the sandbox can be uploaded to or debugged; the other three are read for logs only.
 - **One workspace uploads.** With several worktrees and one sandbox, the workspace that
   uploads is picked by hand; switching tabs never changes what the sandbox runs.
 - **No build.** Orca loads the `.ts` and `.tsx` files as written; `node_modules` only holds
@@ -43,15 +47,20 @@ today it holds only the base, and the pieces in the table are added one at a tim
 ## 🔐 What is public
 
 This repo is **public** and holds only the plugin: nothing of any project it is used on.
-No hosts, sandbox names, credentials or customer data are written here. The plugin never
-reads credentials either: the `b2c` CLI resolves them from the workspace's own `dw.json`.
+No hosts, sandbox names, credentials or customer data are written here. The plugin reads the
+workspace's `dw.json` for one purpose: to hand `b2c` the host and credentials of each
+environment, in the environment of the process it starts. They are never stored, logged,
+shown in the panel or passed as arguments.
 
 ---
 
 ## 🚀 Getting started
 
+Install [`b2c`](https://developer.salesforce.com/docs/commerce/b2c-commerce/overview), then:
+
 ```bash
 npm install
+npm run types
 npm test
 ```
 
