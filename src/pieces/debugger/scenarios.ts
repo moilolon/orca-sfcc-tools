@@ -3,7 +3,7 @@
 // merges them; every name starts with `debugger`. The worker is stubbed: no b2c runs. Every name
 // and value below is invented.
 import type { PieceScenarios } from '../../panel/scenarios'
-import type { DebuggerFiles, DebuggerScripts, DebuggerSource, DebuggerState, Variable } from './protocol'
+import type { DebuggerScripts, DebuggerSource, DebuggerState, Variable } from './protocol'
 
 const PAGE = 'cartridges/app_example/cartridge/controllers/Page.js'
 const HELPERS = 'cartridges/app_example/cartridge/scripts/helpers/pageHelpers.js'
@@ -15,6 +15,7 @@ const IDLE: DebuggerState = {
   message: null,
   sandbox: 'ready',
   workspace: 'ok',
+  workspaceId: 'w-example',
   breakpoints: [],
   threads: [],
   threadId: null,
@@ -52,7 +53,6 @@ const SCOPES: Variable[] = [
   { name: 'Global', value: '', reference: 3, expensive: true }
 ]
 
-const FILES: DebuggerFiles = { files: [PAGE, BASE_PAGE], truncated: false }
 
 /** Two cartridges and their scripts. */
 const SCRIPTS: DebuggerScripts = {
@@ -106,7 +106,7 @@ const PAGE_SOURCE: DebuggerSource = {
 }
 
 /** The requests every scenario of the view answers: the list of scripts and a script's lines. */
-const BROWSE = { 'debugger.files': () => FILES, 'debugger.scripts': () => SCRIPTS, 'debugger.source': () => PAGE_SOURCE }
+const BROWSE = { 'debugger.scripts': () => SCRIPTS, 'debugger.source': () => PAGE_SOURCE }
 
 export const scenarios: PieceScenarios = {
   /** No session yet and no breakpoint: the view offers to start and to add one. */

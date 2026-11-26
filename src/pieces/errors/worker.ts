@@ -389,9 +389,6 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     return reading
   }
 
-  /** A frame of a script of a cartridge, as against one of the platform (`Engine.java`). */
-  const SCRIPT_FILE = /\.(?:js|ds|isml)$/i
-
   async function list(role: Role): Promise<RoleErrors> {
     // Taken first: an answer that says it is not reading holds nothing older than the last read.
     const reading = reads.has(role)
@@ -403,7 +400,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
           const local = root === null ? null : await frames.resolve(root, frame.file).catch(() => null)
           // Its path in the workspace, `/` between its parts, for a breakpoint; never the folder.
           const path = root !== null && local !== null ? relative(root, local).split('\\').join('/') : null
-          return { ...frame, openable: local !== null, path: path && !path.startsWith('..') ? path : null, script: SCRIPT_FILE.test(frame.file) }
+          return { ...frame, openable: local !== null, path: path && !path.startsWith('..') ? path : null }
         })
       )
       out.push({

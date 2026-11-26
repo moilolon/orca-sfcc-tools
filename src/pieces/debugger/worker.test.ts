@@ -168,7 +168,7 @@ test('no workspace, or one on another machine: shown as such, and nothing starts
   assert.equal(await codeOf(none.worker.request('debugger.start', {})), 'no_workspace')
   const remote = await mount({ workspace: { ...LOCAL, hostId: 'ssh:box' } })
   assert.equal((await remote.worker.request('debugger.state', {})).workspace, 'remote')
-  assert.equal(await codeOf(remote.worker.request('debugger.files', { query: 'page' })), 'no_workspace')
+  assert.equal(await codeOf(remote.worker.request('debugger.scripts', {})), 'no_workspace')
   assert.equal(remote.adapter.processes.length + none.adapter.processes.length, 0)
 })
 
@@ -187,8 +187,6 @@ test('breakpoints are kept per workspace with relative paths; a bad one is refus
   assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [11, 24] } })
   assert.equal(await codeOf(worker.request('debugger.setBreakpoints', { path: `${FAKE_ROOT}/x.js`, lines: [1] })), 'invalid_path')
   assert.deepEqual((await worker.request('debugger.clearBreakpoints', {})).breakpoints, [])
-  // Files to pick from: the cartridges' scripts, by name.
-  assert.deepEqual(await worker.request('debugger.files', { query: 'page' }), { files: [PAGE], truncated: false })
 })
 
 test('one breakpoint is set or removed at a time, the file’s other lines kept; a bad line or path is refused', async () => {

@@ -24,18 +24,22 @@ import {
   Tree,
   type OrcaNode,
   type PanelContext,
+  type ReadonlyAtom,
   type TableRow,
   type TreeItem
 } from 'orca'
-import { t, wordError } from '../../core/i18n'
+import { languageOf, t, wordError } from '../../core/i18n'
 import type { PanelSection } from '../../core/piece'
 import { openSetup } from '../../panel/navigation'
 import { Empty, ErrorState, Group, ListRow, Notice, NoticeLine, StateMark, type StateTone } from '../../panel/ui'
 import { messages, type MessageKey } from './i18n'
 import type { BreakpointView, DebuggerScripts, DebuggerSource, DebuggerState, Frame, SessionStatus, StepKind, Thread } from './protocol'
 
-/** How many lines are added each time the table of a script's lines scrolls to its end. */
-const LINES_PAGE = 1000
+/**
+ * How many lines of a script the table holds at once: a window moved by page, by a line number or
+ * by a search, never a list that grows. 200 lines of 240 characters stay far under a view's budget.
+ */
+export const WINDOW_LINES = 200
 
 const state = atom<DebuggerState | null>(null)
 /** The code of the last request that failed; the next one that succeeds clears it. */
@@ -57,17 +61,24 @@ const scriptQuery = atom('')
 const scriptsOpen = atom<string[]>('debuggerScriptsOpen', [], { persist: 'plugin' })
 /** The script whose lines are shown, kept across runs by its path in the workspace (never its lines). */
 const openScript = atom<string | null>('debuggerScript', null, { persist: 'plugin' })
+/**
+ * The workspace the open script and open folders belong to: when another one is debugged, they are
+ * let go, so a path of one workspace is never opened in another.
+ */
+const scriptsWorkspace = atom<string | null>('debuggerWorkspace', null, { persist: 'plugin' })
 /** Its lines, read when it is opened and never kept beyond this panel run. */
 const source = atom<DebuggerSource | null>(null)
 const sourceError = atom<string | null>(null)
 /** What the lines are filtered by: words, or a line number to go to. */
 const lineFilter = atom('')
 /** How many lines are drawn while nothing filters them; scrolling to the end draws more. */
-const shownLines = atom(LINES_PAGE)
+const windowStart = atom(1)
 /** Which halt the variables belong to: thread and top frame. */
 let haltKey = ''
 let locale = 'en'
 
+/** At most this many children of a scope or variable are drawn. */
+export const MAX_CHILDREN = 200
 /** At most this much of a value is drawn; the rest is cut. */
 const MAX_VALUE = 400
 /** At most this many scripts are listed for a search. */
@@ -120,12 +131,25 @@ function resetVariables(): void {
 /** The last state as JSON, so a post that changes nothing draws nothing. */
 let lastJson = ''
 
+/** Another workspace is debugged: what was open in the list of scripts is of the last one. */
+function followWorkspace(id: string): void {
+  const known = read(scriptsWorkspace) !== null
+  set(scriptsWorkspace, id)
+  if (!known) return
+  set(scriptsOpen, [])
+  set(scriptQuery, '')
+  closeScript()
+  set(scripts, null)
+  void loadScripts()
+}
+
 /** A new state from the worker: on a new halt, the top frame is picked and its scopes read. */
 function apply(next: DebuggerState): void {
   const json = JSON.stringify(next)
   if (json === lastJson) return
   lastJson = json
   set(state, next)
+  if (next.workspaceId !== null && read(scriptsWorkspace) !== next.workspaceId) followWorkspace(next.workspaceId)
   const key = next.status === 'halted' && next.frames.length > 0 ? `${next.threadId}:${next.frames[0].id}:${next.frames[0].line}` : ''
   if (key === haltKey) return
   haltKey = key
@@ -201,7 +225,7 @@ async function loadSource(path: string): Promise<void> {
 /** Shows a script's lines, at `line` when given. */
 function showScript(path: string, line?: number): void {
   set(lineFilter, line ? String(line) : '')
-  set(shownLines, LINES_PAGE)
+  set(windowStart, 1)
   if (read(openScript) === path && read(source)) return
   set(openScript, path)
   void loadSource(path)
@@ -259,11 +283,18 @@ async function toggle(key: string, isOpen: boolean): Promise<void> {
   if (!answer) return
   const current = { ...read(nodes) }
   if (!current[key]) return
-  const children = answer.map((variable, i) => {
+  // A scope or an array of thousands: the first MAX_CHILDREN are drawn, then one item that says how
+  // many more there are, so opening it never takes the view past its budget.
+  const children = answer.slice(0, MAX_CHILDREN).map((variable, i) => {
     const child = `${key}/${i}`
     current[child] = { label: variable.name, description: cutValue(variable.value), reference: variable.reference }
     return child
   })
+  if (answer.length > MAX_CHILDREN) {
+    const rest = `${key}/more`
+    current[rest] = { label: text('moreVariables', { count: answer.length - MAX_CHILDREN }), reference: 0 }
+    children.push(rest)
+  }
   current[key] = { ...current[key], children }
   set(nodes, current)
 }
@@ -338,26 +369,40 @@ export function toggledLine(before: readonly string[], keys: readonly string[]):
   return null
 }
 
-/** The lines to draw: those holding every word of `filter`, or from a line number on, or the first `limit`. */
-export function visibleLines(lines: readonly string[], filter: string, limit: number): { numbers: number[]; more: boolean } {
+/**
+ * The lines to draw, at most `size`: those holding every word of `filter` (`matches` says how
+ * many hold them in all), or a window opening a few lines before a line number, or the window
+ * starting at `start`.
+ */
+export function visibleLines(lines: readonly string[], filter: string, start: number, size = WINDOW_LINES): { numbers: number[]; matches: number | null } {
   const wanted = filter.trim()
-  if (/^\d+$/.test(wanted)) {
-    // A line number: a few lines before it for context, then on from it.
-    const first = Math.max(1, Math.min(lines.length, Number(wanted)) - 5)
-    const last = Math.min(lines.length, first + limit - 1)
-    return { numbers: Array.from({ length: Math.max(0, last - first + 1) }, (_, i) => first + i), more: last < lines.length }
+  const range = (first: number) => {
+    const from = Math.max(1, Math.min(first, lines.length - size + 1))
+    const last = Math.min(lines.length, from + size - 1)
+    return Array.from({ length: Math.max(0, last - from + 1) }, (_, i) => from + i)
   }
+  if (/^\d+$/.test(wanted)) return { numbers: range(Math.max(1, Math.min(lines.length, Number(wanted)) - 5)), matches: null }
   if (wanted) {
     const words = wanted.toLowerCase().split(/\s+/)
     const numbers: number[] = []
-    for (let i = 0; i < lines.length && numbers.length < limit; i++) {
+    let matches = 0
+    for (let i = 0; i < lines.length; i++) {
       const line = lines[i].toLowerCase()
-      if (words.every((word) => line.includes(word))) numbers.push(i + 1)
+      if (!words.every((word) => line.includes(word))) continue
+      matches += 1
+      if (numbers.length < size) numbers.push(i + 1)
     }
-    return { numbers, more: false }
+    return { numbers, matches }
   }
-  const last = Math.min(lines.length, limit)
-  return { numbers: Array.from({ length: last }, (_, i) => i + 1), more: last < lines.length }
+  return { numbers: range(start), matches: null }
+}
+
+/** Moves the window of lines by a page, back (`-1`) or on (`1`); a line number typed is let go. */
+function page(direction: -1 | 1, first: number): void {
+  const filter = read(lineFilter).trim()
+  if (filter && !/^\d+$/.test(filter)) return
+  set(lineFilter, '')
+  set(windowStart, Math.max(1, first + direction * WINDOW_LINES))
 }
 
 /** A line as a cell shows it: its indentation kept (a cell folds spaces), an empty line not a dash. */
@@ -401,11 +446,26 @@ function SourceView({ path }: { path: string }) {
       </Stack>
     )
   }
-  const { rows, more, markedKeys } = drawn
+  const { rows, markedKeys, first, last, total, matches } = drawn
   return (
     <Stack gap="xs">
       {header}
       <Input label={text('findLine')} labelHidden type="search" placeholder={text('findLine')} value={filter} maxLength={200} onChange={(value) => set(lineFilter, value)} />
+      {matches !== null ? (
+        <Text size="sm" muted>
+          {matches > rows.length ? text('matchesCut', { shown: rows.length, count: matches }) : text('matches', { count: matches })}
+        </Text>
+      ) : (
+        <Row align="center" justify="between" gap="xs">
+          <Text size="sm" muted>
+            {text('window', { first, last, total })}
+          </Text>
+          <Row align="center" gap="none">
+            <IconButton icon="collapse" size="xs" variant="ghost" label={text('previousLines')} disabled={first <= 1} onPress={() => page(-1, first)} />
+            <IconButton icon="expand" size="xs" variant="ghost" label={text('nextLines')} disabled={last >= total} onPress={() => page(1, first)} />
+          </Row>
+        </Row>
+      )}
       <Table
         label={text('lines', { name: baseName(path) })}
         columns={[
@@ -418,8 +478,6 @@ function SourceView({ path }: { path: string }) {
         selected={markedKeys}
         maxHeight="lg"
         emptyText={text('noLines')}
-        hasMore={more && !filter.trim()}
-        onLoadMore={() => set(shownLines, read(shownLines) + LINES_PAGE)}
         onSelectionChange={({ keys }) => {
           const line = toggledLine(markedKeys, keys)
           if (line !== null) void toggleBreakpoint(path, Number(line), !markedKeys.includes(line))
@@ -441,8 +499,8 @@ const codeRows = derived(() => {
   const lines = read(source)
   const path = read(openScript)
   if (!lines || lines.path !== path) return null
-  const { numbers, more } = visibleLines(lines.lines, read(lineFilter), read(shownLines))
-  return { numbers, more, code: numbers.map((line) => codeCell(lines.lines[line - 1] ?? '')) }
+  const { numbers, matches } = visibleLines(lines.lines, read(lineFilter), read(windowStart))
+  return { numbers, matches, total: lines.lines.length, code: numbers.map((line) => codeCell(lines.lines[line - 1] ?? '')) }
 })
 
 /** The lines of the open script that hold a breakpoint, as one text, so an unchanged set changes nothing. */
@@ -460,7 +518,7 @@ const sourceRows = derived(() => {
   const keys = marked ? marked.split(',') : []
   const set = new Set(keys)
   const rows: TableRow[] = code.numbers.map((line, i) => ({ key: String(line), cells: { mark: set.has(String(line)), line, code: code.code[i] } }))
-  return { rows, more: code.more, markedKeys: keys }
+  return { rows, markedKeys: keys, matches: code.matches, total: code.total, first: code.numbers[0] ?? 0, last: code.numbers.at(-1) ?? 0 }
 })
 
 /** How many breakpoints each file holds, as one text, so an unchanged set changes nothing. */
@@ -481,7 +539,7 @@ function counts(encoded: string): Map<string, number> {
 }
 
 /** A cartridge's files as a tree of folders, opened folders with their children. */
-function folderItems(prefix: string, files: readonly string[], open: readonly string[], marks: Map<string, number>): TreeItem[] {
+function folderItems(prefix: string, files: readonly string[], open: readonly string[], marks: Map<string, number>, at: string): TreeItem[] {
   const folders = new Map<string, string[]>()
   const leaves: string[] = []
   for (const file of files) {
@@ -496,12 +554,12 @@ function folderItems(prefix: string, files: readonly string[], open: readonly st
   const items: TreeItem[] = [...folders.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([folder, inside]) => {
     const key = `d:${folder}`
     return open.includes(key)
-      ? { key, label: baseName(folder), icon: 'folder', children: folderItems(folder, inside, open, marks) }
+      ? { key, label: baseName(folder), icon: 'folder', children: folderItems(folder, inside, open, marks, at) }
       : { key, label: baseName(folder), icon: 'folder', hasChildren: true }
   })
   for (const file of leaves.sort((a, b) => a.localeCompare(b))) {
     const count = marks.get(file) ?? 0
-    items.push({ key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? text('bpCount', { count }) : undefined })
+    items.push({ key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? t(messages, at, 'bpCount', { count }) : undefined })
   }
   return items
 }
@@ -517,10 +575,22 @@ export function findScripts(all: readonly string[], query: string): { files: str
 }
 
 /**
- * The list of scripts as tree items, computed once per change of the scripts, the search, the open
- * folders or the breakpoints' counts, never on each draw.
+ * The list of scripts as tree items in a language, computed once per change of the scripts, the
+ * search, the open folders or the breakpoints' counts, never on each draw. One derived atom per
+ * language, so a change of Orca's language words the notes again at once.
  */
-const scriptItems = derived((): { items: TreeItem[]; more: boolean } => {
+const scriptItemsByLanguage = new Map<string, ReadonlyAtom<{ items: TreeItem[]; more: boolean }>>()
+function scriptItems(at: string): ReadonlyAtom<{ items: TreeItem[]; more: boolean }> {
+  const language = languageOf(at)
+  let items = scriptItemsByLanguage.get(language)
+  if (!items) {
+    items = derived(() => scriptItemsIn(language))
+    scriptItemsByLanguage.set(language, items)
+  }
+  return items
+}
+
+function scriptItemsIn(at: string): { items: TreeItem[]; more: boolean } {
   const list = read(scripts)
   if (!list) return { items: [], more: false }
   const query = read(scriptQuery)
@@ -537,18 +607,18 @@ const scriptItems = derived((): { items: TreeItem[]; more: boolean } => {
     items = found.files.map((file) => {
       const count = marks.get(file) ?? 0
       const folder = file.slice(0, file.lastIndexOf('/'))
-      return { key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? text('bpCount', { count }) : baseName(folder) }
+      return { key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? t(messages, at, 'bpCount', { count }) : baseName(folder) }
     })
   } else {
     items = list.cartridges.map((cartridge) => {
       const key = `c:${cartridge.path}`
       return open.includes(key)
-        ? { key, label: cartridge.name, icon: 'package', children: folderItems(cartridge.path, cartridge.files, open, marks) }
+        ? { key, label: cartridge.name, icon: 'package', children: folderItems(cartridge.path, cartridge.files, open, marks, at) }
         : { key, label: cartridge.name, icon: 'package', hasChildren: cartridge.files.length > 0 }
     })
   }
   return { items, more }
-})
+}
 
 /** The scripts of the workspace's cartridges: a tree by cartridge, or the matches of a search. */
 function ScriptBrowser() {
@@ -559,7 +629,7 @@ function ScriptBrowser() {
   if (!list) return <NoticeLine tone="busy" text={text('scripts')} />
   if (list.cartridges.length === 0) return <Empty title={text('noScriptsTitle')} guidance={text('noScriptsBody')} icon="file" />
   const open = read(scriptsOpen)
-  const { items, more } = read(scriptItems)
+  const { items, more } = read(scriptItems(locale))
   const pick = (key: string) => {
     if (key.startsWith('f:')) showScript(key.slice(2))
   }

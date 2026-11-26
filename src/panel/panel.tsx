@@ -337,6 +337,38 @@ function drawNow(node: OrcaNode, depth = 0): OrcaNode {
   return { ...node, props: { ...node.props, children: drawNow(node.props.children as OrcaNode, depth + 1) } } as OrcaNode
 }
 
+/**
+ * The most a view's tree may hold, well under the 512 KiB Orca allows the whole panel: the bar, the
+ * status line and Orca's own wrapping take the rest.
+ */
+export const VIEW_BUDGET = 256 * 1024
+
+/**
+ * Whether a drawn tree is larger than `budget` bytes, by a cheap estimate of its JSON: each text
+ * and key by its length, each number, flag or handler by a few bytes. It stops counting as soon as
+ * the budget is passed, so a huge tree costs no more than a small one.
+ */
+export function treeSizeOver(node: unknown, budget: number): boolean {
+  let size = 0
+  const stack: unknown[] = [node]
+  while (stack.length > 0) {
+    const item = stack.pop()
+    if (typeof item === 'string') size += item.length + 2
+    else if (typeof item === 'number' || typeof item === 'boolean' || typeof item === 'function') size += 8
+    else if (Array.isArray(item)) {
+      size += 2 + item.length
+      for (const child of item) stack.push(child)
+    } else if (item && typeof item === 'object') {
+      for (const [key, value] of Object.entries(item)) {
+        size += key.length + 4
+        stack.push(value)
+      }
+    }
+    if (size > budget) return true
+  }
+  return false
+}
+
 /** Records, after this draw, which view's render threw last; atoms cannot change while drawing. */
 function noteFailedRender(view: string | null): void {
   void Promise.resolve().then(() => {
@@ -361,6 +393,19 @@ function PieceView({ section, failed, locale }: { section: PanelSection; failed:
       <ErrorState
         title={text('viewFailedTitle', { piece: section.title(locale) })}
         message={text('viewFailedBody')}
+        retryLabel={text('tryAgain')}
+        onRetry={() => set(attempt, read(attempt) + 1)}
+      />
+    )
+  }
+  if (treeSizeOver(body, VIEW_BUDGET)) {
+    // Orca refuses a whole panel past 512 KiB, and then every draw after it: a view that would
+    // come near it draws this instead, so the bar, the status line and the other views stay.
+    noteFailedRender(section.id)
+    return (
+      <ErrorState
+        title={text('viewTooLargeTitle', { piece: section.title(locale) })}
+        message={text('viewTooLargeBody')}
         retryLabel={text('tryAgain')}
         onRetry={() => set(attempt, read(attempt) + 1)}
       />

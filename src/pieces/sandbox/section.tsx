@@ -265,6 +265,7 @@ function WorkspacesGroup({ current, locale, ready, busy }: { current: SandboxSta
   const elsewhere = ordered(others.filter((workspace) => !workspace.inProject))
   const rows = (list: readonly SandboxWorkspace[], shown: number) => list.slice(0, shown).map((workspace) => <OtherRow key={workspace.id} workspace={workspace} locale={locale} ready={ready} busy={busy} />)
   const more = (left: number) => w('showMore', { count: left })
+  const capped = (left: number) => w('notShown', { count: left })
   const inProjectShown = read(shownInProject)
   const elsewhereShown = read(shownElsewhere)
   return (
@@ -275,12 +276,12 @@ function WorkspacesGroup({ current, locale, ready, busy }: { current: SandboxSta
         <NoticeLine tone="off" text={w('noOwner')} />
       ) : null}
       {current.workspaces.length === 0 ? <Empty title={w('noWorkspacesTitle')} guidance={w('noWorkspacesGuidance')} icon="folder" /> : rows(inProject, inProjectShown)}
-      <ShowMore shown={inProjectShown} total={inProject.length} label={more} onPress={() => set(shownInProject, inProjectShown + PAGE_SIZE)} />
+      <ShowMore shown={inProjectShown} total={inProject.length} label={more} capped={capped} onPress={() => set(shownInProject, inProjectShown + PAGE_SIZE)} />
       {elsewhere.length > 0 ? (
         <Collapsible title={w('otherProjects', { count: elsewhere.length })}>
           <Stack gap="xs">
             {rows(elsewhere, elsewhereShown)}
-            <ShowMore shown={elsewhereShown} total={elsewhere.length} label={more} onPress={() => set(shownElsewhere, elsewhereShown + PAGE_SIZE)} />
+            <ShowMore shown={elsewhereShown} total={elsewhere.length} label={more} capped={capped} onPress={() => set(shownElsewhere, elsewhereShown + PAGE_SIZE)} />
           </Stack>
         </Collapsible>
       ) : null}

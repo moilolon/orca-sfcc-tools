@@ -73,3 +73,15 @@ test('words every error code the panel can get, in both languages, and an unknow
   assert.equal(wordError('es', 'action_failed'), 'No se ha podido completar la acción.')
   assert.equal(wordError('en', 'weird'), 'Unexpected error (weird).')
 })
+
+test('every text of core fits two lines of a 300 px sidebar, in both languages', () => {
+  // NOTICE_MAX_CHARS of src/panel/ui.tsx: a notice's line wraps to at most two lines at 300 px.
+  for (const language of ['en', 'es'] as const) {
+    for (const [key, value] of Object.entries(CORE_MESSAGES[language])) assert.ok(value.length <= 76, `${language} ${key}: ${value.length} characters`)
+  }
+  // The longest line the setup view joins: why b2c is missing, then how to fix it.
+  for (const language of ['en', 'es'] as const) {
+    const joined = `${t(CORE_MESSAGES, language, 'error.b2c_not_found')} ${t(CORE_MESSAGES, language, 'b2cMissingFix')}`
+    assert.ok(joined.length <= 76, `${language}: ${joined.length}`)
+  }
+})

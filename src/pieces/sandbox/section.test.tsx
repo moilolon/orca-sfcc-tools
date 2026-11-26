@@ -2,6 +2,8 @@
 // use listed first, the owner first among them, the others folded; picking one by hand (its *Use*
 // button, then the confirming one); a refused action as a compact notice with the one button that
 // helps; a role that is not ready in one line; and the changes the worker posts.
+import { messages as pieceMessages } from './i18n'
+import { NOTICE_MAX_CHARS } from '../../panel/ui'
 import { afterEach, assert, hostError, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import type { SandboxStatus } from './protocol'
 import { DEPLOYING, FAILED, IDLE, UPLOADING, WATCHING } from './scenarios'
@@ -262,4 +264,14 @@ test('a version left behind in a hidden project is shown, with no button', async
   assert.ok(panel.find({ text: 'ws-archived-site' }))
   assert.ok(panel.find({ text: 'hidden project' }))
   assert.equal(panel.find({ role: 'button', label: 'Delete version' }), null)
+})
+
+test('every text the view draws fits two lines of a 300 px sidebar, in both languages', () => {
+  // Notifications, status bar items and command replies are not drawn in the panel.
+  const notDrawn = /^(reply|notify|notice|bar|cmd)|^statusTooltip$|^notReadyBody$/
+  for (const language of ['en', 'es'] as const) {
+    for (const [key, value] of Object.entries(pieceMessages[language])) {
+      if (!notDrawn.test(key)) assert.ok(value.length <= NOTICE_MAX_CHARS, `${language} ${key}: ${value.length} characters`)
+    }
+  }
 })

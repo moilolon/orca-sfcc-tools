@@ -1,6 +1,8 @@
 // The errors view in the plugin's own panel, over a stubbed worker: short rows of new and seen
 // errors, the detail of one in place of the list (its state, times, actions, fields, message with
 // placeholders as code, and frames), an environment not ready, a read that failed, and Spanish.
+import { messages as pieceMessages } from './i18n'
+import { NOTICE_MAX_CHARS } from '../../panel/ui'
 import { afterEach, assert, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import * as panelModule from '../../panel/panel'
 import { READY_STATUS } from '../../panel/scenarios'
@@ -26,8 +28,8 @@ function row(signature: string, overrides: Partial<ErrorRow> = {}): ErrorRow {
     pipeline: 'Cart-Show',
     level: 'ERROR',
     frames: [
-      { file: 'app_example/cartridge/scripts/cart.js', function: 'total', line: 12, openable: true, path: 'cartridges/app_example/cartridge/scripts/cart.js', script: true },
-      { file: 'Engine.java', function: 'example.Engine.run', line: 3, openable: false, path: null, script: false }
+      { file: 'app_example/cartridge/scripts/cart.js', function: 'total', line: 12, openable: true, path: 'cartridges/app_example/cartridge/scripts/cart.js' },
+      { file: 'Engine.java', function: 'example.Engine.run', line: 3, openable: false, path: null }
     ],
     ...overrides
   }
@@ -273,5 +275,15 @@ test('every scenario of the piece draws its view without an error, the detail on
     assert.equal(Boolean(panel.find({ text: 'Stack trace' })), name.startsWith('errorsDetail'), name)
     panel.unmount()
     panel = undefined
+  }
+})
+
+test('every text the view draws fits two lines of a 300 px sidebar, in both languages', () => {
+  // Notifications, status bar items and command replies are not drawn in the panel.
+  const notDrawn = /^(reply|notify|notice|bar|cmd)|^statusTooltip$|^notReadyBody$/
+  for (const language of ['en', 'es'] as const) {
+    for (const [key, value] of Object.entries(pieceMessages[language])) {
+      if (!notDrawn.test(key)) assert.ok(value.length <= NOTICE_MAX_CHARS, `${language} ${key}: ${value.length} characters`)
+    }
   }
 })

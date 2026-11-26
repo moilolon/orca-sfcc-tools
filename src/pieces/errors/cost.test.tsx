@@ -24,7 +24,7 @@ function rows(extra = 0): ErrorRow[] {
     logger: 'custom.Cart',
     pipeline: 'Cart-Show',
     level: 'ERROR',
-    frames: [{ file: `app_example/cartridge/scripts/s${i}.js`, function: 'run', line: 12, openable: true, path: `cartridges/app_example/cartridge/scripts/s${i}.js`, script: true }]
+    frames: [{ file: `app_example/cartridge/scripts/s${i}.js`, function: 'run', line: 12, openable: true, path: `cartridges/app_example/cartridge/scripts/s${i}.js` }]
   }))
 }
 

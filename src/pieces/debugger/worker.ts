@@ -6,7 +6,7 @@
 import type { RoleState } from '../../core/instances'
 import type { Disposable, PieceContext, Workspace, WorkerPiece } from '../../core/piece'
 import { createBreakpoints, BreakpointsError, normalizePath, type BreakpointFile } from './breakpoints'
-import { byCartridge, matchFiles, scriptFiles, type ReadDir } from './files'
+import { byCartridge, scriptFiles, type ReadDir } from './files'
 import { readSource, SourceError, type SourceFileSystem } from './source'
 import { messages } from './i18n'
 import type { DebuggerState, DebugWorkspaceState, StepKind } from './protocol'
@@ -122,6 +122,7 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
       message: snapshot.message,
       sandbox,
       workspace: state,
+      workspaceId: workspace && state === 'ok' ? workspace.id : null,
       breakpoints: files.map((file) => ({
         path: file.path,
         lines: file.lines.map((line) => ({ line, verified: snapshot.verified[file.path]?.find((each) => each.line === line)?.verified ?? null }))
@@ -225,14 +226,6 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
         await breakpoints.clear(workspace.id)
         for (const file of before) await synced(workspace.id, { path: file.path, lines: [] })
         return current()
-      })
-    ),
-    ctx.orca.panels.handle('debugger.files', (input) =>
-      guarded(async () => {
-        const workspace = await localWorkspace()
-        const all = await scriptsOf(workspace)
-        const found = matchFiles(all.files, typeof input?.query === 'string' ? input.query.slice(0, 200) : '')
-        return { files: found.files, truncated: found.truncated || (all.truncated && found.files.length > 0) }
       })
     ),
     ctx.orca.panels.handle('debugger.scripts', () =>

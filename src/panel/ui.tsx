@@ -102,9 +102,16 @@ export function Empty({ title, guidance, icon }: { title: string; guidance: stri
 }
 
 /**
+ * The longest a notice's line may be: two lines of a 300 px sidebar. A test holds every text a
+ * notice can show to it, in both languages.
+ */
+export const NOTICE_MAX_CHARS = 76
+
+/**
  * A problem a view must show and the status line does not: an icon, a title of a few words
- * (`Sandbox not set up`), at most one short line on why, and one button that fixes it or leads to
- * where it is fixed (`Open setup`, `Retry`). Never a paragraph.
+ * (`Sandbox not set up`), at most one short line on why (it wraps, never cut: at 300 px it may
+ * take two), and one button that fixes it or leads to where it is fixed (`Open setup`, `Retry`),
+ * beside the line when it fits and under it when not. Never a paragraph.
  */
 export function Notice({ tone, title, detail, action }: { tone: StateTone; title: string; detail?: string; action?: NoticeAction }) {
   return (
@@ -112,9 +119,7 @@ export function Notice({ tone, title, detail, action }: { tone: StateTone; title
       {detail || action ? (
         <Row align="center" justify="between" gap="sm" wrap>
           {detail ? (
-            <Text size="sm" truncate>
-              {detail}
-            </Text>
+            <Text size="sm">{detail}</Text>
           ) : (
             <Box grow />
           )}
@@ -130,15 +135,16 @@ export function Notice({ tone, title, detail, action }: { tone: StateTone; title
 }
 
 /**
- * A problem the status line already says, or a passing fact: one line with a state mark and, at
- * most, one small button. Never a callout.
+ * A problem the status line already says, or a passing fact: one line with a state mark (it wraps,
+ * never cut) and, at most, one small button, beside it when it fits and under it when not. Never
+ * a callout.
  */
 export function NoticeLine({ tone, text, action }: { tone: StateTone; text: string; action?: NoticeAction }) {
   return (
-    <Row align="center" justify="between" gap="sm">
+    <Row align="center" justify="between" gap="xs" wrap>
       <Row align="center" gap="sm">
         <StateMark tone={tone} label={text} />
-        <Text size="sm" muted truncate>
+        <Text size="sm" muted>
           {text}
         </Text>
       </Row>
@@ -274,11 +280,37 @@ export function MaskedText({ text, size }: { text: string; size?: 'sm' | 'md' })
 export const PAGE_SIZE = 25
 
 /**
- * The end of a long list drawn a page at a time: a small button that draws more, saying how many
- * are left. Nothing when every row is drawn.
+ * The most rows a list ever draws, however often *Show more* is pressed: past it, a view narrows
+ * the list instead (a search, a filter). It keeps a view well under its size budget.
  */
-export function ShowMore({ shown, total, label, onPress }: { shown: number; total: number; label: (left: number) => string; onPress: () => unknown }) {
+export const MAX_ROWS = 100
+
+/**
+ * The end of a long list drawn a page at a time: a small button that draws more, saying how many
+ * are left; at `MAX_ROWS`, one muted line saying how many are not drawn (`capped`). Nothing when
+ * every row is drawn.
+ */
+export function ShowMore({
+  shown,
+  total,
+  label,
+  capped,
+  onPress
+}: {
+  shown: number
+  total: number
+  label: (left: number) => string
+  capped: (left: number) => string
+  onPress: () => unknown
+}) {
   if (shown >= total) return null
+  if (shown >= MAX_ROWS) {
+    return (
+      <Text size="sm" muted>
+        {capped(total - shown)}
+      </Text>
+    )
+  }
   return (
     <Row>
       <Button size="xs" variant="ghost" icon="expand" onPress={onPress}>

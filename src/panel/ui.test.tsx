@@ -2,7 +2,7 @@
 // that Orca would drop none of their props.
 import { Button, Code, RelativeTime, Text, type OrcaNode } from 'orca'
 import { afterEach, assert, mount, test, type TestPanel } from 'orca/testing'
-import { Actions, Empty, ErrorState, Group, LabelledRow, ListRow, MaskedText, Notice, NOTICE_ICONS, NoticeLine, placeholderParts, StateBadge, StateMark, TONES, type StateTone } from './ui'
+import { Actions, Empty, ErrorState, Group, LabelledRow, ListRow, MaskedText, MAX_ROWS, Notice, NOTICE_ICONS, NoticeLine, PAGE_SIZE, placeholderParts, ShowMore, StateBadge, StateMark, TONES, type StateTone } from './ui'
 
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
@@ -200,7 +200,10 @@ test('Notice is compact: an icon by its tone, a short title, one line, and one b
   assert.equal(callout?.props.icon, 'warning')
   assert.equal(callout?.props.title, 'No dw.json')
   const line = shown.find({ text: 'Add one at the workspace root.' })
-  assert.equal(line?.props.truncate, true, 'one line, cut when it does not fit')
+  // The line wraps, never cut: at 300 px it may take two lines, and the fix is in it.
+  assert.equal(line?.props.truncate, undefined)
+  // Its row wraps, so when the line takes the width the button goes under it, still seen.
+  assert.equal(shown.findAll({ type: 'Row' }).find((row) => row.props.justify === 'between')?.props.wrap, true)
   assert.equal(shown.findAll({ role: 'button' }).length, 1)
   await shown.press({ type: 'Button', text: 'Check again' })
   assert.equal(fixed, 1)
@@ -217,7 +220,11 @@ test('NoticeLine is one line with a mark and at most a small button, never a cal
   let opened = 0
   const shown = await draw(() => <NoticeLine tone="attention" text="Sandbox not set up" action={{ label: 'Open setup', icon: 'settings', onPress: () => opened++ }} />)
   assert.equal(shown.find({ type: 'Callout' }), null)
-  assert.equal(shown.find({ text: 'Sandbox not set up' })?.props.truncate, true)
+  assert.equal(shown.find({ text: 'Sandbox not set up' })?.props.truncate, undefined, 'it wraps, never cut')
+  // Its outer row wraps, so the button goes under the text when narrow.
+  const root = shown.tree() as { type?: string; props?: Record<string, unknown> } | null
+  assert.equal(root?.type, 'Row')
+  assert.equal(root?.props?.wrap, true)
   assert.equal(shown.find({ type: 'Button' })?.props.variant, 'ghost')
   await shown.press({ type: 'Button', text: 'Open setup' })
   assert.equal(opened, 1)
@@ -238,4 +245,20 @@ test('MaskedText draws what masking put in place of a value as code, the words a
   const shown = await draw(() => <MaskedText text="Failed for <code> on <host>" />)
   assert.deepEqual(shown.findAll({ type: 'Code' }).map((code) => code.text), ['<code>', '<host>'])
   assert.equal(shown.find({ type: 'Text' })?.props.truncate, undefined, 'it wraps')
+})
+
+test('ShowMore draws a page more at a time, and stops at MAX_ROWS with a line on what is not drawn', async () => {
+  let more = 0
+  const label = (left: number) => `Show ${left} more`
+  const capped = (left: number) => `${left} more not shown`
+  let shown = await draw(() => <ShowMore shown={PAGE_SIZE} total={300} label={label} capped={capped} onPress={() => more++} />)
+  await shown.press({ type: 'Button', text: `Show ${300 - PAGE_SIZE} more` })
+  assert.equal(more, 1)
+  shown.unmount()
+  shown = await draw(() => <ShowMore shown={MAX_ROWS} total={300} label={label} capped={capped} onPress={() => more++} />)
+  assert.equal(shown.find({ type: 'Button' }), null)
+  assert.ok(shown.find({ text: `${300 - MAX_ROWS} more not shown` }))
+  shown.unmount()
+  shown = await draw(() => <ShowMore shown={30} total={30} label={label} capped={capped} onPress={() => more++} />)
+  assert.equal(shown.tree(), null)
 })

@@ -1,12 +1,14 @@
 // The debugger's view inside the plugin's panel, over a stubbed worker: each state it draws, the
 // list of scripts and a script's lines where a click toggles a breakpoint, *Add breakpoint here* on
 // the call stack, and what its controls ask the worker.
+import { messages as pieceMessages } from './i18n'
+import { NOTICE_MAX_CHARS } from '../../panel/ui'
 import { afterEach, assert, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import * as panelModule from '../../panel/panel'
 import { READY_STATUS } from '../../panel/scenarios'
 import type { DebuggerState, Variable } from './protocol'
 import { scenarios } from './scenarios'
-import { findScripts, shortNames, toggledLine, visibleLines, wordReason } from './section'
+import { findScripts, MAX_CHILDREN, shortNames, toggledLine, visibleLines, WINDOW_LINES, wordReason } from './section'
 
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
@@ -125,15 +127,93 @@ test('a script’s lines: its breakpoints marked and selected; a click on a line
 
 test('a script’s lines can be filtered by words or opened at a line', async () => {
   const target = await open(scenarios.debuggerSource.requests, 'en', { debuggerScript: PAGE })
+  // A short script fits one window: every line, and no page to move to.
+  assert.ok(target.find({ text: 'Lines 1 to 30 of 30' }))
+  assert.equal(target.find({ role: 'button', label: 'Next lines' })?.disabled, true)
   await target.type({ type: 'Input', label: 'Find text or line' }, 'pageHelpers')
   assert.deepEqual(target.rowsOf({ type: 'Table' }), ['5', '11', '19', '25'])
+  assert.ok(target.find({ text: '4 matching lines' }))
+  // A line number shows the window that holds it: here, the whole script.
   await target.type({ type: 'Input', label: 'Find text or line' }, '24', { replace: true })
-  assert.equal(target.rowsOf({ type: 'Table' })[0], '19')
+  assert.ok(target.rowsOf({ type: 'Table' }).includes('24'))
   // A breakpoint row opens its script at its line.
   await target.press({ role: 'button', label: 'All scripts' })
   await target.press({ type: 'Link', text: 'app_example/…/Page.js:24' })
   assert.equal(target.valueOf({ type: 'Input', label: 'Find text or line' }), '24')
-  assert.equal(target.rowsOf({ type: 'Table' })[0], '19')
+  assert.ok(target.rowsOf({ type: 'Table' }).includes('24'))
+})
+
+test('a long script: a window of lines moved by page, by a line number, or by a search, never growing', async () => {
+  const lines = Array.from({ length: 1000 }, (_, i) => `line ${i + 1}`)
+  const target = await open({ ...scenarios.debuggerSource.requests, 'debugger.source': () => ({ path: PAGE, truncated: false, lines }) }, 'en', { debuggerScript: PAGE })
+  const table = { type: 'Table' } as const
+  const rows = () => target.rowsOf(table)
+  assert.equal(rows().length, WINDOW_LINES)
+  assert.ok(target.find({ text: `Lines 1 to ${WINDOW_LINES} of 1000` }))
+  assert.equal(target.find({ role: 'button', label: 'Previous lines' })?.disabled, true)
+  await target.press({ role: 'button', label: 'Next lines' })
+  assert.deepEqual([rows()[0], rows().at(-1)], [String(WINDOW_LINES + 1), String(2 * WINDOW_LINES)])
+  await target.press({ role: 'button', label: 'Previous lines' })
+  assert.equal(rows()[0], '1')
+  // A line number opens the window a few lines before it; paging from there lets the number go.
+  await target.type({ type: 'Input', label: 'Find text or line' }, '700')
+  assert.equal(rows()[0], '695')
+  await target.press({ role: 'button', label: 'Next lines' })
+  // The next page would pass the end: the last window ends at the last line.
+  assert.equal(rows()[0], String(1000 - WINDOW_LINES + 1))
+  assert.equal(target.valueOf({ type: 'Input', label: 'Find text or line' }), '')
+  // The last window ends at the last line.
+  assert.equal(rows().at(-1), '1000')
+  assert.equal(target.find({ role: 'button', label: 'Next lines' })?.disabled, true)
+  // A search draws at most a window of matches, and says how many there are.
+  await target.type({ type: 'Input', label: 'Find text or line' }, 'line')
+  assert.equal(rows().length, WINDOW_LINES)
+  assert.ok(target.find({ text: `First ${WINDOW_LINES} of 1000 matching lines` }))
+})
+
+test('opening a scope with thousands of variables draws the first ones and says how many more', async () => {
+  const many: Variable[] = Array.from({ length: MAX_CHILDREN + 300 }, (_, i) => ({ name: `[${i}]`, value: `value ${i}`, reference: 0, expensive: false }))
+  const target = await open({
+    ...scenarios.debuggerHalted.requests,
+    'debugger.variables': (input: { frameId?: number; reference?: number }) =>
+      typeof input.frameId === 'number' ? (scenarios.debuggerHalted.requests?.['debugger.variables'] as () => Variable[])() : many
+  })
+  await target.expand({ type: 'Tree', label: 'Variables' }, 'f70000/0')
+  const tree = JSON.stringify(target.tree())
+  assert.ok(tree.includes(`[${MAX_CHILDREN - 1}]`))
+  assert.ok(!tree.includes(`"[${MAX_CHILDREN}]"`))
+  assert.ok(tree.includes('300 more not shown'))
+})
+
+test('the open script and folders are let go when another workspace is debugged', async () => {
+  let state = { ...stateOf('debuggerAttached'), workspaceId: 'w-one' }
+  const target = await open({ ...scenarios.debuggerSource.requests, 'debugger.state': () => state }, 'en', { debuggerScript: PAGE, debuggerScriptsOpen: ['c:cartridges/app_example'] })
+  assert.ok(target.find({ type: 'Table' }))
+  assert.equal(target.persisted.plugin.debuggerWorkspace, 'w-one')
+  // The same workspace again changes nothing.
+  target.post('debugger.state', { ...state, status: 'halted' })
+  await target.settled()
+  assert.equal(target.persisted.plugin.debuggerScript, PAGE)
+  // Another one: its own list, nothing of the last one open.
+  state = { ...state, workspaceId: 'w-two' }
+  target.post('debugger.state', state)
+  await target.settled()
+  assert.equal(target.persisted.plugin.debuggerScript, null)
+  assert.deepEqual(target.persisted.plugin.debuggerScriptsOpen, [])
+  assert.equal(target.persisted.plugin.debuggerWorkspace, 'w-two')
+  assert.equal(target.find({ type: 'Table' }), null)
+  assert.equal(requested(target, 'debugger.scripts').length, 2)
+})
+
+test('the notes of the list of scripts follow Orca’s language', async () => {
+  const folders = ['c:cartridges/app_example', 'd:cartridges/app_example/cartridge', 'd:cartridges/app_example/cartridge/controllers']
+  let target = await open(scenarios.debuggerScripts.requests, 'en', { debuggerScriptsOpen: folders })
+  assert.ok(JSON.stringify(target.tree()).includes('2 breakpoint(s)'))
+  panel?.unmount()
+  target = await open(scenarios.debuggerScripts.requests, 'es-ES', { debuggerScriptsOpen: folders })
+  const tree = JSON.stringify(target.tree())
+  assert.ok(tree.includes('2 punto(s)'))
+  assert.ok(!tree.includes('2 breakpoint(s)'))
 })
 
 test('which line a click on the table changed', () => {
@@ -145,12 +225,15 @@ test('which line a click on the table changed', () => {
   assert.equal(toggledLine(['3'], ['4', '5', '6']), null, 'a range changes nothing')
 })
 
-test('which lines are drawn: the first ones, from a line on, or those holding every word', () => {
+test('which lines are drawn: a window from a line, around a line number, or those holding every word', () => {
   const lines = Array.from({ length: 50 }, (_, i) => (i === 31 ? 'var Total = 1' : `line ${i + 1}`))
-  assert.deepEqual(visibleLines(lines, '', 10), { numbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], more: true })
-  assert.deepEqual(visibleLines(lines, '40', 5), { numbers: [35, 36, 37, 38, 39], more: true })
-  assert.deepEqual(visibleLines(lines, '999', 100).numbers.at(-1), 50)
-  assert.deepEqual(visibleLines(lines, 'VAR total', 10), { numbers: [32], more: false })
+  assert.deepEqual(visibleLines(lines, '', 1, 10), { numbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], matches: null })
+  assert.deepEqual(visibleLines(lines, '', 46, 10).numbers, [41, 42, 43, 44, 45, 46, 47, 48, 49, 50], 'the last window ends at the last line')
+  assert.deepEqual(visibleLines(lines, '40', 1, 5).numbers, [35, 36, 37, 38, 39])
+  assert.deepEqual(visibleLines(lines, '999', 1, 10).numbers.at(-1), 50)
+  assert.deepEqual(visibleLines(lines, 'VAR total', 1, 10), { numbers: [32], matches: 1 })
+  assert.deepEqual(visibleLines(lines, 'line', 1, 10), { numbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], matches: 49 })
+  assert.deepEqual(visibleLines(['only'], '', 1).numbers, [1])
 })
 
 test('a search for scripts puts the file’s own name first, then the shorter path', () => {
@@ -278,5 +361,15 @@ test('every scenario of the piece draws its view without an error', async () => 
     assert.deepEqual(panel.warnings, [], name)
     panel.unmount()
     panel = undefined
+  }
+})
+
+test('every text the view draws fits two lines of a 300 px sidebar, in both languages', () => {
+  // Notifications, status bar items and command replies are not drawn in the panel.
+  const notDrawn = /^(reply|notify|notice|bar|cmd)|^statusTooltip$|^notReadyBody$/
+  for (const language of ['en', 'es'] as const) {
+    for (const [key, value] of Object.entries(pieceMessages[language])) {
+      if (!notDrawn.test(key)) assert.ok(value.length <= NOTICE_MAX_CHARS, `${language} ${key}: ${value.length} characters`)
+    }
   }
 })

@@ -38,14 +38,13 @@ export type DebuggerState = {
   /** The sandbox role as dw.json has it: only `ready` can start. */
   sandbox: RoleState
   workspace: DebugWorkspaceState
+  /** The id of the workspace debugged, when it is one of this machine; Orca's id, never a path. */
+  workspaceId: string | null
   breakpoints: BreakpointView[]
   threads: Thread[]
   threadId: number | null
   frames: Frame[]
 }
-
-/** Matching files of the debugged workspace's cartridges, relative to it, for a new breakpoint. */
-export type DebuggerFiles = { files: string[]; truncated: boolean }
 
 /**
  * A cartridge of the debugged workspace: its folder's name, its folder relative to the workspace
@@ -79,8 +78,6 @@ declare module 'orca' {
     'debugger.breakpoint': { input: { path: string; line: number; on: boolean }; output: DebuggerState }
     /** Removes every breakpoint of the workspace. */
     'debugger.clearBreakpoints': { input: Record<string, never>; output: DebuggerState }
-    /** Script files of the workspace's cartridges whose path holds every word of `query`. */
-    'debugger.files': { input: { query: string }; output: DebuggerFiles }
     /** Every script of the workspace's cartridges, by cartridge, for the view's list of scripts. */
     'debugger.scripts': { input: Record<string, never>; output: DebuggerScripts }
     /** The lines of one script of the workspace's cartridges; only that file, only now. */

@@ -202,6 +202,7 @@ function ErrorsList({ answer, role, locale, busy }: { answer: RoleErrors; role: 
   const newShown = read(shownNew)
   const seenShown = read(shownSeen)
   const more = (left: number) => text(locale, 'showMore', { count: left })
+  const capped = (left: number) => text(locale, 'notShown', { count: left })
   const blocks: OrcaNode[] = []
   if (answer.rows.length === 0) {
     if (answer.state === 'ready') blocks.push(<Empty key="none" icon="check" title={text(locale, 'noneTitle')} guidance={text(locale, role === 'sandbox' ? 'noneGuidanceSandbox' : 'noneGuidanceOther')} />)
@@ -220,7 +221,7 @@ function ErrorsList({ answer, role, locale, busy }: { answer: RoleErrors; role: 
       }
     >
       {fresh.length === 0 ? <NoticeLine tone="ok" text={text(locale, 'allSeen')} /> : fresh.slice(0, newShown).map((row) => <ErrorListRow key={row.signature} row={row} role={role} locale={locale} busy={busy} />)}
-      <ShowMore shown={newShown} total={fresh.length} label={more} onPress={() => update(shownNew, (shown) => shown + PAGE_SIZE)} />
+      <ShowMore shown={newShown} total={fresh.length} label={more} capped={capped} onPress={() => update(shownNew, (shown) => shown + PAGE_SIZE)} />
     </Group>
   )
   if (seen.length > 0) {
@@ -230,7 +231,7 @@ function ErrorsList({ answer, role, locale, busy }: { answer: RoleErrors; role: 
           {seen.slice(0, seenShown).map((row) => (
             <ErrorListRow key={row.signature} row={row} role={role} locale={locale} busy={busy} />
           ))}
-          <ShowMore shown={seenShown} total={seen.length} label={more} onPress={() => update(shownSeen, (shown) => shown + PAGE_SIZE)} />
+          <ShowMore shown={seenShown} total={seen.length} label={more} capped={capped} onPress={() => update(shownSeen, (shown) => shown + PAGE_SIZE)} />
         </Stack>
       </Collapsible>
     )

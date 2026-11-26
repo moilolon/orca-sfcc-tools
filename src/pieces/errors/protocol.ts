@@ -12,8 +12,6 @@ export type ErrorFrame = {
   openable: boolean
   /** Its path in the workspace, `/` between its parts, when it is openable: where a breakpoint goes. */
   path: string | null
-  /** A script of a cartridge (`.js`, `.ds`, `.isml`), as against a frame of the platform. */
-  script: boolean
 }
 
 /** One signature of an environment's seen list. */

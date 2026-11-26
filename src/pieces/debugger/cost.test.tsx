@@ -3,7 +3,8 @@
 // draws the view once.
 import { afterEach, assert, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import type { DebuggerScripts, DebuggerSource, DebuggerState } from './protocol'
-import { section } from './section'
+import { section, WINDOW_LINES } from './section'
+import { VIEW_BUDGET } from '../../panel/panel'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const PATH = 'cartridges/app_example/cartridge/scripts/long.js'
@@ -11,7 +12,7 @@ const PATH = 'cartridges/app_example/cartridge/scripts/long.js'
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
 
-const STATE: DebuggerState = { status: 'attached', reason: null, message: null, sandbox: 'ready', workspace: 'ok', breakpoints: [{ path: PATH, lines: [{ line: 10, verified: true }] }], threads: [], threadId: null, frames: [] }
+const STATE: DebuggerState = { status: 'attached', reason: null, message: null, sandbox: 'ready', workspace: 'ok', workspaceId: 'w-example', breakpoints: [{ path: PATH, lines: [{ line: 10, verified: true }] }], threads: [], threadId: null, frames: [] }
 /** A 3,000-line invented script, each line of ordinary length. */
 const SOURCE: DebuggerSource = { path: PATH, truncated: false, lines: Array.from({ length: 3000 }, (_, i) => `    var value${i} = helpers.compute(request, ${i}); // step ${i}`) }
 /** 5,000 invented scripts in 20 cartridges. */
@@ -20,7 +21,7 @@ const SCRIPTS: DebuggerScripts = {
   truncated: false
 }
 
-test('a 3,000-line script: a page of lines, one draw per change and none for an unchanged post', async () => {
+test('a 3,000-line script: a window of lines, one draw per change and none for an unchanged post', async () => {
   let state = STATE
   let draws = 0
   const started = performance.now()
@@ -51,7 +52,7 @@ test('a 3,000-line script: a page of lines, one draw per change and none for an 
   const firstMs = performance.now() - started
   assert.deepEqual(panel.errors, [])
   const table = { type: 'Table' } as const
-  assert.equal(panel.rowsOf(table).length, 1000)
+  assert.equal(panel.rowsOf(table).length, WINDOW_LINES)
   const bytes = JSON.stringify(panel.tree()).length
 
   // A post that changes nothing draws nothing.
@@ -67,10 +68,6 @@ test('a 3,000-line script: a page of lines, one draw per change and none for an 
   const clicked = draws - before
   assert.deepEqual(panel.valueOf(table), ['10', '20'])
 
-  // Scrolling to the end draws the next page.
-  await panel.loadMore(table)
-  assert.equal(panel.rowsOf(table).length, 2000)
-
   // A search over 5,000 scripts.
   await panel.press({ role: 'button', label: 'All scripts' })
   before = draws
@@ -85,4 +82,30 @@ test('a 3,000-line script: a page of lines, one draw per change and none for an 
   assert.equal(unchanged, 0)
   assert.ok(clicked <= 2, `${clicked} draws`)
   assert.ok(bytes < 400 * 1024, `${bytes} bytes`)
+})
+
+test('a 10,000-line script of the longest lines, paged from the first line to the last, stays under the view’s budget', async () => {
+  const LONG: DebuggerSource = { path: PATH, truncated: false, lines: Array.from({ length: 10_000 }, (_, i) => `${String(i).padStart(6, '0')} ${'x'.repeat(233)}`) }
+  panel = await mount(
+    { setup: section.setup, default: () => section.render('en') },
+    {
+      host: mockHost({ capabilities: CAPABILITIES, requests: { 'debugger.state': () => STATE, 'debugger.scripts': () => SCRIPTS, 'debugger.source': () => LONG } }),
+      persisted: { plugin: { debuggerScript: PATH } }
+    }
+  )
+  const table = { type: 'Table' } as const
+  let largest = 0
+  let pages = 0
+  for (;;) {
+    const size = JSON.stringify(panel.tree()).length
+    largest = Math.max(largest, size)
+    assert.ok(size < VIEW_BUDGET, `page ${pages}: ${size} bytes`)
+    assert.ok(panel.rowsOf(table).length <= WINDOW_LINES)
+    const next = panel.find({ role: 'button', label: 'Next lines' })
+    if (!next || next.disabled) break
+    await panel.press(next)
+    pages++
+  }
+  assert.equal(panel.rowsOf(table).at(-1), '10000', 'it reached the last line')
+  console.log(`debugger window: 10,000 lines of 240 characters in ${pages + 1} windows, the largest tree ${Math.round(largest / 1024)} KiB of a ${VIEW_BUDGET / 1024} KiB budget`)
 })

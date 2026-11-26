@@ -10,7 +10,7 @@ import { afterEach, assert, hostError, mockHost, mount, test, type TestPanel } f
 import { PIECE_IDS, type PanelSection } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import * as panelModule from './panel'
-import { createPanel } from './panel'
+import { createPanel, treeSizeOver, VIEW_BUDGET } from './panel'
 import { CHECKS } from './checks'
 import { mergeScenarios, opensOwnView, READY_STATUS, viewOf as namedView } from './scenarios'
 import { SECTIONS } from './sections'
@@ -785,4 +785,42 @@ test('the panel’s checks hold core’s scenarios first, then only scenarios na
     assert.ok(PIECE_IDS.some((id) => name === id || (name.startsWith(id) && /^[A-Z0-9]/.test(name.slice(id.length)))), name)
     assert.ok(CHECKS[name].requests?.['core.status'], `${name} stubs core.status`)
   }
+})
+
+// ---------------------------------------------------------------------------------------------
+// The size budget of a view
+
+test('the size of a tree is bounded cheaply: a small one is under, a huge one over, counting stops early', () => {
+  assert.equal(treeSizeOver(<Text>small</Text>, VIEW_BUDGET), false)
+  const huge = Array.from({ length: 4000 }, (_, i) => <Text key={i}>{'x'.repeat(100)}</Text>)
+  assert.equal(treeSizeOver(huge, VIEW_BUDGET), true)
+  // Well under the 512 KiB Orca allows the whole panel.
+  assert.ok(VIEW_BUDGET <= 256 * 1024)
+})
+
+test('a view whose tree passes the budget shows its error state; the bar, the status line and the other views still draw', async () => {
+  const big = atom(true)
+  const huge: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => (read(big) ? Array.from({ length: 4000 }, (_, i) => <Text key={i}>{`row ${i} ${'x'.repeat(80)}`}</Text>) : <Text>Errors body</Text>)
+  }
+  panel = await mount(panelOver([viewOf('sandbox', 'Sandbox and upload', 'Sandbox y subida'), huge]), { host: hostAnswering(ALL_READY), locale: 'en', persisted: { plugin: { view: 'errors' } } })
+  assert.deepEqual(panel.errors, [])
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+  assert.ok(panel.find({ text: 'Close what is open in it, or open another view.' }))
+  assert.ok(JSON.stringify(panel.tree()).length < VIEW_BUDGET, 'what Orca is handed stays small')
+  assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'])
+  assert.ok(panel.find({ role: 'button', label: 'Refresh' }), 'the status line is there')
+  await pick(panel, 'sandbox')
+  assert.ok(panel.find({ text: 'Sandbox and upload body' }))
+  // Once the view is small again, it draws.
+  set(big, false)
+  await pick(panel, 'errors')
+  await panel.press({ role: 'button', text: 'Try again' }).catch(() => undefined)
+  assert.ok(panel.find({ text: 'Errors body' }))
+  panel.unmount()
+  panel = await mount(panelOver([huge]), { host: hostAnswering(ALL_READY), locale: 'es' })
+  set(big, true)
+  await panel.settled()
+  assert.match(panel.summary().join('\n'), /Errores es demasiado grande para dibujarse/)
 })

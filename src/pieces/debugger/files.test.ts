@@ -1,7 +1,7 @@
 // The scripts a breakpoint can go in: inside a cartridge (a folder with a .project file), found
 // by name.
 import { assert, test } from 'orca/testing'
-import { byCartridge, matchFiles, MAX_MATCHES, scriptFiles, type ReadDir } from './files'
+import { byCartridge, scriptFiles, type ReadDir } from './files'
 
 type Tree = { [name: string]: Tree | string }
 
@@ -45,17 +45,6 @@ test('lists the .js and .ds files of every cartridge, relative to the workspace,
     'cartridges/app_two/cartridge/controllers/Page.js'
   ])
   assert.equal(truncated, false)
-})
-
-test('finds files by every word typed, ignoring case, the file’s own name first; an empty query finds nothing', () => {
-  const files = ['a/very/long/path/to/controllers/Page.js', 'b/Page.js', 'c/pages/other.js', 'd/scripts/helper.ds']
-  assert.deepEqual(matchFiles(files, 'page').files, ['b/Page.js', 'a/very/long/path/to/controllers/Page.js', 'c/pages/other.js'])
-  assert.deepEqual(matchFiles(files, 'CONTROLLERS page').files, ['a/very/long/path/to/controllers/Page.js'])
-  assert.deepEqual(matchFiles(files, '   ').files, [])
-  const many = Array.from({ length: 80 }, (_, i) => `x/f${i}.js`)
-  const found = matchFiles(many, 'f')
-  assert.equal(found.files.length, MAX_MATCHES)
-  assert.equal(found.truncated, true)
 })
 
 test('scripts are grouped by the cartridge that holds them, the longest cartridge path winning', () => {

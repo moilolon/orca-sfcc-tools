@@ -23,10 +23,10 @@ function rows(now: number): ErrorRow[] {
       pipeline: 'Cart-AddProduct',
       level: 'ERROR',
       frames: [
-        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'calculateLineTotal', line: 118, openable: true, path: 'cartridges/app_example/cartridge/scripts/helpers/cartHelper.js', script: true },
-        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'addProductToCart', line: 64, openable: true, path: 'cartridges/app_example/cartridge/scripts/helpers/cartHelper.js', script: true },
-        { file: 'app_example/cartridge/controllers/Cart.js', function: 'addProduct', line: 42, openable: true, path: 'cartridges/app_example/cartridge/controllers/Cart.js', script: true },
-        { file: 'modules/server/route.js', function: 'next', line: 83, openable: false, path: null, script: true }
+        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'calculateLineTotal', line: 118, openable: true, path: 'cartridges/app_example/cartridge/scripts/helpers/cartHelper.js' },
+        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'addProductToCart', line: 64, openable: true, path: 'cartridges/app_example/cartridge/scripts/helpers/cartHelper.js' },
+        { file: 'app_example/cartridge/controllers/Cart.js', function: 'addProduct', line: 42, openable: true, path: 'cartridges/app_example/cartridge/controllers/Cart.js' },
+        { file: 'modules/server/route.js', function: 'next', line: 83, openable: false, path: null }
       ]
     },
     {
@@ -52,8 +52,8 @@ function rows(now: number): ErrorRow[] {
       pipeline: null,
       level: 'FATAL',
       frames: [
-        { file: 'ExportStep.java', function: 'example.jobs.ExportStep.run', line: 88, openable: false, path: null, script: false },
-        { file: 'JobExecutor.java', function: 'example.jobs.JobExecutor.execute', line: 120, openable: false, path: null, script: false }
+        { file: 'ExportStep.java', function: 'example.jobs.ExportStep.run', line: 88, openable: false, path: null },
+        { file: 'JobExecutor.java', function: 'example.jobs.JobExecutor.execute', line: 120, openable: false, path: null }
       ]
     }
   ]
