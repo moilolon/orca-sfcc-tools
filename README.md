@@ -27,7 +27,7 @@ one at a time.
 | 🧩 | **ISML** | Colours `.isml` templates in Orca's editor: HTML, `<is…>` tags, `${…}` expressions, `<isscript>` and both kinds of comment |
 | ⬆️ | **Upload** | Deploys the workspace you pick to a code version of its own, activates it and uploads every change after that; removing the workspace deletes its version |
 | 🚦 | **Sandbox** | Started, stopped or busy, with start and stop, and which workspace uploads to which code version, in the status bar |
-| 🪵 | **Errors** | The new errors of the sandbox log, apart from the ones already seen |
+| 🪵 | **Errors** | The new errors of each environment's log, one row per error however often it repeats, until marked as seen; the sandbox's count in the status bar |
 
 ---
 

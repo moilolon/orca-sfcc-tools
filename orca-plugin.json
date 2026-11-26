@@ -69,6 +69,23 @@
         "default": "-prd"
       },
       {
+        "key": "errorsInterval",
+        "title": "Errors: read interval",
+        "description": "Minutes between reads of the sandbox's log for new errors. 0 turns the timer off; the other environments are read only when asked.",
+        "type": "number",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 1440
+      },
+      {
+        "key": "errorsFilter",
+        "title": "Errors: log files",
+        "description": "The log file prefixes read for errors, separated by commas.",
+        "type": "string",
+        "default": "error,customerror",
+        "placeholder": "error,customerror"
+      },
+      {
         "key": "codeVersionPrefix",
         "title": "Code version prefix",
         "description": "Put before the workspace name to make the code version each workspace uploads to (ws-checkout-fix). Letters, digits, - and _; empty means ws-. A workspace keeps the name it got first, and a new name never takes a version already on the sandbox.",
@@ -76,6 +93,29 @@
         "default": "ws-",
         "maxLength": 16,
         "placeholder": "ws-"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "errors-new",
+        "text": "0",
+        "icon": "bug",
+        "tone": "warning",
+        "tooltip": "New errors on the sandbox"
+      },
+      {
+        "id": "sandbox",
+        "text": "Sandbox",
+        "icon": "cloud",
+        "tooltip": "Sandbox state. Press to refresh.",
+        "command": "sandbox.refresh"
+      },
+      {
+        "id": "sandbox-upload",
+        "text": "Upload",
+        "icon": "upload",
+        "tooltip": "The upload to the sandbox.",
+        "command": "sandbox.refresh"
       }
     ],
     "syntaxes": [
@@ -124,22 +164,6 @@
     "events": [
       {
         "on": "workspace.removed"
-      }
-    ],
-    "statusBarItems": [
-      {
-        "id": "sandbox",
-        "text": "Sandbox",
-        "icon": "cloud",
-        "tooltip": "Sandbox state. Press to refresh.",
-        "command": "sandbox.refresh"
-      },
-      {
-        "id": "sandbox-upload",
-        "text": "Upload",
-        "icon": "upload",
-        "tooltip": "The upload to the sandbox.",
-        "command": "sandbox.refresh"
       }
     ]
   },

@@ -21,11 +21,16 @@ Changing it needs the owner's yes.
       may declare the same hook or event: it is emitted once, and fails when their options
       differ.
     - `src/core/`: what every piece shares. `piece.ts` (the piece contracts and `PIECE_IDS`),
-      `b2c.ts` (the only module that starts a process), `dw-config.ts` (the only module that
+      `b2c.ts` (the only module that starts `b2c`), `dw-config.ts` (the only module that
       reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
       namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
-      with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish).
+      with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish),
+      `open-file.ts` (opens a file of a workspace at a line through `orca file open`).
+      `b2c.ts` and `open-file.ts` are the only modules that start a process: `open-file.ts`
+      imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe` (or `orca`) directly,
+      never through a shell or a `.cmd`, with the worker's environment plus `APPDATA`,
+      `LOCALAPPDATA` and `USERPROFILE`, and opens only a file inside the workspace.
       `test-support.ts` holds the invented `dw.json` and the fake process the tests use;
       `b2c-commands-fixture.ts` lists every command of the b2c the allow list was checked
       against, for the tests that walk it.
@@ -54,6 +59,25 @@ Changing it needs the owner's yes.
       `code watch --jsonl` lines), `status.ts` (the sandbox state from `sandbox list`, start and
       stop followed on it), `status-bar.ts` (its two items' texts), `worker.ts` (requests,
       commands, `workspace.removed`); `testing.ts` holds the fakes its tests share.
+    - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
+      beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
+      line; `frames.ts` finds which stack frames are files of a local cartridge. A read stores
+      per signature only its counters and a masked, bounded sample, never a raw entry; a
+      notification says how many, never what. The workspace whose cartridges a frame is looked
+      for in is chosen by `frameRoot()` in its `worker.ts`. A read passes `--level ERROR` and
+      `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
+      reduced to its path, its locale segment to `<locale>`, and a host written without a scheme
+      to `<host>` (never a file name, a `dw.*` name or a Java package). Numbers become `#`, but
+      an HTTP status after `status`, `statusCode` or `HTTP` and an error code after `error code`:
+      an order, a gift card, a product or a one-time code is never kept, and a `LETTERS-digits`
+      token becomes `<code>`. **The limit of `b2c logs get`:**
+      it reads only the last 64 KB of each log file (not a flag) and keeps at most `--count`
+      entries (200 here), so a busy log can hold entries no read sees. The piece cannot fix
+      that; it detects it (200 entries returned, 48 KB of error entries from one file, or a file
+      that `logs list`, run before each read, shows grew by more than 64 KB, whatever the level
+      of its lines) and the view says "some entries may have been missed since <time>", never a
+      notification.
+      Phase 4's command line has the same limit.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
