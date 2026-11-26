@@ -215,5 +215,9 @@ test('the allow list holds nothing that names a host, a user, a credential, a fi
   }
   // b2c's short flags for those: server, user, password, instance, debug, language.
   for (const short of ['-s', '-u', '-p', '-i', '-D', '-L', '-w']) assert.ok(!ALLOWED_FLAGS.has(short), short)
-  assert.equal(ALLOWED_FLAGS.size, 46)
+  // `--wait` is out on purpose, with its options; `--version` is a command, not a flag.
+  for (const flag of ['--wait', '--poll-interval', '--timeout', '--version']) assert.ok(!ALLOWED_FLAGS.has(flag), flag)
+  assert.equal(refusedFlag(['sandbox', 'start', 'abcd-001', '--timeout', '60']), 3)
+  assert.equal(refusedFlag(['code', 'list', '--version']), 2)
+  assert.equal(ALLOWED_FLAGS.size, 43)
 })

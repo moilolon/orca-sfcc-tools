@@ -478,7 +478,15 @@ test('a flag outside the list is refused whatever it is; the ones in it pass in 
       ['code', 'deploy', '--'],
       ['code', 'deploy', '-'],
       ['code', 'deploy', '--log-level', 'debug'],
-      ['code', 'deploy', '-D']
+      ['code', 'deploy', '-D'],
+      // `--wait` is left out on purpose, and its two options with it.
+      ['sandbox', 'start', '--wait'],
+      ['sandbox', 'start', '-w'],
+      ['sandbox', 'start', '--poll-interval', '5'],
+      ['sandbox', 'start', '--timeout=60'],
+      // `--version` is a command of its own: no other command takes it.
+      ['code', 'list', '--version'],
+      ['docs', 'search', '--version']
     ]) {
       assert.equal(await refusalOf(b2c.run(args, { role: 'sandbox' })), 'flag_not_allowed@2', args.join(' '))
     }
@@ -490,10 +498,14 @@ test('a flag outside the list is refused whatever it is; the ones in it pass in 
       ['logs', 'get', '-f', 'error', '--level=ERROR', '-n', '50', '--since', '1h', '-g', 'text', '--no-normalize', '--no-color'],
       ['logs', 'tail', '--last', '5', '--interval=2'],
       ['sandbox', 'list', '--realm', 'abcd', '--show-deleted', '--columns', 'id', '--extended'],
-      ['sandbox', 'start', 'x', '--poll-interval', '5', '--timeout', '60']
+      ['sandbox', 'start', 'abcd-001']
     ]
     for (const args of allowed) assert.equal(await codeOf(b2c.run(args, { role: 'sandbox' })), 'resolved', args.join(' '))
     assert.deepEqual(calls.map((call) => call.args), allowed.map((args) => [...args, '--json']))
+    // The command `--version` still runs, alone and as it is.
+    assert.equal(await codeOf(b2c.run(['--version'])), 'resolved')
+    assert.deepEqual(calls[calls.length - 1].args, ['--version'])
+    assert.equal(await codeOf(b2c.run(['--version', '--json'])), 'role_refused')
   }))
 
 test('refuses any argument that holds a value of dw.json, whichever role it belongs to', () =>
@@ -513,16 +525,41 @@ test('refuses any argument that holds a value of dw.json, whichever role it belo
     assert.equal(calls.length, 0)
   }))
 
-test('a value shorter than four characters blocks an argument only when it is the whole of it', () => {
-  const values = ['ab', 'x', 'admin']
+test('a value of eight characters or more blocks an argument that contains it; a shorter one only as the whole of it', () => {
+  const values = ['ab', 'x', 'admin', 'storeman', 'invented-long-secret']
   assert.equal(argumentWithValue(['code', 'activate', 'cab-fix', 'xyz', '--search=cab'], values), -1)
   assert.equal(argumentWithValue(['code', 'activate', 'ab'], values), 2)
   assert.equal(argumentWithValue(['logs', 'get', '--search=ab'], values), 2)
   assert.equal(argumentWithValue(['logs', 'get', '--search', 'x'], values), 3)
-  // Four characters or more: anywhere in the argument.
-  assert.equal(argumentWithValue(['code', 'activate', 'my-admin-fix'], values), 2)
+  // A user called `admin` does not refuse a code version called `admin-fix`.
+  assert.equal(argumentWithValue(['code', 'activate', 'admin-fix'], values), -1)
+  assert.equal(argumentWithValue(['code', 'activate', 'my-admin-fix', '--search=sysadmins'], values), -1)
+  // The value itself is still refused, alone or as the whole value of a flag.
+  assert.equal(argumentWithValue(['code', 'activate', 'admin'], values), 2)
+  assert.equal(argumentWithValue(['logs', 'get', '--search=admin'], values), 2)
+  // Eight characters: inside a longer argument too.
+  assert.equal(argumentWithValue(['code', 'activate', 'storeman'], values), 2)
+  assert.equal(argumentWithValue(['code', 'activate', 'the-storeman-fix'], values), 2)
+  assert.equal(argumentWithValue(['logs', 'get', '--search=xstoremanx'], values), 2)
+  assert.equal(argumentWithValue(['logs', 'get', '--search', 'x-invented-long-secret-x'], values), 3)
+  assert.equal(argumentWithValue(['code', 'activate', 'storema'], values), -1)
   assert.equal(argumentWithValue(['code', 'activate', 'v1'], ['', 'ab']), -1)
 })
+
+test('through the runner: a user called admin lets admin-fix through, and an eight-character value inside an argument is refused', () =>
+  withWorkspace(
+    async (root) => {
+      const { b2c, calls } = runner(root)
+      assert.equal(await codeOf(b2c.run(['code', 'activate', 'admin-fix'], { role: 'sandbox' })), 'resolved')
+      assert.equal(await codeOf(b2c.run(['logs', 'get', '--search', 'sysadmins'], { role: 'development' })), 'resolved')
+      assert.deepEqual(calls.map((call) => call.args), [['code', 'activate', 'admin-fix', '--json'], ['logs', 'get', '--search', 'sysadmins', '--json']])
+      assert.equal(await refusalOf(b2c.run(['code', 'activate', 'admin'], { role: 'sandbox' })), 'unsafe_argument@2')
+      assert.equal(await refusalOf(b2c.run(['code', 'activate', 'fix-secret88-b'], { role: 'sandbox' })), 'unsafe_argument@2')
+      assert.equal(await refusalOf(b2c.run(['logs', 'get', '--search=xsecret88x'], { role: 'development' })), 'unsafe_argument@2')
+      assert.equal(calls.length, 2)
+    },
+    { hostname: 'sandbox-04.example.com', username: 'admin', password: 'secret88', 'hostname-dev': 'dev-04.example.com', 'client-id-dev': 'invented-dev-client-id', 'client-secret-dev': 'invented-dev-client-secret' }
+  ))
 
 // ---------------------------------------------------------------------------------------------
 // Output and errors
@@ -693,11 +730,23 @@ test('errors carry their code, and b2c’s message with hosts and the values of 
     assertNoSecrets(logs.join('\n'), 'the log')
   }))
 
-test('redact masks hosts in every shape: three labels, two, and IP addresses; not file names, versions or times', () => {
+test('redact masks what the file holds, names of three or more labels and IP addresses', () => {
   assert.equal(redact('a secret-value at x.y.example.com and 10.0.0.1:443', ['secret-value']), 'a *** at <host> and <host>:443')
-  assert.equal(redact('cannot resolve shop.internal or Shop.Example', []), 'cannot resolve <host> or <host>')
+  assert.equal(redact('HTTPS request to https://edge-01.cdn.example.com/on/demandware.store failed', []), 'HTTPS request to https://<host>/on/demandware.store failed')
   assert.equal(redact('connect to [2001:db8::1]:443, fe80::1, ::1 or 2001:db8:0:0:0:0:0:1', []), 'connect to [<host>]:443, <host>, <host> or <host>')
-  const kept = 'no hosts here: file.isml, Cart.js and dw.json, version 2.11.0 at 12:34:56, e.g. this.'
+  // A host with an underscore is masked whole, not from its second label on.
+  assert.equal(redact('cannot reach my_box.example.com or a.my_box.example.com.', []), 'cannot reach <host> or <host>.')
+  // A host of two labels is masked when the file holds it, in whatever case it is printed.
+  assert.equal(redact('cannot resolve shop.internal or SHOP.Internal', ['Shop.internal']), 'cannot resolve *** or ***')
+  assert.equal(redact('cannot resolve shop.internal', []), 'cannot resolve shop.internal')
+})
+
+test('redact leaves the names of the API and of files alone', () => {
+  // The sentence of the review, word for word.
+  const sentence = 'No documentation found for dw.catalog.ProductMgr; did you mean ProductMgr.getProduct or Site.current?'
+  assert.equal(redact(sentence, []), sentence)
+  assert.equal(redact(sentence, ['invented-secret', 'sandbox-01.example.com'], 'C:\\Users\\someone'), sentence)
+  const kept = 'no hosts here: file.isml, Cart.js and dw.json, dw.system.Site.current, Cart.test.js, version 2.11.0 at 12:34:56, e.g. this.'
   assert.equal(redact(kept, []), kept)
 })
 
@@ -841,6 +890,92 @@ test('a long-lived command hands over stderr line by line and stops at once; --j
     // A debug adapter speaks its own protocol on stdout: nothing is added unless asked.
     await b2c.start(['debug'], { role: 'sandbox' })
     assert.deepEqual(calls[1].args, ['debug'])
+  }))
+
+test('the stderr events of a long-lived command arrive masked: raw lines, and every string of a JSON line', () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls, logs } = runner(root, fakeSpawner(() => {}))
+    const events: B2cEvent[] = []
+    const chunks: Uint8Array[] = []
+    const running = await b2c.start(['code', 'watch'], { role: 'sandbox', jsonl: true, onEvent: (event) => events.push(event), onStdout: (chunk) => chunks.push(chunk) })
+    const child = calls[0].child
+    const host = INVENTED_DW.hostname
+    // As b2c writes them: the host in the message and in other fields, of this role and of others.
+    const line = {
+      level: 50,
+      time: 1,
+      command: 'code:watch',
+      msg: `HTTPS request to ${host} failed`,
+      err: { message: `connect ECONNREFUSED 10.0.0.7:443 (${host.toUpperCase()})`, hosts: [host, INVENTED_DW['hostname-dev'], 'edge.cdn.example.com'], attempts: 3, ok: false, nothing: null },
+      user: INVENTED_DW.username,
+      [`key-${host}`]: 'a key is not a value'
+    }
+    child.stderr.emit('data', Buffer.from(`${JSON.stringify(line)}\nERROR: HTTPS request to ${host} failed for ${INVENTED_DW['client-id-prd']}\n » dw.catalog.ProductMgr is fine\n`))
+    assert.deepEqual(events, [
+      {
+        json: {
+          level: 50,
+          time: 1,
+          command: 'code:watch',
+          msg: 'HTTPS request to *** failed',
+          err: { message: 'connect ECONNREFUSED <host>:443 (***)', hosts: ['***', '***', '<host>'], attempts: 3, ok: false, nothing: null },
+          user: '***',
+          [`key-${host}`]: 'a key is not a value'
+        }
+      },
+      { text: 'ERROR: HTTPS request to *** failed for ***' },
+      { text: ' » dw.catalog.ProductMgr is fine' }
+    ])
+    const values = JSON.stringify(events.map((event) => ('json' in event ? Object.values(event.json as object) : event.text)))
+    assertNoSecrets(values, 'an event')
+    // Stdout is the caller's to mask: it is handed over as it came.
+    child.stdout.emit('data', Buffer.from(host))
+    assert.equal(Buffer.concat(chunks).toString(), host)
+    running.stop()
+    await running.exited
+    assertNoSecrets(logs.join('\n'), 'the log')
+  }))
+
+test('mask() hides every value of the file, for any role, and what looks like a host; isHost() finds a role’s host without giving it', () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls } = runner(root)
+    // What a piece might take from a run() result before showing it.
+    const listed = `${INVENTED_DW.hostname} (${INVENTED_DW['hostname-dev'].toUpperCase()}) by ${INVENTED_DW.username}, ${INVENTED_DW['client-id-prd']}, other.sandbox.example.com, 10.1.2.3 in C:\\Users\\someone\\work, dw.catalog.ProductMgr`
+    const masked = await runner(root, fakeSpawner(), { homedir: 'C:\\Users\\someone' }).b2c.mask(listed)
+    assert.equal(masked, '*** (***) by ***, ***, <host>, <host> in ~\\work, dw.catalog.ProductMgr')
+    assertNoSecrets(masked, 'masked text')
+    assert.equal(await b2c.mask('nothing to hide'), 'nothing to hide')
+    // With no file there are no values, and hosts are still masked by their shape.
+    assert.equal(await runner(null).b2c.mask(`${INVENTED_DW.hostname} and ${INVENTED_DW.username}`), `<host> and ${INVENTED_DW.username}`)
+
+    assert.equal(await b2c.isHost('sandbox', INVENTED_DW.hostname), true)
+    assert.equal(await b2c.isHost('sandbox', ` ${INVENTED_DW.hostname.toUpperCase()} `), true)
+    assert.equal(await b2c.isHost('development', INVENTED_DW['hostname-dev']), true)
+    // An incomplete role has a host too; an absent one has none.
+    assert.equal(await b2c.isHost('staging', INVENTED_DW['hostname-stg']), true)
+    assert.equal(await b2c.isHost('production', INVENTED_DW.hostname), false)
+    assert.equal(await b2c.isHost('production', ''), false)
+    // Each role answers for its own host only, and for the whole of it.
+    assert.equal(await b2c.isHost('sandbox', INVENTED_DW['hostname-dev']), false)
+    assert.equal(await b2c.isHost('sandbox', `x${INVENTED_DW.hostname}`), false)
+    assert.equal(await b2c.isHost('sandbox', INVENTED_DW.hostname.replace('.example.com', '')), false)
+    assert.equal(await runner(null).b2c.isHost('sandbox', INVENTED_DW.hostname), false)
+    assert.equal(calls.length, 0, 'neither starts a process')
+  }))
+
+test('a piece finds its own sandbox in a list b2c returns, and shows the list with nothing unmasked', () =>
+  withWorkspace(async (root) => {
+    // What `sandbox list --json` might answer: run() hands it over as b2c printed it.
+    const answer = { data: [{ id: 'abcd-001', hostName: 'other-09.sandbox.example.com', state: 'stopped' }, { id: 'abcd-002', hostName: INVENTED_DW.hostname.toUpperCase(), state: 'started' }] }
+    const { b2c } = runner(root, fakeSpawner((call) => call.child.finish(0, JSON.stringify(answer))))
+    const result = await b2c.run(['sandbox', 'list'], { role: 'sandbox' })
+    assert.deepEqual(result.json, answer, 'the result is the data, unmasked')
+    const rows = (result.json as typeof answer).data
+    const own = []
+    for (const row of rows) if (await b2c.isHost('sandbox', row.hostName)) own.push(row.id)
+    assert.deepEqual(own, ['abcd-002'])
+    const shown = await b2c.mask(rows.map((row) => `${row.id} ${row.hostName} ${row.state}`).join('; '))
+    assert.equal(shown, 'abcd-001 <host> stopped; abcd-002 *** started')
   }))
 
 test('a long-lived command gets stdout in raw chunks and a stdin to write and close', () =>

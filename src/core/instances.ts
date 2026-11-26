@@ -100,12 +100,13 @@ export type ConfigState = 'ok' | 'missing' | 'invalid'
  * an instance, a configuration or `.env` file, a project folder, a certificate or a sign-in
  * method: those reach b2c through its environment (src/core/b2c.ts) and nowhere else. A short
  * flag stands for a different long one per command (`-c` is `--cartridge`, `--columns` or
- * `--category`), and none of its meanings is in that group.
+ * `--category`), and none of its meanings is in that group. `--wait` is left out on purpose,
+ * waiting on b2c being unreliable for a sandbox, and with it its `--poll-interval` and
+ * `--timeout`. `--version` is not here either: it is a command, in `ALLOWED_COMMANDS`.
  */
 export const ALLOWED_FLAGS: ReadonlySet<string> = new Set([
   '--json',
   '--jsonl',
-  '--version',
   '-v',
   '--code-version',
   '-c',
@@ -146,9 +147,7 @@ export const ALLOWED_FLAGS: ReadonlySet<string> = new Set([
   '--topics',
   '--workspace',
   '--realm',
-  '--show-deleted',
-  '--poll-interval',
-  '--timeout'
+  '--show-deleted'
 ])
 
 /** The flag an argument names (`--level` for `--level=ERROR`), or null for a plain value. */

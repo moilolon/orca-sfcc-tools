@@ -22,7 +22,7 @@ import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { extname, posix } from 'node:path'
 import { DW_KEYS, loadConfig, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
-import { guard, refusedFlag, ROLES, topicOf, type ConfigState, type Role, type RoleState } from './instances'
+import { commandOf, guard, refusedFlag, ROLES, topicOf, type ConfigState, type Role, type RoleState } from './instances'
 import type { Logger } from './piece'
 import type { Settings } from './settings'
 
@@ -104,18 +104,28 @@ export type RunOptions = {
   timeoutMs?: number
 }
 
-/** `json` is the parsed stdout; undefined when b2c printed nothing (`code activate`, `delete`). */
+/**
+ * `json` is the parsed stdout; undefined when b2c printed nothing (`code activate`, `delete`).
+ * All three are as b2c printed them, hosts included: a piece needs the data. Whatever of it a
+ * piece shows, logs or sends to a panel goes through `mask` first.
+ */
 export type RunResult = { stdout: string; stderr: string; json: unknown }
 
-/** One line of a long-lived command's stderr: its JSON event, or the raw text. */
+/**
+ * One line of a long-lived command's stderr: its JSON event, or the raw text. Both arrive
+ * masked: the text, and every string of the JSON (b2c names the host in its messages).
+ */
 export type B2cEvent = { json: unknown } | { text: string }
 
 export type StartOptions = Omit<RunOptions, 'timeoutMs'> & {
   /** Adds `--jsonl`, so b2c writes its log as one JSON event per line of stderr. */
   jsonl?: boolean
-  /** Each line of stderr: its JSON when the line parses, its text otherwise. */
+  /** Each line of stderr, already masked: its JSON when the line parses, its text otherwise. */
   onEvent?: (event: B2cEvent) => void
-  /** Stdout as it arrives, in raw chunks: a debug adapter frames its messages in bytes. */
+  /**
+   * Stdout as it arrives, in raw chunks: a debug adapter frames its messages in bytes. Never
+   * masked: what a piece shows of it goes through `mask` first.
+   */
   onStdout?: (chunk: Uint8Array) => void
 }
 
@@ -158,6 +168,17 @@ export type B2c = {
   version(): Promise<string | null>
   /** The state of dw.json and of each role. The only thing the rest of the plugin learns of it. */
   instances(): Promise<InstancesState>
+  /**
+   * `text` as it may be shown: every value dw.json holds for any role, the home folder and
+   * anything shaped like a host are masked. For what a piece takes from a `run()` result or
+   * from stdout; error details and stderr events are masked already.
+   */
+  mask(text: string): Promise<string>
+  /**
+   * Whether `value` is the host of `role`, in any case. It lets a piece find its own instance
+   * in a list b2c returns without ever holding the host.
+   */
+  isHost(role: Role, value: string): Promise<boolean>
 }
 
 export type B2cDeps = {
@@ -349,13 +370,19 @@ export function childEnvironment(
 
 /**
  * A value this short is common inside ordinary words (a one-letter user name is in every
- * sentence), so it only counts when it stands alone.
+ * sentence), so in a text it is masked only where it stands alone.
  */
 const SHORT_VALUE = 4
 
 /**
+ * From this length a value is looked for anywhere inside an argument. A shorter one is an
+ * ordinary word as often as not (a user called `admin`, a code version called `admin-fix`).
+ */
+const LONG_VALUE = 8
+
+/**
  * The position of the first argument that holds a value read from dw.json, or -1. A value of
- * four characters or more is looked for anywhere in the argument; a shorter one only as the
+ * eight characters or more is looked for anywhere in the argument; a shorter one only as the
  * whole argument or the whole value of a `--flag=value`, so it does not block unrelated ones.
  */
 export function argumentWithValue(args: readonly string[], values: readonly string[]): number {
@@ -363,7 +390,7 @@ export function argumentWithValue(args: readonly string[], values: readonly stri
   return args.findIndex((arg) => {
     const equals = arg.startsWith('-') ? arg.indexOf('=') : -1
     const flagValue = equals === -1 ? null : arg.slice(equals + 1)
-    return known.some((value) => (value.length >= SHORT_VALUE ? arg.includes(value) : arg === value || flagValue === value))
+    return known.some((value) => (value.length >= LONG_VALUE ? arg.includes(value) : arg === value || flagValue === value))
   })
 }
 
@@ -381,12 +408,14 @@ function parseJson(text: string): unknown {
   }
 }
 
-/** A host name of three or more labels, the last alphabetic. */
-const HOST_LONG = /\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){2,}[a-z]{2,}\b/gi
-/** A name of two labels, the last alphabetic: a host (`shop.internal`) or a file (`Cart.js`). */
-const HOST_SHORT = /\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.([a-z]{2,})\b/gi
-/** Last labels that mean a file, not a host. None of them is a top-level domain. */
-const FILE_EXTENSIONS = new Set(['js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'json', 'isml', 'xml', 'properties', 'css', 'scss', 'html', 'htm', 'txt', 'log', 'yml', 'yaml', 'png', 'jpg', 'svg', 'cmd', 'bat', 'exe', 'ds'])
+/**
+ * A host name as it is written in a message: three or more labels in lower case (an underscore
+ * counts, some internal names have one), the last alphabetic. A name of two labels is as often
+ * a method or a file (`Site.current`, `Cart.js`), and one with a capital in it is an API name
+ * (`dw.catalog.ProductMgr`): neither is masked. A host the file holds is masked as a value,
+ * whatever its shape.
+ */
+const HOST = /(?<![A-Za-z0-9_.-])(?:[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?\.){2,}[a-z]{2,}(?![A-Za-z0-9_-])/g
 const IPV4 = /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/g
 /** Four or more groups, or a form shortened with `::`; a time (`12:34:56`) is neither. */
 const IPV6 = /(?<![0-9a-z:])(?:(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})(?![0-9a-z:])/gi
@@ -396,15 +425,16 @@ function escapeRegExp(text: string): string {
 }
 
 /**
- * `text` with each of `values` masked, then anything shaped like a host: an IP address, a name
- * of three or more labels, or one of two labels that is not a file name. A value shorter than
- * four characters is masked only where it stands alone, never inside a word. `home`, the user's
- * folder (its last part is usually the account name), becomes `~`.
+ * `text` with each of `values` masked, in any case, then anything shaped like a host: an IP
+ * address or a name of three or more labels. A value shorter than four characters is masked
+ * only where it stands alone, never inside a word. `home`, the user's folder (its last part is
+ * usually the account name), becomes `~`.
  */
 export function redact(text: string, values: readonly string[], home?: string): string {
   let out = text
   for (const value of [...new Set(values)].filter(Boolean).sort((a, b) => b.length - a.length)) {
-    if (value.length >= SHORT_VALUE) out = out.split(value).join('***')
+    // A host is often printed in lower case, however the file spells it.
+    if (value.length >= SHORT_VALUE) out = out.replace(new RegExp(escapeRegExp(value), 'giu'), '***')
     else out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(value)}(?![\\p{L}\\p{N}_])`, 'gu'), '***')
   }
   const root = home?.replace(/[\\/]+$/, '')
@@ -412,8 +442,15 @@ export function redact(text: string, values: readonly string[], home?: string): 
   return out
     .replace(IPV4, '<host>')
     .replace(IPV6, '<host>')
-    .replace(HOST_LONG, '<host>')
-    .replace(HOST_SHORT, (name, last: string) => (FILE_EXTENSIONS.has(last.toLowerCase()) ? name : '<host>'))
+    .replace(HOST, '<host>')
+}
+
+/** A parsed JSON value with every string in it passed through `mask`: keys stay, values are masked. */
+function maskDeep(value: unknown, mask: (text: string) => string): unknown {
+  if (typeof value === 'string') return mask(value)
+  if (Array.isArray(value)) return value.map((item) => maskDeep(item, mask))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, maskDeep(item, mask)]))
+  return value
 }
 
 /**
@@ -505,6 +542,11 @@ export function createB2c(deps: B2cDeps): B2c {
   const home = deps.homedir ?? homedir()
   const pipeGraceMs = deps.pipeGraceMs ?? DEFAULT_PIPE_GRACE_MS
 
+  /** Every value the file holds, of every role: all of them are masked, not only the ones a command gets. */
+  function valuesOf(config: LoadedConfig): string[] {
+    return ROLES.flatMap((each) => Object.values(config.roles[each].vars)).filter((value): value is string => !!value)
+  }
+
   async function readConfig(): Promise<LoadedConfig> {
     const values = await deps.settings.read()
     return loadConfig({ root: await deps.configRoot(), configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
@@ -518,11 +560,12 @@ export function createB2c(deps: B2cDeps): B2c {
     const { role } = options
     const verdict = guard(args, role)
     if (!verdict.ok) throw new B2cError(verdict.code)
-    const flagAt = refusedFlag(args)
+    // `--version` is a command of its own, not a flag any other command may carry.
+    const flagAt = commandOf(args) === '--version' ? -1 : refusedFlag(args)
     if (flagAt !== -1) throw new B2cError('flag_not_allowed', { argument: flagAt })
     const config = await readConfig()
-    // Every role's values are masked in what b2c answers, not only the ones this command gets.
-    const known = ROLES.flatMap((each) => Object.values(config.roles[each].vars)).filter((value): value is string => !!value)
+    const known = valuesOf(config)
+    const mask = (text: string) => redact(text, known, home)
     let vars: B2cEnvironment = {}
     if (verdict.needsRole && role) {
       if (config.state === 'invalid') throw new B2cError('config_invalid')
@@ -540,7 +583,9 @@ export function createB2c(deps: B2cDeps): B2c {
     const cwd = options.cwd || home
     if (!(await isDirectory(cwd))) throw new B2cError('cwd_not_found')
     const env = childEnvironment(baseEnv, vars, { platform, homedir: home, role: verdict.needsRole ? role : undefined })
-    return { command, env, cwd, known, label: `b2c ${topicOf(args)}${verdict.needsRole && role ? ` (${role})` : ''}` }
+    const label = `b2c ${topicOf(args)}${verdict.needsRole && role ? ` (${role})` : ''}`
+    // What the runner writes to the log goes through the mask too, whatever it comes to hold.
+    return { command, env, cwd, mask, say: (message: string) => log(mask(`${label}: ${message}`)) }
   }
 
   type Prepared = Awaited<ReturnType<typeof prepare>>
@@ -556,7 +601,7 @@ export function createB2c(deps: B2cDeps): B2c {
         stdio: [stdin, 'pipe', 'pipe']
       })
     } catch (error) {
-      log(`${prepared.label}: could not start (${codeOfThrown(error)})`)
+      prepared.say(`could not start (${codeOfThrown(error)})`)
       throw new B2cError('b2c_failed')
     }
   }
@@ -597,7 +642,7 @@ export function createB2c(deps: B2cDeps): B2c {
         const stop = (code: B2cErrorCode) => {
           if (settled) return
           killTree(child)
-          log(`${prepared.label}: stopped (${code})`)
+          prepared.say(`stopped (${code})`)
           finish(() => reject(new B2cError(code)))
         }
         const timer = setTimeout(() => stop('b2c_timeout'), options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
@@ -608,13 +653,13 @@ export function createB2c(deps: B2cDeps): B2c {
         child.on('error', (error) => {
           if (failed) return
           failed = true
-          log(`${prepared.label}: could not start (${codeOfThrown(error)})`)
+          prepared.say(`could not start (${codeOfThrown(error)})`)
           void startFailure(prepared, error).then((code) => finish(() => reject(new B2cError(code))))
         })
         child.on('close', (code) => {
           if (failed) return
           const exitCode = code ?? -1
-          log(`${prepared.label}: exit ${exitCode}`)
+          prepared.say(`exit ${exitCode}`)
           finish(() => {
             stdout += out.end()
             stderr += err.end()
@@ -622,7 +667,7 @@ export function createB2c(deps: B2cDeps): B2c {
               resolve({ stdout, stderr, json: parseJson(stdout) })
             } else {
               const message = errorMessageOf(stderr)
-              reject(new B2cError('b2c_failed', { exitCode, detail: message === null ? null : redact(message, prepared.known, home) }))
+              reject(new B2cError('b2c_failed', { exitCode, detail: message === null ? null : prepared.mask(message) }))
             }
           })
         })
@@ -638,7 +683,7 @@ export function createB2c(deps: B2cDeps): B2c {
       let grace: ReturnType<typeof setTimeout> | undefined
       const lines = lineSplitter((line) => {
         const json = parseJson(line)
-        options.onEvent?.(json === undefined ? { text: line } : { json })
+        options.onEvent?.(json === undefined ? { text: prepared.mask(line) } : { json: maskDeep(json, prepared.mask) })
       })
       const decoder = streamDecoder()
       // Both streams are read whether or not anyone listens: a full pipe would block the process.
@@ -665,7 +710,7 @@ export function createB2c(deps: B2cDeps): B2c {
         stdinOpen = false
         clearTimeout(grace)
         options.signal?.removeEventListener('abort', stop)
-        log(`${prepared.label}: ${stopped ? 'stopped' : reason ? `failed (${reason})` : `exit ${exitCode ?? -1}`}`)
+        prepared.say(stopped ? 'stopped' : reason ? `failed (${reason})` : `exit ${exitCode ?? -1}`)
         resolveExit(reason ? { exitCode, stopped, reason } : { exitCode, stopped })
       }
       function stop() {
@@ -681,7 +726,7 @@ export function createB2c(deps: B2cDeps): B2c {
       child.on('error', (error) => {
         if (done || failed) return
         failed = true
-        log(`${prepared.label}: could not start (${codeOfThrown(error)})`)
+        prepared.say(`could not start (${codeOfThrown(error)})`)
         void startFailure(prepared, error).then((reason) => end(null, false, reason))
       })
       // The process has ended but its pipes may still hold output: wait for them to close, though
@@ -730,6 +775,15 @@ export function createB2c(deps: B2cDeps): B2c {
       const instances = {} as Record<Role, RoleState>
       for (const role of ROLES) instances[role] = config.roles[role].state
       return { config: config.state, instances }
+    },
+
+    async mask(text) {
+      return redact(text, valuesOf(await readConfig()), home)
+    },
+
+    async isHost(role, value) {
+      const host = (await readConfig()).roles[role].vars.SFCC_SERVER
+      return !!host && host.trim().toLowerCase() === value.trim().toLowerCase()
     }
   }
   return api
