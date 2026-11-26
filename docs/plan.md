@@ -4,7 +4,7 @@ How the plugin gets built: what each phase delivers, what it leaves out, where i
 what it promises the rest, how it is proven, and what has to be answered first. This file
 describes the current plan only; when the plan changes, the text changes with it.
 
-Status: **nothing is built yet.** No phase starts until this plan is approved.
+What is built is what `main` holds; this file is the plan for the rest.
 
 ## 1. Ground rules
 
@@ -193,7 +193,11 @@ stub of every piece and both registries, development scripts (`typecheck`, `test
 `src/panel/{panel.tsx,sections.ts,panel.check.ts}`, `src/pieces/*/` stubs, `package.json`,
 `tsconfig.json`, `.gitignore`.
 
-**Contract.** Section 3. Plus `core.status → { b2c: { found, version }, instances: { [role]: boolean }, pieces: string[] }`.
+**Contract.** Section 3. Plus
+`core.status → { b2c: { found, version }, config, instances: { [role]: state }, pieces: string[] }`,
+where `config` says whether `dw.json` is there and valid, and a role is `ready`, `incomplete` (a
+host without usable credentials) or `absent`. The runner accepts only the flags on its own list:
+none that names a host, a user, a credential, a configuration file or a sign-in method.
 
 **Accepted when.**
 - The four checks pass, and the committed manifest equals the merge of its fragments.
