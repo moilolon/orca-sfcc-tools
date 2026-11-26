@@ -1,8 +1,9 @@
-// The worker over a mock host, a fake b2c and an invented dw.json: core.status, and what reaches
-// the panel, storage and the log.
+// The worker over a mock host, a fake b2c and an invented dw.json: core.status, what reaches the
+// panel, storage and the log, and deactivation over pieces written here.
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { rmSync } from 'node:fs'
 import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, type SpawnCall } from '../core/test-support'
+import type { WorkerPiece } from '../core/piece'
 import { createActivate, deactivate } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
@@ -162,4 +163,82 @@ test('a workspace on another host is never read as a folder of this machine', as
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------------------------
+// Deactivation: every piece stops, each within its own bound
+
+/** Pieces written here, so the test expects nothing of what the plugin's pieces are. */
+function stopping(id: WorkerPiece['id'], dispose: () => void | Promise<void>): WorkerPiece {
+  return { id, activate: () => ({ dispose }) }
+}
+
+async function mountPieces(pieces: WorkerPiece[], disposeBoundMs = 100) {
+  const spawn = fakeSpawner((call) => call.child.finish(0, VERSION))
+  return mountWorker({ default: createActivate({ ...MACHINE, spawn: spawn.spawn, pieces, disposeBoundMs }), deactivate }, { host: hostFor(null) })
+}
+
+test('deactivation waits for a piece that stops asynchronously', async () => {
+  let stopped = false
+  const worker = await mountPieces([
+    stopping('sandbox', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      stopped = true
+    })
+  ])
+  await worker.deactivate()
+  assert.ok(stopped, 'resolved only once the piece had stopped')
+  assert.ok(!worker.logs.some((line) => /stop/.test(line)), worker.logs.join(' | '))
+})
+
+test('a piece that hangs past its bound is let go: the others stop, and the log names only the piece', async () => {
+  const stopped: string[] = []
+  const worker = await mountPieces(
+    [
+      stopping('sandbox', () => {
+        stopped.push('sandbox')
+      }),
+      stopping('errors', () => new Promise<void>(() => {})),
+      stopping('engine', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        stopped.push('engine')
+      })
+    ],
+    150
+  )
+  const started = Date.now()
+  await worker.deactivate()
+  const took = Date.now() - started
+  assert.ok(took >= 140 && took < 1500, `waited about the bound, not for ever (${took} ms)`)
+  assert.deepEqual(stopped.sort(), ['engine', 'sandbox'])
+  assert.deepEqual(
+    worker.logs.filter((line) => /stop/.test(line)),
+    ['[errors] did not stop within 150 ms']
+  )
+})
+
+test('a piece that throws or rejects while stopping keeps none of the others from stopping, and only its code is logged', async () => {
+  const stopped: string[] = []
+  const secret = INVENTED_DW.password
+  const worker = await mountPieces([
+    stopping('sandbox', () => {
+      throw Object.assign(new Error(`cannot stop ${secret}`), { code: 'EBUSY' })
+    }),
+    stopping('errors', () => {
+      stopped.push('errors')
+    }),
+    stopping('engine', async () => {
+      throw new Error(`rejected with ${secret}`)
+    }),
+    stopping('editor', () => {
+      stopped.push('editor')
+    })
+  ])
+  await worker.deactivate()
+  assert.deepEqual(stopped.sort(), ['editor', 'errors'])
+  assert.deepEqual(
+    worker.logs.filter((line) => /stop/.test(line)).sort(),
+    ['[engine] failed to stop: error', '[sandbox] failed to stop: EBUSY']
+  )
+  assertNoSecrets(worker.logs.join('\n'), 'the log')
 })

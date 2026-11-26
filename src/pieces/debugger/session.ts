@@ -497,20 +497,22 @@ export function createSession(deps: SessionDeps) {
     },
 
     /**
-     * The worker is going away: disconnect now, without waiting. The request is written at once so
-     * it reaches the adapter before its stdin closes with the worker; stdin is closed once it is
-     * answered or after a moment. If this never completes, the flag stays set and the next start
-     * cleans up.
+     * The worker is going away: disconnect now. The request is written before this returns, so it
+     * reaches the adapter even if the worker goes first; the promise resolves once it is answered
+     * (or timed out) and the adapter closed. If it never completes, the flag stays set and the
+     * next start cleans up.
      */
-    dispose(): void {
+    dispose(): Promise<void> {
       const connection = conn
       conn = null
-      if (!connection || !connection.alive) return
-      stopping = (async () => {
+      if (!connection || !connection.alive) return stopping ?? Promise.resolve()
+      const done = (async () => {
         if (await close(connection, { disconnect: true })) await deps.unclean.set(false)
       })().finally(() => {
-        stopping = null
+        if (stopping === done) stopping = null
       })
+      stopping = done
+      return done
     },
 
     /** Sends one file's lines to the running adapter; nothing to do when no session runs. */

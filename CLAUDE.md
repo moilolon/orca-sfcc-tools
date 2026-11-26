@@ -30,7 +30,9 @@ Changing it needs the owner's yes.
       against, for the tests that walk it.
     - `src/protocol.ts`: the panel–worker contract (`core.status`), importing each piece's
       `protocol.ts`. Request names start with the piece id.
-    - `src/worker/worker.ts` builds core and starts every piece of `src/worker/pieces.ts`;
+    - `src/worker/worker.ts` builds core and starts every piece of `src/worker/pieces.ts`; its
+      `deactivate()` awaits every piece's `dispose()` (which may be async) side by side, each
+      within `DISPOSE_BOUND_MS`, then core's own handlers, logging only piece ids and codes;
       `src/panel/panel.tsx` draws a bar with one view per delivered piece of
       `src/panel/sections.ts` that has one, the status line and the setup view (the whole panel
       while no piece has a view), knowing no piece by name; `src/panel/ui.tsx` holds the blocks

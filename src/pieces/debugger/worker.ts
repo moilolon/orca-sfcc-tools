@@ -268,19 +268,24 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   ]
 
   return {
-    dispose() {
+    /**
+     * Writes the disconnect at once, so a halted request is released even if the worker goes
+     * first, stops listening, and resolves once the adapter answered and closed. The worker's
+     * deactivation waits for it, within its bound.
+     */
+    async dispose() {
       disposed = true
       if (timer) clearTimeout(timer)
       timer = null
-      // The adapter is told to disconnect before anything else goes, so a halted request is released.
-      session.dispose()
+      const disconnected = session.dispose()
       for (const disposable of disposables.reverse()) {
         try {
-          disposable.dispose()
+          await disposable.dispose()
         } catch {
           // Keep disposing the rest.
         }
       }
+      await disconnected
     }
   }
 }

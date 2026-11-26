@@ -5,12 +5,13 @@ import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import type { B2c } from '../../core/b2c'
 import { translator } from '../../core/i18n'
 import type { RoleState } from '../../core/instances'
-import type { PieceContext, Workspace, Workspaces } from '../../core/piece'
+import type { Disposable, PieceContext, Workspace, Workspaces } from '../../core/piece'
 import { createStore } from '../../core/store'
 import { plainSettings } from '../../core/test-support'
 import { FAKE_HOST, FAKE_ROOT, FakeAdapter } from './fake-adapter'
 import type { ReadDir } from './files'
 import type { DebuggerState } from './protocol'
+import { createActivate, deactivate } from '../../worker/worker'
 import { activateDebugger } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
@@ -38,7 +39,11 @@ const readDir: ReadDir = async (path) => {
   return (tree[rel] ?? []).map((name) => ({ name: name.replace(/\/$/, ''), isDirectory: () => name.endsWith('/'), isFile: () => !name.endsWith('/') }))
 }
 
-async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Workspace | null, storage = {} as Record<string, boolean> } = {}) {
+/**
+ * The debugger's worker half over a mock host. `throughCore` starts it as the plugin's worker does
+ * (src/worker/worker.ts, with this piece alone), so deactivation is core's own.
+ */
+async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Workspace | null, storage = {} as Record<string, boolean>, throughCore = false } = {}) {
   const adapter = new FakeAdapter({
     frames: [{ id: 70000, name: 'show()', source: { name: 'Page.js', path: `${FAKE_ROOT}/${PAGE}` }, line: 11 }],
     threads: [{ id: 7, name: 'Thread 7' }],
@@ -46,7 +51,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     variables: { 1: [{ name: 'host', value: `https://${FAKE_HOST}/`, variablesReference: 0 }] }
   })
   const logs: string[] = []
-  let disposable: { dispose(): void } | undefined
+  let disposable: Disposable | undefined
   const workspaces: Workspaces = {
     list: async () => (workspace ? [workspace] : []),
     focused: async () => workspace,
@@ -54,20 +59,33 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     setUploading: async () => {},
     configRoot: async () => workspace?.path ?? null
   }
-  const module = {
-    default: (orca: PieceContext['orca']) => {
-      const b2c = {
-        ...adapter.b2c,
-        instances: async () => ({ config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }),
-        isHost: async () => false
-      } as unknown as B2c
-      disposable = activateDebugger(
-        { orca, b2c, settings: plainSettings(), store: createStore(orca.storage, 'debugger'), workspaces, t: translator(() => 'en'), log: (line) => logs.push(line) },
-        { coalesceMs: 20, platform: 'linux', readDir, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
-      )
-    },
-    deactivate: () => disposable?.dispose()
-  }
+  const b2c = {
+    ...adapter.b2c,
+    instances: async () => ({ config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }),
+    isHost: async () => false
+  } as unknown as B2c
+  const options = { coalesceMs: 20, platform: 'linux', readDir, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
+  const module = throughCore
+    ? {
+        default: createActivate({
+          pieces: [{ id: 'debugger', activate: (ctx) => activateDebugger({ ...ctx, b2c, workspaces, log: (line) => logs.push(line) }, options) }],
+          platform: 'linux',
+          env: { PATH: '/nowhere' },
+          homedir: '/home/someone',
+          isFile: async () => false,
+          isDirectory: async () => true
+        }),
+        deactivate
+      }
+    : {
+        default: (orca: PieceContext['orca']) => {
+          disposable = activateDebugger(
+            { orca, b2c, settings: plainSettings(), store: createStore(orca.storage, 'debugger'), workspaces, t: translator(() => 'en'), log: (line) => logs.push(line) },
+            options
+          )
+        },
+        deactivate: () => disposable?.dispose()
+      }
   const worker = await mountWorker(module, { host: mockHost({ capabilities: CAPABILITIES, storage, results: { 'editor.open': { opened: true } } }), commands: COMMANDS })
   const states = () => worker.posts.filter((post) => post.event === 'debugger.state').map((post) => post.payload as DebuggerState)
   return { worker, adapter, logs, states }
@@ -197,7 +215,31 @@ test('deactivating the worker disconnects a running session at once', async () =
   adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
   await worker.deactivate()
   assert.equal(adapter.last.commands.at(-1), 'disconnect', 'the halted request is released')
-  await until(() => adapter.last.ended, 'stdin closed')
+  assert.ok(adapter.last.ended, 'stdin closed once it answered')
+})
+
+test('core’s deactivation waits for the debugger’s disconnect answer, then the adapter closes and no flag is left', async () => {
+  const { worker, adapter, states, logs } = await mount({ throughCore: true })
+  await worker.request('debugger.start', {})
+  await until(() => states().some((state) => state.status === 'attached'), 'attached')
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  assert.equal(worker.host.data().storage['debugger.unclean'], true)
+  // The instance takes a while to delete the debugger client.
+  let answered = false
+  adapter.handlers.disconnect = (request, process) => {
+    setTimeout(() => {
+      answered = true
+      process.respond(request, {})
+    }, 80)
+    return 'none'
+  }
+  await worker.deactivate()
+  assert.ok(answered, 'deactivation resolved only after the disconnect was answered')
+  assert.ok(adapter.last.ended, 'stdin closed after the answer')
+  assert.ok(!adapter.last.stopped, 'the adapter exited by itself; nothing was killed')
+  assert.equal(worker.host.data().storage['debugger.unclean'], undefined, 'a clean end leaves no flag')
+  assert.ok(!worker.logs.some((line) => /did not stop|failed to stop/.test(line)), worker.logs.join(' | '))
+  assert.ok(!JSON.stringify([worker.logs, logs]).includes(FAKE_HOST))
 })
 
 test('a session that did not end cleanly is cleaned up on the next start, from the flag in storage', async () => {
