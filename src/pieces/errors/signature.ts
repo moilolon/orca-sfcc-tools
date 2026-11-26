@@ -24,8 +24,10 @@
 //   - e-mail addresses                                               -> `<email>`
 //   - a host written without a scheme (`shop.example.com`, `cdn-03.example.net:443`): a whole
 //     lower-case token of two or more labels ending in a top-level domain of `TOP_LEVEL_DOMAINS`
-//     or a two-letter country code, never a file name (`Cart.js`, `dw.json`, an extension of
-//     `FILE_EXTENSIONS`), a `dw.*` name or a Java package                -> `<host>`
+//     or a two-letter country code (three labels or more on a two-letter or word-like ending,
+//     `WORD_LIKE_DOMAINS`), never a file name (`Cart.js`, `dw.json`, an extension of
+//     `FILE_EXTENSIONS`), a `dw.*` name, a Java package or a script expression (`request.site`,
+//     `this.store`, `logger.info`: `PACKAGE_ROOTS`)                    -> `<host>`
 //   - IP addresses, version 4 and 6                                  -> `<ip>`
 //   - quoted values (`"…"`, `'…'`)                                   -> `<q>`, except a quoted script
 //     path (`'app_x/cartridge/controllers/Cart.js'`), kept: it says which script failed
@@ -35,11 +37,13 @@
 //   - request and session ids: words of 12 or more characters that look random (letters of both
 //     cases and a digit, or lower case and two digits; never one with `_`, so a named constant
 //     such as `PAYMENT_PROC_V2` stays, nor a class name such as `Base64Encoder`) -> `<id>`
-//   - a `LETTERS-digits` token (`SKU-123456`, `GB-00012345`, `ORA-00001`), whole -> `<code>`
+//   - a `LETTERS-digits` token (`SKU-123456`, `GB-00012345`), whole           -> `<code>`, but a
+//     code of the platform's own (`ISH-CORE-2368`, `ORA-00001`), kept with its number
 //   - every other number                                             -> `#`. Only two kinds of
 //     number are kept, as they say which error it is and hold nothing of a customer: an HTTP
-//     status (100 to 599) right after `status`, `status code`, `statusCode` or `HTTP` (`status
-//     404`, `HTTP/1.1 503`, `statusCode=429`), and an error code right after `error code`,
+//     status (100 to 599) right after `status`, `status code`, `statusCode`, `HTTP`, `response`,
+//     `response code` or `responded with` (`status 404`, `HTTP/1.1 503`, `Response 401`), and an
+//     error code right after `error code`,
 //     `errorCode` or `error-code`. A bare `code` keeps nothing: an order, a gift card, a postal
 //     code or a one-time code is a customer's value.
 //   - runs of white space                                            -> one space
@@ -95,7 +99,16 @@ export const FILE_EXTENSIONS: readonly string[] = [
 const NOT_HOST_ENDINGS = new Set(['id', 'in', 'is', 'it', 'to', 'do', 'be', 'me', 'no', 'or', 'as', 'at', 'us', 'on', 'my', 'so', 'an', 'am', 'by', 'of', 'up', 'if', 'go'])
 
 /** First labels that name a package, not a host: `dw.order.Basket`, `java.io.File`. */
-const PACKAGE_ROOTS = new Set(['dw', 'java', 'javax', 'jdk', 'sun', 'org', 'com', 'net', 'io', 'jakarta', 'custom', 'system'])
+const PACKAGE_ROOTS = new Set([
+  'dw', 'java', 'javax', 'jdk', 'sun', 'org', 'com', 'net', 'io', 'jakarta', 'custom', 'system',
+  // The usual roots of a script expression: `request.site`, `this.store`, `logger.info`.
+  'this', 'self', 'request', 'response', 'session', 'customer', 'basket', 'cart', 'order', 'product', 'payment', 'site',
+  'pdict', 'res', 'req', 'module', 'exports', 'window', 'document', 'global', 'process', 'console', 'logger', 'log',
+  'config', 'options', 'params', 'args', 'result', 'event', 'error', 'err', 'utils', 'helpers'
+])
+
+/** Top-level domains that are also ordinary words (`logger.info`, `this.store`): a host on one needs three labels. */
+const WORD_LIKE_DOMAINS = new Set(['app', 'info', 'site', 'store', 'shop', 'local', 'online', 'cloud', 'dev', 'global', 'internal', 'tech'])
 
 const HOST = /(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24})(?::\d{1,5})?(?![\w.@-]*[\w@])/g
 
@@ -105,6 +118,12 @@ function hostOrNot(token: string, tld: string): string {
   if (labels.length < 2) return token
   if (FILE_EXTENSIONS.includes(tld) || NOT_HOST_ENDINGS.has(tld) || PACKAGE_ROOTS.has(labels[0])) return token
   if (!(TOP_LEVEL_DOMAINS.includes(tld) || tld.length === 2)) return token
+  // On a word-like or a two-letter ending, two labels read as a property (`config.local`): a host
+  // needs three (`shop.example.de`). A two-letter first label with a two-letter or word-like
+  // ending is a package written backwards (`de.example.ui`).
+  const weak = WORD_LIKE_DOMAINS.has(tld) || tld.length === 2
+  if (weak && labels.length < 3) return token
+  if (weak && labels[0].length === 2) return token
   return '<host>'
 }
 
@@ -125,7 +144,10 @@ function looksRandom(word: string): boolean {
 }
 
 /** The label right before an HTTP status. `HTTP/1.1` is a label, its version digits are not kept. */
-const STATUS_LABEL = /(?:\bstatus(?:\s*code)?|\bstatusCode|\bHTTP(?:\/\d(?:\.\d)?)?)\s*[:=]?\s*$/i
+const STATUS_LABEL = /(?:\bstatus(?:\s*code)?|\bstatusCode|\bHTTP(?:\/\d(?:\.\d)?)?|\bresponse(?:\s*code)?|\bresponded\s+with)\s*[:=]?\s*$/i
+/** The platform's own codes, which never hold a customer's value: `ISH-CORE-2368`, `ORA-00001`. */
+const VENDOR_CODE = /^(?:ISH(?:-[A-Z]+)+|ORA)-\d+$/
+const VENDOR_CODE_PREFIX = /\b(?:ISH(?:-[A-Z]+)+|ORA)-$/
 /** The label right before an error code. */
 const ERROR_CODE_LABEL = /\berror(?:\s*|-)?code\s*[:=]?\s*$/i
 
@@ -137,6 +159,7 @@ function numbers(text: string): string {
     const whole = !/\w/.test(text[offset + digits.length] ?? '')
     if (whole &&/^[1-5]\d\d$/.test(digits) && STATUS_LABEL.test(before)) return digits
     if (whole && ERROR_CODE_LABEL.test(before)) return digits
+    if (whole && VENDOR_CODE_PREFIX.test(before)) return digits
     return '#'
   })
 }
@@ -169,7 +192,7 @@ const RULES: readonly Rule[] = [
   [/\b[\w-]{12,}\b/g, (word) => (looksRandom(word) ? '<id>' : word)],
   // A code of letters and a number (`SKU-123456`, `GB-00012345`, `ISH-CORE-2368`), whole: its
   // number may be a customer's (an order, a gift card, a product).
-  [/\b[A-Z]{1,10}(?:-[A-Z]{1,10})*-\d+\b/g, '<code>']
+  [/\b[A-Z]{1,10}(?:-[A-Z]{1,10})*-\d+\b/g, (token) => (VENDOR_CODE.test(token) ? token : '<code>')]
 ]
 
 /** A text with what varies removed, by the rules above. */

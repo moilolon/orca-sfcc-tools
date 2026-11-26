@@ -58,6 +58,11 @@ test('the reviewer’s collisions: each pair is two errors', () => {
     // And more of the same kind.
     [noTrace('Cart-Show', 'custom.Service', 'HTTP/1.1 502 from upstream'), noTrace('Cart-Show', 'custom.Service', 'HTTP/1.1 504 from upstream')],
     [noTrace('Cart-Show', 'custom.Service', 'call failed with status code 401'), noTrace('Cart-Show', 'custom.Service', 'call failed with status code 403')],
+    [noTrace('Cart-Show', 'custom.Service', 'Response 401 Unauthorized'), noTrace('Cart-Show', 'custom.Service', 'Response 403 Forbidden')],
+    [noTrace('Cart-Show', 'custom.Service', 'Service responded with 401'), noTrace('Cart-Show', 'custom.Service', 'Service responded with 403')],
+    [noTrace('Cart-Show', 'custom.Service', 'Bad response code: 500'), noTrace('Cart-Show', 'custom.Service', 'Bad response code: 502')],
+    [noTrace('Cart-Show', 'system.core', 'ISH-CORE-2368 Error executing script'), noTrace('Cart-Show', 'system.core', 'ISH-CORE-2482 Error executing script')],
+    [noTrace('Cart-Show', 'custom.Db', 'ORA-00001 unique constraint'), noTrace('Cart-Show', 'custom.Db', 'ORA-01400 unique constraint')],
     [noTrace('Cart-Show', 'custom.Service', 'rejected with statusCode=429'), noTrace('Cart-Show', 'custom.Service', 'rejected with statusCode=400')],
     [noTrace('Cart-Show', 'custom.Db', 'insert failed, errorCode=1400'), noTrace('Cart-Show', 'custom.Db', 'insert failed, errorCode=2291')],
     [noTrace('Cart-Show', 'custom.Codec', 'Base64Encoder failed'), noTrace('Cart-Show', 'custom.Codec', 'Base64Decoder failed')],
@@ -99,6 +104,25 @@ test('numbers of a customer or a business never survive: SKUs, orders, gift card
     assert.ok(!/\d/.test(normalize(a)) && !/\d/.test(normalize(b)), `no digit of ${a} survives`)
     assert.equal(signatureOf(line(a)).signature, signatureOf(line(b)).signature, `${a} / ${b}`)
   }
+})
+
+test('a status right after response, and the platform’s own codes, keep their number; a customer’s still does not', () => {
+  const cases: [string, string][] = [
+    ['Response 401 Unauthorized', 'Response 401 Unauthorized'],
+    ['Service responded with 403', 'Service responded with 403'],
+    ['Bad response code: 500', 'Bad response code: 500'],
+    ['Response time 503 ms', 'Response time # ms'],
+    ['response 12345 received', 'response # received'],
+    ['response for order 404', 'response for order #'],
+    ['ISH-CORE-2368 Error executing script', 'ISH-CORE-2368 Error executing script'],
+    ['ISH-ORM-12 failed', 'ISH-ORM-12 failed'],
+    ['ORA-01400 cannot insert', 'ORA-01400 cannot insert'],
+    ['Payment failed for order GB-00012345', 'Payment failed for order <code>'],
+    ['Product SKU-123456 not found', 'Product <code> not found'],
+    ['Order ORD-778899 not found', 'Order <code> not found'],
+    ['Gift card ISH-40021 rejected', 'Gift card <code> rejected']
+  ]
+  for (const [input, expected] of cases) assert.equal(normalize(input), expected, input)
 })
 
 test('only an HTTP status after its label, or an error code after its label, keeps its number', () => {
@@ -156,6 +180,34 @@ test('a host without a scheme becomes <host>; a file, a dw name or a Java packag
     'logger custom.Cart and system.core'
   ]
   for (const input of kept) assert.equal(normalize(input), input, input)
+})
+
+test('a script expression is never a host; a host of three labels on a word-like or country ending still is', () => {
+  const expressions = [
+    'logger.info is null',
+    'request.site is null',
+    'this.store is null',
+    'config.local is null',
+    'window.app is null',
+    'basket.shop is null',
+    'payment.gateway.ok is null',
+    'de.example.ui is null',
+    'session.custom.cart is null',
+    'pdict.basket.total is null',
+    'module.exports is null',
+    'mailhost.internal is null'
+  ]
+  for (const input of expressions) assert.equal(normalize(input), input, input)
+  const line = (text: string) => `PipelineCallServlet|1|Sites-A-Site|Cart-Show|PipelineCall|s custom.Cart ${text}`
+  assert.notEqual(signatureOf(line('request.site is null')).signature, signatureOf(line('this.store is null')).signature)
+  const hosts: [string, string][] = [
+    ['Connection to shop.example.de refused', 'Connection to <host> refused'],
+    ['Connection to storefront.example.shop refused', 'Connection to <host> refused'],
+    ['Connection to cdn.example.io refused', 'Connection to <host> refused'],
+    ['Connection to shop.example.com refused', 'Connection to <host> refused'],
+    ['Connection to fr.shop.example.com refused', 'Connection to <host> refused']
+  ]
+  for (const [input, expected] of hosts) assert.equal(normalize(input), expected, input)
 })
 
 test('IPv6 addresses become <ip>; a time does not', () => {
@@ -230,8 +282,8 @@ test('normalize removes each volatile part, and keeps the words around it', () =
     ['HTTP/1.1 503 from upstream', 'HTTP/#.# 503 from upstream'],
     ['statusCode=429 after 3 tries', 'statusCode=429 after # tries'],
     ['failed with error code 17', 'failed with error code 17'],
-    ['Response 502 Bad Gateway after 1200 ms', 'Response # Bad Gateway after # ms'],
-    ['ISH-CORE-2368 and ORA-00001 raised', '<code> and <code> raised'],
+    ['Response 502 Bad Gateway after 1200 ms', 'Response 502 Bad Gateway after # ms'],
+    ['ISH-CORE-2368 and ORA-00001 raised', 'ISH-CORE-2368 and ORA-00001 raised'],
     ["Error executing script 'app_x/cartridge/controllers/Cart.js#42': boom", "Error executing script 'app_x/cartridge/controllers/Cart.js': boom"],
     ['GET /on/demandware.store/Cart-Show?pid=12&qty=1 failed', 'GET /on/demandware.store/Cart-Show failed'],
     ['request 3f6c2a9e-1b7d-4c5e-9a0f-2d8e6b4c1a37 failed', 'request <uuid> failed'],

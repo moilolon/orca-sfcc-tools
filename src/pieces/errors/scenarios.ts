@@ -18,7 +18,7 @@ function rows(now: number): ErrorRow[] {
       lastSeen: now - 4 * MINUTE,
       count: 27,
       markedAt: null,
-      message: "<code> Error executing script 'app_example/cartridge/controllers/Cart.js': TypeError: Cannot read property <q> of undefined (app_example/cartridge/scripts/helpers/cartHelper.js) at /on/demandware.store/<site>/<locale>/Cart-AddProduct",
+      message: "ISH-CORE-2368 Error executing script 'app_example/cartridge/controllers/Cart.js': TypeError: Cannot read property <q> of undefined (app_example/cartridge/scripts/helpers/cartHelper.js) at /on/demandware.store/<site>/<locale>/Cart-AddProduct",
       logger: 'system.core',
       frames: [
         { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'calculateLineTotal', line: 118, openable: true },
