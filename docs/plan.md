@@ -4,7 +4,7 @@ How the plugin gets built: what each phase delivers, what it leaves out, where i
 what it promises the rest, how it is proven, and what has to be answered first. This file
 describes the current plan only; when the plan changes, the text changes with it.
 
-Status: **nothing is built yet.** No phase starts until this plan is approved.
+What is built is what `main` holds; this file is the plan for the rest.
 
 ## 1. Ground rules
 
@@ -49,7 +49,8 @@ Facts taken from the plugin guide of the installed Orca; the design below is bui
 - Loading a plugin that runs code needs the owner's approval, and so does every later change
   to its commands or access list. Unit tests, `plugin check` and `plugin validate` need none.
 - A worker that owns a status bar item is kept running while the plugin is enabled. A worker
-  restart drops its memory.
+  restart drops its memory. It runs with a trimmed environment: no `APPDATA`, no Orca variables,
+  and Orca's install folder as its working folder.
 - Panels and editors have no network and import only `orca` and relative files; there is no
   bundler. The repository ships no `node_modules`.
 
@@ -68,6 +69,7 @@ src/pieces/<piece>/
   protocol.ts               its requests and panel events
   worker.ts                 its worker half
   section.tsx               its panel section
+  scenarios.ts              its states for `plugin check` and for captures
   i18n.ts                   its English and Spanish texts
   *.test.ts                 tests beside each module
 data/dw-api.json            the committed dw.* index
@@ -88,15 +90,15 @@ the script again.
 
 | Module | Promise |
 | --- | --- |
-| `piece.ts` | `WorkerPiece { id; activate(ctx): Disposable \| void }` and `PanelSection { id; title; icon; render() }`. `ctx` carries the worker API, the `b2c` runner, settings, the store, the translator and a logger. |
-| `b2c.ts` | The only place that starts `b2c`. `run(args, { role, cwd, signal, timeoutMs })` for one-shot commands (adds `--json`), `start(args, …)` for long-lived ones. It puts the role's host and credentials in the environment of the process (`SFCC_SERVER`, `SFCC_CLIENT_ID`, …), never in its arguments, and tells `b2c` to load no configuration file of its own. |
+| `piece.ts` | `WorkerPiece { id; activate(ctx): Disposable \| void }` and `PanelSection { id; title; icon; delivered; setup?(ctx); render() }`. `ctx` carries the worker API, the `b2c` runner, settings, the store, the translator and a logger. A section listens to its own events in `setup`, says itself whether its piece is delivered, and brings its own scenarios, so delivering a piece changes nothing outside its folder but the generated manifest. |
+| `b2c.ts` | The only place that starts `b2c`. `run(args, { role, cwd, signal, timeoutMs })` for one-shot commands (adds `--json`), `start(args, …)` for long-lived ones. It puts the role's host and credentials in the environment of the process (`SFCC_SERVER`, `SFCC_CLIENT_ID`, …), never in its arguments, tells `b2c` to load no configuration or `.env` file of its own, and pins the authentication methods. It starts no instance command for a role without credentials, sets the working folder itself, and takes only exit 0 as success. It runs only the commands and flags on its own lists, and refuses an argument a command shim could turn into another command. `start()` hands its caller the error stream line by line, the output stream as raw chunks, and the input stream. What the runner hands out or logs has every value read from `dw.json` masked; `mask(text)` does the same for whatever a piece wants to show, and `isHost(role, value)` lets a piece find its own instance in a list without holding the host. |
 | `dw-config.ts` | The only place that reads `dw.json`: the one at the root of the workspace, or of the project's main checkout when a worktree has none; a setting can name another file. It answers `resolve(role)` with what `b2c.ts` needs and exposes nothing else: other modules learn only whether a role is configured. |
-| `instances.ts` | Four roles: `sandbox`, `development`, `staging`, `production`. The sandbox uses the plain keys of `dw.json` (`hostname`, `client-id`, …); each other role uses the same keys with a suffix, a setting per role (`-dev`, `-stg` and `-prd` by default). A guard in the runner allows `code`, `debug` and sandbox commands on the `sandbox` role only; the other roles accept `logs` and nothing else. The guard is tested with a fake process. |
+| `instances.ts` | Four roles: `sandbox`, `development`, `staging`, `production`. The sandbox uses the plain keys of `dw.json` (`hostname`, `client-id`, …); each other role uses the same keys with a suffix, a setting per role (`-dev`, `-stg` and `-prd` by default). A guard in the runner is a list of whole commands per role: on the sandbox, `code list`, `deploy`, `watch`, `activate` and `delete`, `logs get`, `list` and `tail`, `sandbox list`, `start` and `stop`, and `debug`; on the other roles the three `logs` commands and nothing else. The guard is tested against every command `b2c` has. |
 | `settings.ts` | Typed reads of the plugin's settings and change notifications. |
 | `store.ts` | Typed access to the plugin's own storage, one namespace per piece. |
 | `workspaces.ts` | The workspace list, and the workspace that uploads (read by `sandbox`, `debugger` and `engine`). |
 | `i18n.ts` | `t(key, vars)` over per-piece tables; Spanish must have every English key (enforced by types). Worker error codes are worded by the panel. |
-| `open-file.ts` | Opens a file of a workspace at a line (added once spike S2 answers). |
+| `open-file.ts` | Opens a file of a workspace at a line, through `orca file open` with the workspace named explicitly. Lands with phase 3, the first to use it. |
 
 Panel and worker talk only through requests and events declared in a piece's `protocol.ts`.
 Request names are prefixed with the piece id (`sandbox.status`, `errors.list`, …).
@@ -151,23 +153,29 @@ hosts.
 ## 5. Spikes
 
 A spike delivers yes or no with the proof, and what changes if the answer is no. Spike code is
-thrown away; the answer is written into this table.
+thrown away; an answered spike moves to the second table with what follows from it.
+
+### Open
 
 | Id | Question | Before | If no |
 | --- | --- | --- | --- |
 | S1 | Can a worker drive `b2c debug` (a DAP adapter) over stdio: initialize, attach, set a breakpoint, list threads? | 5 | Phase 5 stops; the transport the adapter does offer is proposed. |
-| S2 | Can a worker start `orca file open --line`, and how does it find the executable? | 3, 5, 6.5 | Files open with `editor.open` and the line is shown in the panel. |
 | S3 | Can the open document be matched to its file from its text alone, including identical copies in several cartridges and unsaved edits, and with the path `editor.save.before` gives? | 7 | The editor is opened through a plugin command that records the path, and a tab opened another way asks which file it is. |
 | S4 | Do `.js`, `.xml` and `.properties` open directly in a plugin editor, or only as an alternative view? | 7 | The editor is the default for `.isml` only; the other types are reached from the view toggle and their findings from the problems section. |
 | S5 | Can hosted runners download the public Script API pages without being limited, is their structure stable enough to parse, and do their terms allow committing short descriptions? | 6.1 | The generator runs locally on demand and the workflow only reminds; or descriptions are left out of the committed index and read through `b2c docs` at run time. |
-| S6 | What do `b2c docs read`, `b2c logs get`, `b2c code list`, `deploy`, `watch`, `activate` and `delete` print with `--json`, and with which exit codes? Does `b2c` authenticate for each role with host and credentials given only in the environment and no configuration file? | 0, 2, 3, 6.1 | The shapes are delivered as invented fixtures either way. If the environment is not enough, phase 0 stops: passing credentials as arguments would show them to every local process, so the alternative (a configuration file per role, written by the owner) is put to the owner. |
-| S7 | Can the state of the sandbox (started, stopped, starting) be read, and the sandbox started and stopped, from what `dw.json` holds? | 2 | Status shows whether the instance answers and its active code version; start and stop are dropped. |
 | S8 | Where can the seen list live so that the worker and a command line run outside Orca both read and write it, and how does a bot run call that command line? | 4 | The seen list moves to a file in the user's data folder that both open. |
 | S9 | Is an editing surface written here (text layer, highlight layer, gutter, pop-ups) good enough inside an editor frame: typing latency on a 3,000-line file, undo, selection, composition input? | 7 | Phase 7 stops and vendoring an open-source editor component is put to the owner, since it bends rule 1. |
 
-S1, S6 and S7 run against the sandbox. S2, S3, S4 and S9 share one throwaway plugin so
-the owner approves a spike plugin once. S5 needs a workflow run, so it waits for the owner like
-any workflow.
+S1 runs against the sandbox. S3, S4 and S9 reuse the throwaway plugin the owner already
+approved. S5 needs a workflow run, so it waits for the owner like any workflow.
+
+### Answered
+
+| Id | Question | Answer | What follows |
+| --- | --- | --- | --- |
+| S2 | Can a worker start `orca file open --line`? | Yes, with two conditions. The worker's environment has no `APPDATA` and its working folder is Orca's install folder, so the call needs `APPDATA` set and the workspace named with `--worktree path:<root>`. The executable is beside Orca's own and on the worker's `PATH`. | `core/open-file.ts` does exactly that. The cursor position is not echoed in the answer: it is confirmed by eye in the first live check that uses it (phase 3). |
+| S6 | What does `b2c` print with `--json`, and does it authenticate from the environment alone? | Yes for all four roles, with no configuration file. With no credentials `b2c` does not fail: it opens a browser sign-in. Results are JSON on stdout only on success; `activate`, `delete` and `watch` print none; errors are JSON on stderr only sometimes; a failure can exit with any non-zero code. `code watch` streams one JSON event per line on stderr with `--jsonl`. A log entry is one error with its whole stack trace inside `message`, with no separate site or stack fields. `docs read` returns Markdown text and matches a wrong name to another class without failing. | The runner never starts an instance command without credentials and pins the authentication methods; it treats only exit 0 as success. Phase 2 reads `code watch` from stderr. Phase 3 parses site and stack out of the message and sorts entries itself. Phase 6.1 cannot take structure from `docs read`: it serves the long text of a hover, checked against the id asked. |
+| S7 | Can the state of the sandbox be read from what `dw.json` holds? | Yes, through `b2c sandbox list`, matching the entry whose host equals the configured one. `b2c sandbox get` cannot be trusted: where a deleted sandbox shares its identifier with the live one, it returns the deleted record. | Phase 2 reads the state from the list. Start and stop are fired without waiting on `b2c` and followed on the list; whether they work with these credentials is checked once, supervised, in phase 2's live run. If the list is refused for lack of permission, the state shows as unknown. |
 
 ## 6. Phases
 
@@ -186,7 +194,11 @@ stub of every piece and both registries, development scripts (`typecheck`, `test
 `src/panel/{panel.tsx,sections.ts,panel.check.ts}`, `src/pieces/*/` stubs, `package.json`,
 `tsconfig.json`, `.gitignore`.
 
-**Contract.** Section 3. Plus `core.status → { b2c: { found, version }, instances: { [role]: boolean }, pieces: string[] }`.
+**Contract.** Section 3. Plus
+`core.status → { b2c: { found, version }, config, instances: { [role]: state }, pieces: string[] }`,
+where `config` says whether `dw.json` is there and valid, and a role is `ready`, `incomplete` (a
+host without usable credentials) or `absent`. The runner accepts only the flags on its own list:
+none that names a host, a user, a credential, a configuration file or a sign-in method.
 
 **Accepted when.**
 - The four checks pass, and the committed manifest equals the merge of its fragments.
@@ -203,11 +215,14 @@ stub of every piece and both registries, development scripts (`typecheck`, `test
 - `CLAUDE.md` documents how to take captures and load the plugin when several worktrees hold
   a copy of it.
 
-**Spikes.** S6, for the part about authenticating from the environment.
+**Spikes.** S6, answered.
 
 **Risks.** The plugin holds credentials in memory, production's included, for as long as a
 command runs: an error path that prints its environment would leak them, hence the test above.
-`b2c` is a command shim on Windows, which Node will not start without care. Orca may
+`b2c` is a command shim on Windows, which Node will not start without care; a shim put there by
+a version manager can also split an argument at its spaces and expand `%NAME%` before `b2c`
+sees it, whatever the plugin does, so the runner passes folders as the working folder instead of
+as arguments wherever it can, and the setting `b2cPath` can point past the shim. Orca may
 treat copies of the plugin in several worktrees as one development plugin. Manifest titles
 (commands, settings) can only be in one language: they are English, and only panel and
 notification texts are translated.
@@ -222,6 +237,7 @@ expressions, `<isscript>` blocks, ISML and HTML comments; and the language confi
 comes from the engine in phase 7).
 
 **Files.** `src/pieces/isml/{manifest.json,isml.tmLanguage.json,language-configuration.json}`,
+`src/pieces/isml/{section.tsx,scenarios.ts,i18n.ts}` (to show the piece as delivered),
 `src/pieces/isml/grammar.test.ts`, `src/pieces/isml/fixtures/*.isml`.
 
 **Contract.** Language id `isml`, scope `text.html.isml`. Nothing else depends on it.
@@ -269,7 +285,7 @@ does not orphan it.
   nothing.
 - Captures of the status bar and of the panel section in each state.
 
-**Spikes.** S6, S7.
+**Spikes.** S6 and S7, both answered.
 
 **Risks.** A full deploy on every switch is slow on a large checkout. The active code version
 cannot be deleted: when the uploading workspace is removed, its version is deleted once another
@@ -303,7 +319,7 @@ file and function.
   stops being new once marked.
 - Captures of the section with new, seen and no errors, and of the counter.
 
-**Spikes.** S6, S2 (to open the file of a stack frame).
+**Spikes.** S6 and S2, both answered.
 
 **Risks.** A signature that is too loose hides a new error; one that is too tight repeats an
 old one: the rules are documented beside the code and tuned on fixtures. Storage size: only a
@@ -459,16 +475,12 @@ measured in 7.2. Identical files in several cartridges make S3 ambiguous by natu
 ```mermaid
 graph TD
   PLAN[Plan approved] --> P0[0 Base]
-  PLAN --> S2 & S6 & S7
   P0 --> P1[1 ISML]
   P0 --> P2[2 Sandbox and upload]
   P0 --> P3[3 Errors]
   P0 --> P5[5 Debugger]
   P0 --> P61[6.1 dw index]
   P0 --> P62[6.2 Syntax]
-  S6 --> P2 & P3 & P61
-  S7 --> P2
-  S2 --> P3 & P5 & P65
   S1 --> P5
   S5 --> P61
   P3 --> P4[4 Bot]
@@ -488,7 +500,7 @@ approves, live check, merge, report.
 
 | Wave | In parallel (at most four workers) | Waits for the owner |
 | --- | --- | --- |
-| 1 | 0, S2, S6, S7 | approval of the spike plugin and of the plugin |
+| 1 | 0 | approval of the plugin |
 | 2 | 1, 2, 3, S1 | activation on the sandbox |
 | 3 | 5, 6.1, 6.2, S8 (and S5 before 6.1) | the workflow of 6.1 and the run S5 needs |
 | 4 | 4, 6.3, then 6.4, with S3, S4 and S9 alongside | the bot and its automation |
