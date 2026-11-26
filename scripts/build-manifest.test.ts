@@ -51,6 +51,64 @@ test('refuses a fragment that reaches outside contributes, or repeats an id', ()
   assert.throws(() => mergeManifest(BASE, [{ piece: 'bad', manifest: { contributes: { commands: {} } } }]), /must be a list/)
 })
 
+test('two pieces may declare the same hook or event: it is emitted once, where the first one put it', () => {
+  const save = { event: 'editor.save.before', onError: 'pass' }
+  const merged = mergeManifest(BASE, [
+    { piece: 'editor', manifest: { contributes: { hooks: [save, { event: 'agent.tool.after' }], events: [{ on: 'workspace.removed' }] } } },
+    // The same entries, with their keys in another order.
+    { piece: 'engine', manifest: { contributes: { hooks: [{ onError: 'pass', event: 'editor.save.before' }], events: [{ on: 'workspace.removed' }, { on: 'workspace.created' }] } } },
+    { piece: 'sandbox', manifest: { contributes: { events: [{ on: 'workspace.removed' }] } } }
+  ])
+  const contributes = merged.contributes as Record<string, unknown>
+  assert.deepEqual(contributes.hooks, [save, { event: 'agent.tool.after' }])
+  assert.deepEqual(contributes.events, [{ on: 'workspace.removed' }, { on: 'workspace.created' }])
+  // One the base already declares is shared the same way.
+  const withBase = mergeManifest({ ...BASE, contributes: { hooks: [save] } }, [{ piece: 'engine', manifest: { contributes: { hooks: [save] } } }])
+  assert.deepEqual((withBase.contributes as Record<string, unknown>).hooks, [save])
+})
+
+test('the same hook or event with different options fails, naming both pieces', () => {
+  assert.throws(
+    () =>
+      mergeManifest(BASE, [
+        { piece: 'editor', manifest: { contributes: { hooks: [{ event: 'editor.save.before', onError: 'deny' }] } } },
+        { piece: 'engine', manifest: { contributes: { hooks: [{ event: 'editor.save.before', onError: 'pass' }] } } }
+      ]),
+    /engine: contributes\.hooks "editor\.save\.before" differs from the one editor declares/
+  )
+  assert.throws(
+    () =>
+      mergeManifest(BASE, [
+        { piece: 'editor', manifest: { contributes: { hooks: [{ event: 'editor.save.before' }] } } },
+        { piece: 'engine', manifest: { contributes: { hooks: [{ event: 'editor.save.before', onError: 'pass' }] } } }
+      ]),
+    /engine: contributes\.hooks "editor\.save\.before" differs from the one editor declares/
+  )
+  assert.throws(
+    () => mergeManifest({ ...BASE, contributes: { events: [{ on: 'workspace.removed' }] } }, [{ piece: 'sandbox', manifest: { contributes: { events: [{ on: 'workspace.removed', extra: true }] } } }]),
+    /sandbox: contributes\.events "workspace\.removed" differs from the one the base declares/
+  )
+  // Sharing is for hooks and events only: a command or a setting still belongs to one piece.
+  assert.throws(
+    () =>
+      mergeManifest(BASE, [
+        { piece: 'one', manifest: { contributes: { statusBarItems: [{ id: 's' }] } } },
+        { piece: 'two', manifest: { contributes: { statusBarItems: [{ id: 's' }] } } }
+      ]),
+    /two: contributes\.statusBarItems already has id "s"/
+  )
+})
+
+test('typecheck writes Orca’s typings itself, so it passes on a clean clone after npm install', () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  // tsconfig.json extends a file that only `orca plugin types` writes, and .orca/ is not committed.
+  const tsconfig = JSON.parse(readFileSync(join(ROOT, 'tsconfig.json'), 'utf8'))
+  assert.equal(tsconfig.extends, './.orca/types/tsconfig.json')
+  assert.match(readFileSync(join(ROOT, '.gitignore'), 'utf8'), /^\.orca\/$/m)
+  assert.match(pkg.scripts.typecheck, /^orca plugin types \. && tsc -p \. --noEmit$/)
+  assert.equal(pkg.dependencies, undefined, 'no runtime dependencies')
+})
+
 test('the same pieces give the same file, whatever order the disk lists them in', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sfcc-tools-manifest-'))
   try {
