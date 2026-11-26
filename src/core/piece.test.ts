@@ -55,7 +55,13 @@ test('the registries list every piece, in the order of PIECE_IDS', () => {
     assert.ok(section.title('en'), section.id)
     assert.ok(section.title('es'), section.id)
     assert.equal(typeof section.delivered, 'boolean', section.id)
+    assert.equal(typeof section.hasView, 'boolean', section.id)
   }
+})
+
+test('ISML works in the editor only: its section has no view of its own in the panel', () => {
+  const isml = SECTIONS.find((section) => section.id === 'isml')
+  assert.equal(isml?.hasView, false)
 })
 
 test('src/protocol.ts imports the protocol of every piece that has one', () => {

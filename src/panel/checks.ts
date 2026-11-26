@@ -8,6 +8,7 @@ import { scenarios as engine } from '../pieces/engine/scenarios'
 import { scenarios as errors } from '../pieces/errors/scenarios'
 import { scenarios as isml } from '../pieces/isml/scenarios'
 import { scenarios as sandbox } from '../pieces/sandbox/scenarios'
+import { hostError } from 'orca/testing'
 import type { CoreStatus } from '../protocol'
 import { mergeScenarios, READY_STATUS, type PieceScenarios } from './scenarios'
 
@@ -36,6 +37,19 @@ const CORE_SCENARIOS: PieceScenarios = {
   /** A stubbed answer: a dw.json that is not JSON. */
   invalidConfig: {
     requests: { 'core.status': (): CoreStatus => ({ ...READY_STATUS, config: 'invalid', instances: NO_INSTANCES }) }
+  },
+  /** A stubbed answer, everything ready, with the configuration file named in Settings. */
+  customConfigFile: {
+    settings: { configFile: 'config/other-dw.json' },
+    requests: { 'core.status': (): CoreStatus => READY_STATUS }
+  },
+  /** The worker does not answer in time: the setup view's error state, with its retry. */
+  workerTimeout: {
+    requests: {
+      'core.status': (): CoreStatus => {
+        throw hostError('timeout')
+      }
+    }
   }
 }
 

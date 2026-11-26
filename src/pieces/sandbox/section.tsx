@@ -1,5 +1,5 @@
 // The sandbox piece's half of the panel, listed in src/panel/sections.ts. A stub until phase 2:
-// it draws nothing, and `delivered` is false, so the panel lists the piece as coming.
+// it draws nothing, and `delivered` is false, so the panel does not show it.
 import { t } from '../../core/i18n'
 import type { PanelSection } from '../../core/piece'
 import { messages } from './i18n'
@@ -9,5 +9,6 @@ export const section: PanelSection = {
   icon: 'cloud',
   title: (locale) => t(messages, locale, 'title'),
   delivered: false,
+  hasView: true,
   render: () => null
 }

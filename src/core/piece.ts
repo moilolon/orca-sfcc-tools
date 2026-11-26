@@ -68,14 +68,26 @@ export type PanelSection = {
   /** Words the piece's name in a locale. */
   title(locale: string): string
   readonly icon: IconName
-  /** Whether the piece does its job yet: the panel lists it as available, or as coming. */
+  /**
+   * Whether the piece does its job yet. A piece not delivered is not shown in the panel at all;
+   * a delivered one is listed in the setup view and, with `hasView`, gets a view of its own.
+   */
   readonly delivered: boolean
+  /**
+   * Whether the piece has something to show in the panel: a view of its own in the panel's bar,
+   * drawn by `render`. False for a piece that works elsewhere only (ISML colours the editor).
+   */
+  readonly hasView: boolean
   /**
    * Runs once when the panel opens, before the first draw: the place to listen to the piece's
    * own events (`plugin.on('sandbox.changed', …)`) and ask for its first state. What it pushes to
    * `ctx.subscriptions`, and the function it may return, are disposed with the panel.
    */
   setup?(ctx: PanelContext): void | (() => void)
-  /** The section's body; null while the piece has nothing to show. */
+  /**
+   * The body of the piece's view, built from the blocks of src/panel/ui.tsx; null while the piece
+   * has nothing to show (the panel then draws an empty state). Never called when `hasView` is
+   * false or the piece is not delivered.
+   */
   render(locale: string): OrcaNode
 }
