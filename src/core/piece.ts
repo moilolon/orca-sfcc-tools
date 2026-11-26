@@ -22,8 +22,12 @@ export type Workspaces = {
   list(): Promise<Workspace[]>
   /** The focused workspace, or null. Only for showing state, never for deciding what uploads. */
   focused(): Promise<Workspace | null>
+  /** The workspace picked by hand to upload to the sandbox (phase 2), or null. */
   uploading(): Promise<Workspace | null>
-  setUploading(workspaceId: string | null): Promise<void>
+  /** The uploading workspace and the code version it uploads to, or null while none uploads. */
+  upload(): Promise<{ workspace: Workspace; codeVersion: string } | null>
+  /** Only the sandbox piece calls it, when a workspace is picked or released. */
+  setUploading(workspaceId: string | null, codeVersion?: string | null): Promise<void>
   /**
    * Where to look for dw.json: the uploading workspace, else the focused one (so the panel can
    * show which environments are configured before anything uploads), else null. Null too when

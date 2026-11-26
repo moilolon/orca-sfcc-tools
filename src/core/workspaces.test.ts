@@ -41,6 +41,23 @@ test('keeps the host of each workspace, so a remote path is never taken for a lo
   assert.ok(!isLocal({ hostId: 'runtime:remote' }))
 })
 
+test('the uploading workspace comes with its code version, and both clear together', async () => {
+  const workspaces = workspacesOver([LOCAL, REMOTE], 'w2')
+  assert.equal(await workspaces.upload(), null)
+  await workspaces.setUploading('w1', 'ws-shop')
+  assert.deepEqual(await workspaces.upload(), { workspace: LOCAL, codeVersion: 'ws-shop' })
+  assert.deepEqual(await workspaces.uploading(), LOCAL)
+  await workspaces.setUploading('w1')
+  assert.equal(await workspaces.upload(), null, 'no version named: none is reported')
+  assert.deepEqual(await workspaces.uploading(), LOCAL)
+  await workspaces.setUploading('w1', 'ws-shop')
+  await workspaces.setUploading(null, 'ws-shop')
+  assert.equal(await workspaces.upload(), null)
+  assert.equal(await workspaces.uploading(), null)
+  await workspaces.setUploading('gone', 'ws-gone')
+  assert.equal(await workspaces.upload(), null, 'a workspace no longer listed uploads nothing')
+})
+
 test('dw.json is looked for in the uploading workspace, else the focused one, and only on this machine', async () => {
   assert.equal(await workspacesOver([LOCAL, REMOTE], 'w1').configRoot(), '/work/shop')
   assert.equal(await workspacesOver([LOCAL, REMOTE], 'w2').configRoot(), null, 'the focused workspace is remote')

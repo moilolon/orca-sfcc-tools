@@ -24,7 +24,8 @@ Changing it needs the owner's yes.
       `b2c.ts` (the only module that starts a process), `dw-config.ts` (the only module that
       reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
-      namespace per piece), `workspaces.ts`, `i18n.ts` (texts, English and Spanish).
+      namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
+      with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish).
       `test-support.ts` holds the invented `dw.json` and the fake process the tests use;
       `b2c-commands-fixture.ts` lists every command of the b2c the allow list was checked
       against, for the tests that walk it.
@@ -47,6 +48,12 @@ Changing it needs the owner's yes.
       expect nothing of what the pieces are today: keep them that way, and test a piece beside
       its own files. A section whose `setup` throws is shown as not started until the panel is
       opened again.
+    - `src/pieces/sandbox/`: `ownership.ts` (who uploads: none, deploying, watching,
+      uploading, failed; deletes the version of a removed workspace, deferred while active),
+      `code-version.ts` (`<prefix><slug>`, kept per workspace id), `uploader.ts` (reads
+      `code watch --jsonl` lines), `status.ts` (the sandbox state from `sandbox list`, start and
+      stop followed on it), `status-bar.ts` (its two items' texts), `worker.ts` (requests,
+      commands, `workspace.removed`); `testing.ts` holds the fakes its tests share.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
@@ -119,6 +126,10 @@ Changing it needs the owner's yes.
       `b2c.isHost(role, value)`, never by holding the host.
     - One workspace uploads, the one picked by hand; it never follows the focused workspace. A
       workspace on another host (`hostId` other than `local`) is never read as a local folder.
+      Picking deploys it whole to its own code version with `--activate`, then runs `code watch`
+      in it, with the workspace as the working folder and never its path as an argument.
+      Releasing leaves the version active; removing a workspace deletes its version once
+      another one is active; a worker restart restarts the watcher without a redeploy.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
       or customer data, in code, tests, fixtures, commit messages or pull requests. Fixtures are
       invented, with hosts under `example.com`. Never open or copy a real `dw.json`.

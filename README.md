@@ -25,8 +25,8 @@ one at a time.
 | | Piece | What it does |
 |---|---|---|
 | 🧩 | **ISML** | Colours `.isml` templates in Orca's editor: HTML, `<is…>` tags, `${…}` expressions, `<isscript>` and both kinds of comment |
-| ⬆️ | **Upload** | Uploads the cartridges to the sandbox on save, from one workspace at a time |
-| 🚦 | **Sandbox** | Its status and the active code version, in the status bar |
+| ⬆️ | **Upload** | Deploys the workspace you pick to a code version of its own, activates it and uploads every change after that; removing the workspace deletes its version |
+| 🚦 | **Sandbox** | Started, stopped or busy, with start and stop, and which workspace uploads to which code version, in the status bar |
 | 🪵 | **Errors** | The new errors of the sandbox log, apart from the ones already seen |
 
 ---
