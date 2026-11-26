@@ -113,10 +113,11 @@ export type RunResult = { stdout: string; stderr: string; json: unknown }
 
 /**
  * One line of a long-lived command's stderr: its JSON event, or the raw text. Both arrive
- * masked, once the line is whole: the text, and every string of the JSON, keys included (b2c
- * names the host in its messages). A JSON line nested deeper than `MAX_JSON_DEPTH` arrives as
- * its text. Only the values of dw.json are masked: a file
- * name, a code version or a cartridge name in an event is as b2c wrote it.
+ * masked, once the line is whole: the text, without its ANSI escape sequences, and every string
+ * of the JSON, keys included (b2c names the host in its messages). A JSON line nested deeper
+ * than `MAX_JSON_DEPTH` arrives as its text, each of its strings masked as the JSON's would be.
+ * Only the values of dw.json are masked: a file name, a code version or a cartridge name in an
+ * event is as b2c wrote it.
  */
 export type B2cEvent = { json: unknown } | { text: string }
 
@@ -392,20 +393,68 @@ function namesInstance(label: string): boolean {
   return label.length >= INSTANCE_LABEL && /[\d-]/.test(label)
 }
 
+/** What b2c's logger prints in place of the secret half of a Basic header it redacts. */
+const REDACTED = 'REDACTED'
+
+/** `text` as `application/x-www-form-urlencoded` writes it (a space is `+`). */
+function formEncoded(text: string): string {
+  return new URLSearchParams([['', text]]).toString().slice(1)
+}
+
 /**
- * The base64 of `user:password`, as an `Authorization: Basic` header carries it: the standard
- * and the URL-safe alphabets, each with and without its padding.
+ * The base64 of one `left:right` pair, as an `Authorization: Basic` header carries it: its
+ * UTF-8 bytes, and its Latin-1 bytes too when every character fits in one and they differ (what
+ * `btoa` encodes); each in the standard and the URL-safe alphabets, with and without padding.
+ * At most eight forms.
  */
-function basicPairs(user: string, password: string): string[] {
-  const padded = Buffer.from(`${user}:${password}`, 'utf8').toString('base64')
-  const bare = padded.replace(/=+$/, '')
+function base64Forms(pair: string): string[] {
+  const encodings = [Buffer.from(pair, 'utf8')]
+  if (/[\u0080-ÿ]/.test(pair) && !/[^\u0000-ÿ]/.test(pair)) encodings.push(Buffer.from(pair, 'latin1'))
   const urlSafe = (text: string) => text.replace(/\+/g, '-').replace(/\//g, '_')
-  return [...new Set([padded, bare, urlSafe(padded), urlSafe(bare)])]
+  return encodings.flatMap((bytes) => {
+    const padded = bytes.toString('base64')
+    const bare = padded.replace(/=+$/, '')
+    return [padded, bare, urlSafe(padded), urlSafe(bare)]
+  })
+}
+
+/**
+ * Every base64 form of the Basic pairs a role's values make, which b2c may print in a header:
+ * - `user:password` (the sandbox's sign-in) and `user:REDACTED` (b2c's own redaction of it);
+ * - `client-id:client-secret`, raw and with each half form-encoded (how the SDK signs in to
+ *   Account Manager by default), and `client-id:REDACTED` in both.
+ * Bounded: at most 48 forms per role.
+ */
+export function basicForms(vars: B2cEnvironment): string[] {
+  const pairs: string[] = []
+  const { SFCC_USERNAME: user, SFCC_PASSWORD: password, SFCC_CLIENT_ID: id, SFCC_CLIENT_SECRET: secret } = vars
+  if (user) {
+    if (password) pairs.push(`${user}:${password}`)
+    pairs.push(`${user}:${REDACTED}`)
+  }
+  if (id) {
+    if (secret) pairs.push(`${id}:${secret}`, `${formEncoded(id)}:${formEncoded(secret)}`)
+    pairs.push(`${id}:${REDACTED}`, `${formEncoded(id)}:${REDACTED}`)
+  }
+  return [...new Set([...new Set(pairs)].flatMap(base64Forms))]
+}
+
+/**
+ * ANSI escape sequences: colours and other CSI sequences, OSC sequences (a terminal title, a
+ * link) and the two-character escapes. A colour code ends in a letter (`ESC[1m`), which would
+ * leave a short value right after it no longer standing alone, and so unmasked.
+ */
+const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-Z\\-_]|\u009b[0-?]*[ -/]*[@-~]/g
+
+/** `text` without its ANSI escape sequences. */
+export function stripAnsi(text: string): string {
+  return text.includes('\u001b') || text.includes('\u009b') ? text.replace(ANSI, '') : text
 }
 
 /**
  * The position of the first argument that holds a value read from dw.json, or -1, in any letter
- * case. A value of eight characters or more is looked for anywhere in the argument; a shorter
+ * case. The runner passes the base64 forms of each role's Basic pairs (`basicForms`) among the
+ * values: whatever is masked may not go in an argument. A value of eight characters or more is looked for anywhere in the argument; a shorter
  * one only as the whole argument or the whole value of a `--flag=value`, so it does not block
  * unrelated ones.
  */
@@ -459,8 +508,9 @@ function percentEncoded(value: string): string {
  * - each value, as it is written in the file; a host in any letter case;
  * - the first label of a host, when it has six characters or more and holds a digit or a
  *   hyphen: it names the instance. A plain word (`staging`) is masked only within the host;
- * - the base64 of `user:password` when a role has both, as a Basic sign-in sends it, in the
- *   standard and the URL-safe alphabets, with and without padding;
+ * - the base64 of the Basic pairs of a role (`basicForms`): `user:password`,
+ *   `client-id:client-secret` raw and form-encoded, and each name with `REDACTED`; in UTF-8
+ *   and Latin-1, the standard and the URL-safe alphabets, with and without padding;
  * - the percent-encoded and the JSON-escaped form of a value, where they differ from it;
  * - `home`, the user's folder (its last part is usually the account name), as `~`.
  * A value shorter than eight characters is masked only where it stands alone: a user called
@@ -509,7 +559,7 @@ export function createMasker(home?: string) {
         if (host) hosts.add(value)
       }
       for (const [variable, value] of Object.entries(vars)) if (value) keep(value, variable === 'SFCC_SERVER')
-      if (vars.SFCC_USERNAME && vars.SFCC_PASSWORD) for (const pair of basicPairs(vars.SFCC_USERNAME, vars.SFCC_PASSWORD)) keep(pair, false)
+      for (const form of basicForms(vars)) keep(form, false)
     },
     /** `text` with everything remembered masked. Anything that is not a text comes back as it is. */
     mask(text: string): string {
@@ -524,7 +574,8 @@ export function createMasker(home?: string) {
 
 /**
  * How deep a JSON line of stderr is walked. b2c's events are a few levels deep; a line nested
- * further (twenty thousand brackets would overflow the stack) arrives as its raw text, masked.
+ * further (twenty thousand brackets would overflow the stack) arrives as its text, each of its
+ * strings masked (`maskJsonText`).
  */
 export const MAX_JSON_DEPTH = 100
 
@@ -537,14 +588,14 @@ class TooDeep extends Error {}
  * numbered. Throws `TooDeep` past `MAX_JSON_DEPTH` levels, before the stack runs out.
  */
 function maskDeep(value: unknown, mask: (text: string) => string, depth = 0): unknown {
-  if (typeof value === 'string') return mask(value)
+  if (typeof value === 'string') return mask(stripAnsi(value))
   if (!value || typeof value !== 'object') return value
   if (depth >= MAX_JSON_DEPTH) throw new TooDeep()
   if (Array.isArray(value)) return value.map((item) => maskDeep(item, mask, depth + 1))
   const used = new Set<string>()
   const entries: [string, unknown][] = []
   for (const [key, item] of Object.entries(value)) {
-    const masked = mask(key)
+    const masked = mask(stripAnsi(key))
     let name = masked
     for (let count = 2; used.has(name); count++) name = `${masked} ${count}`
     used.add(name)
@@ -553,18 +604,45 @@ function maskDeep(value: unknown, mask: (text: string) => string, depth = 0): un
   return Object.fromEntries(entries)
 }
 
+/** A string of a JSON text, quotes and escapes included. Linear: its two branches never overlap. */
+const JSON_STRING = /"(?:[^"\\]|\\.)*"/g
+
+/**
+ * The text of a JSON line too deep to walk, masked as the walk would mask it: each of its
+ * strings, keys included, is decoded, masked and encoded again. Masked as the raw text, a short
+ * value right after an escape (`\n`, `\t`, `é`) would follow a letter or a digit, no longer
+ * stand alone, and go through. Linear, with no recursion; a string seen twice is masked once.
+ */
+function maskJsonText(text: string, mask: (text: string) => string): string {
+  const seen = new Map<string, string>()
+  return text.replace(JSON_STRING, (token) => {
+    let masked = seen.get(token)
+    if (masked === undefined) {
+      try {
+        masked = JSON.stringify(mask(stripAnsi(JSON.parse(token) as string)))
+      } catch {
+        masked = mask(token)
+      }
+      seen.set(token, masked)
+    }
+    return masked
+  })
+}
+
 /**
  * One whole line of stderr as the event a caller gets: its JSON masked when the line parses and
- * is no deeper than `MAX_JSON_DEPTH`, else its text masked. Never throws on what b2c printed.
+ * is no deeper than `MAX_JSON_DEPTH`, else its text with each of its strings masked. A line
+ * that is not JSON loses its ANSI escape sequences, then is masked. Never throws on what b2c
+ * printed.
  */
 export function maskedEvent(line: string, mask: (text: string) => string): B2cEvent {
   const json = parseJson(line)
-  if (json === undefined) return { text: mask(line) }
+  if (json === undefined) return { text: mask(stripAnsi(line)) }
   try {
     return { json: maskDeep(json, mask) }
   } catch {
-    // Too deep to walk, or anything else a hostile line could cause: the raw text, masked.
-    return { text: mask(line) }
+    // Too deep to walk, or anything else a hostile line could cause: the text, masked string by string.
+    return { text: maskJsonText(line, mask) }
   }
 }
 
@@ -666,7 +744,10 @@ export function createB2c(deps: B2cDeps): B2c {
 
   /** Every value the file holds, of every role: none of them may be in an argument. */
   function valuesOf(config: LoadedConfig): string[] {
-    return ROLES.flatMap((each) => Object.values(config.roles[each].vars)).filter((value): value is string => !!value)
+    // The base64 forms of its Basic pairs count too: they are masked, so they may not go in an argument.
+    return ROLES.flatMap((each) => [...Object.values(config.roles[each].vars), ...basicForms(config.roles[each].vars)]).filter(
+      (value): value is string => !!value
+    )
   }
 
   async function readConfig(): Promise<LoadedConfig> {
@@ -792,7 +873,7 @@ export function createB2c(deps: B2cDeps): B2c {
               resolve({ stdout, stderr, json: parseJson(stdout) })
             } else {
               const message = errorMessageOf(stderr)
-              reject(new B2cError('b2c_failed', { exitCode, detail: message === null ? null : prepared.mask(message) }))
+              reject(new B2cError('b2c_failed', { exitCode, detail: message === null ? null : prepared.mask(stripAnsi(message)) }))
             }
           })
         })

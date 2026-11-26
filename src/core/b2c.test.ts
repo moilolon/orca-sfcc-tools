@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import {
   argumentWithValue,
   B2cError,
+  basicForms,
   childEnvironment,
   commandFor,
   createB2c,
@@ -21,6 +22,7 @@ import {
   parseVersion,
   quoteWindowsArgument,
   resolveExecutable,
+  stripAnsi,
   unsafeShimArgument,
   type B2c,
   type B2cEvent,
@@ -528,6 +530,27 @@ test('refuses any argument that holds a value of dw.json, whichever role it belo
     assert.equal(calls.length, 0)
   }))
 
+test('refuses an argument that holds any masked base64 form of a Basic pair of the file, whichever role it belongs to', () =>
+  withWorkspace(async (root) => {
+    const { b2c, calls } = runner(root)
+    const b64 = (pair: string) => Buffer.from(pair).toString('base64')
+    const userPair = b64(`${INVENTED_DW.username}:${INVENTED_DW.password}`)
+    const prdPair = b64(`${INVENTED_DW['client-id-prd']}:${INVENTED_DW['client-secret-prd']}`)
+    const refused: [Role, string[], number][] = [
+      ['sandbox', ['code', 'activate', userPair], 2],
+      ['sandbox', ['logs', 'get', `--search=${userPair.replace(/=+$/, '')}`], 2],
+      ['sandbox', ['logs', 'get', '--search', `Basic ${prdPair}`], 3],
+      ['development', ['logs', 'get', '--search', b64(`${INVENTED_DW['client-id-dev']}:REDACTED`)], 3],
+      ['development', ['logs', 'get', '--filter', Buffer.from(`${INVENTED_DW['client-id']}:${INVENTED_DW['client-secret']}`).toString('base64url')], 3]
+    ]
+    for (const [role, args, position] of refused) {
+      assert.equal(await refusalOf(b2c.run(args, { role })), `unsafe_argument@${position}`, `argument ${position} on ${role}`)
+    }
+    assert.equal(calls.length, 0)
+    // Another pair is no value of the file.
+    assert.equal(await codeOf(b2c.run(['logs', 'get', '--search', b64('someone.else:other-password')], { role: 'sandbox' })), 'resolved')
+  }))
+
 test('a value of eight characters or more blocks an argument that contains it; a shorter one only as the whole of it', () => {
   const values = ['ab', 'x', 'admin', 'storeman', 'invented-long-secret']
   assert.equal(argumentWithValue(['code', 'activate', 'cab-fix', 'xyz', '--search=cab'], values), -1)
@@ -896,6 +919,98 @@ test('a Basic header b2c prints on stderr arrives masked', () =>
     await running.exited
   }, ADMIN_DW))
 
+test('ANSI escape sequences are stripped before masking, so a short value right after ESC[1m is masked', () =>
+  withWorkspace(async (root) => {
+    assert.equal(stripAnsi('\u001b[1madmin\u001b[22m, \u001b[38;5;196mred\u001b[0m, \u001b]0;title\u0007x, \u001b]8;;https://x.example.com\u001b\\link\u001b]8;;\u001b\\, \u009b31mc1'), 'admin, red, x, link, c1')
+    assert.equal(stripAnsi('no escape here [1m'), 'no escape here [1m')
+    const { b2c, calls } = runner(root, fakeSpawner(() => {}))
+    const events: B2cEvent[] = []
+    const running = await b2c.start(['code', 'watch'], { role: 'sandbox', onEvent: (event) => events.push(event) })
+    const json = JSON.stringify({ msg: '\u001b[1madmin\u001b[22m signed in', [`\u001b[33madmin`]: 1 })
+    calls[0].child.stderr.emit('data', Buffer.from(`\u001b[1madmin\u001b[22m signed in to \u001b[32mSandbox-41\u001b[39m\n${json}\n`))
+    assert.deepEqual(events, [{ text: '*** signed in to ***' }, { json: { msg: '*** signed in', '***': 1 } }])
+    running.stop()
+    await running.exited
+    // b2c's error, when it is an ERROR: line in colour, as well.
+    const failing = runner(root, fakeSpawner((call) => call.child.finish(1, '', 'ERROR: \u001b[1madmin\u001b[22m may not do that\n'))).b2c
+    const failure = await failureOf(failing.run(['code', 'list'], { role: 'sandbox' }))
+    assert.ok(failure instanceof B2cError)
+    assert.equal(failure.detail, '*** may not do that')
+  }, ADMIN_DW))
+
+/** The four forms of `bytes` in base64: standard and URL-safe, each with and without padding. */
+function fourForms(bytes: Buffer): string[] {
+  const padded = bytes.toString('base64')
+  const bare = padded.replace(/=+$/, '')
+  const url = bytes.toString('base64url')
+  return [padded, bare, url + padded.slice(bare.length), url]
+}
+
+/** An invented client id and a secret holding a space, a `+` and a `/`, so its form-encoding differs. */
+const CLIENT = { id: 'invented-client-id-0041', secret: 'invented secret+/0041' }
+
+test('the client-credentials pair is masked raw and form-encoded, in the four base64 forms, alone and in a Basic header', () => {
+  const formEncoded = `${CLIENT.id}:invented+secret%2B%2F0041`
+  assert.equal(new URLSearchParams([['', CLIENT.secret]]).toString(), '=invented+secret%2B%2F0041')
+  const masker = createMasker()
+  masker.remember({ SFCC_SERVER: 'staging-01.example.com', SFCC_CLIENT_ID: CLIENT.id, SFCC_CLIENT_SECRET: CLIENT.secret })
+  for (const pair of [`${CLIENT.id}:${CLIENT.secret}`, formEncoded]) {
+    for (const form of fourForms(Buffer.from(pair))) {
+      assert.equal(masker.mask(form), '***', `${pair} as ${form}`)
+      assert.equal(masker.mask(`Authorization: Basic ${form}`), 'Authorization: Basic ***', `${pair} as ${form}`)
+    }
+  }
+})
+
+test('the client-credentials pair of every role is masked through the runner', () =>
+  withWorkspace(async (root) => {
+    const { b2c } = runner(root)
+    await b2c.instances()
+    const pairs = [
+      [INVENTED_DW['client-id'], INVENTED_DW['client-secret']],
+      [INVENTED_DW['client-id-dev'], INVENTED_DW['client-secret-dev']],
+      [INVENTED_DW['client-id-prd'], INVENTED_DW['client-secret-prd']]
+    ]
+    for (const [id, secret] of pairs) {
+      for (const form of fourForms(Buffer.from(`${id}:${secret}`))) assert.equal(await b2c.mask(`Authorization: Basic ${form}`), 'Authorization: Basic ***', id)
+    }
+  }))
+
+test('a pair whose characters all fit in Latin-1 is masked in its Latin-1 base64 too, as btoa encodes it', () => {
+  const password = 'invented-pässwörd'
+  const latin1 = btoa(`${BASIC.user}:${password}`)
+  const utf8 = Buffer.from(`${BASIC.user}:${password}`).toString('base64')
+  assert.notEqual(latin1, utf8)
+  const masker = createMasker()
+  masker.remember({ SFCC_USERNAME: BASIC.user, SFCC_PASSWORD: password })
+  for (const form of [...fourForms(Buffer.from(latin1, 'base64')), ...fourForms(Buffer.from(utf8, 'base64'))]) {
+    assert.equal(masker.mask(`Authorization: Basic ${form}`), 'Authorization: Basic ***', form)
+  }
+  // Bounded: four forms per pair in UTF-8, four more in Latin-1 only when it differs and fits.
+  assert.ok(basicForms({ SFCC_USERNAME: BASIC.user, SFCC_PASSWORD: BASIC.password }).length <= 8)
+  assert.ok(basicForms({ SFCC_USERNAME: BASIC.user, SFCC_PASSWORD: password }).length <= 12)
+  const beyond = basicForms({ SFCC_USERNAME: BASIC.user, SFCC_PASSWORD: 'invented-€uro' })
+  for (const form of beyond) {
+    assert.ok([`${BASIC.user}:invented-€uro`, `${BASIC.user}:REDACTED`].includes(Buffer.from(form, 'base64').toString('utf8')), form)
+  }
+  const everything = { SFCC_USERNAME: 'invented.üser', SFCC_PASSWORD: 'pässwörd one', SFCC_CLIENT_ID: 'invented clïent', SFCC_CLIENT_SECRET: 'sécret +/' }
+  assert.ok(basicForms(everything).length <= 48)
+})
+
+test('the base64 of user:REDACTED and client-id:REDACTED, as b2c redacts a Basic header, is masked', () => {
+  const masker = createMasker()
+  masker.remember({ SFCC_USERNAME: BASIC.user })
+  masker.remember({ SFCC_CLIENT_ID: 'invented client id' })
+  const redacted = [`${BASIC.user}:REDACTED`, 'invented client id:REDACTED', 'invented+client+id:REDACTED']
+  for (const pair of redacted) {
+    for (const form of fourForms(Buffer.from(pair))) {
+      assert.equal(masker.mask(`{"authorization":"Basic ${form}"}`), '{"authorization":"Basic ***"}', `${pair} as ${form}`)
+    }
+  }
+  const other = Buffer.from('someone.else:REDACTED').toString('base64')
+  assert.equal(masker.mask(`Basic ${other}`), `Basic ${other}`)
+})
+
 test('a value shorter than eight characters is masked only where it stands alone, never inside a word', () => {
   const { mask } = inventedMasker()
   // A user called admin does not turn admin-fix into a masked text.
@@ -941,7 +1056,8 @@ test('times out and aborts at once, without waiting for the pipes to close', () 
     assert.ok(calls[0].child.killed)
     const controller = new AbortController()
     const pending = b2c.run(['logs', 'get'], { role: 'sandbox', signal: controller.signal })
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    // Aborts once the process has started: preparing it takes longer while other files run.
+    while (calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 1))
     controller.abort()
     assert.equal(await codeOf(pending), 'aborted')
     assert.ok(calls[1].child.killed)
@@ -1143,7 +1259,28 @@ function nested(depth: number, kind: 'array' | 'object', inner: string): string 
   return kind === 'array' ? `${'['.repeat(depth)}${inner}${']'.repeat(depth)}` : `${'{"k":'.repeat(depth)}${inner}${'}'.repeat(depth)}`
 }
 
-test('a JSON line nested past the bound is masked as its raw text, and nothing throws', () => {
+test('past the bound, each string of the line is masked as the walk masks it: a short value after \\n, \\t or \\uXXXX', () => {
+  const masker = createMasker()
+  masker.remember({ SFCC_SERVER: 'zz-001.example.com', SFCC_USERNAME: 'admin', SFCC_PASSWORD: 'invented-password-41' })
+  // As JSON writes it: a line break before the user, a tab before the label, ( and   before both.
+  const inner = '"first line\\nadmin signed in\\tzz-001 is up, \\u0028admin\\u0029 and\\u0020zz-001\\r\\nadmin"'
+  const key = '"\\tadmin"'
+  const expected = JSON.stringify(masker.mask(JSON.parse(inner)))
+  assert.equal(expected, '"first line\\n*** signed in\\t*** is up, (***) and ***\\r\\n***"')
+  // `depth` levels in all; in the objects, the innermost has the key to mask.
+  const levels = (depth: number, kind: 'array' | 'object', name: string, value: string) =>
+    kind === 'array' ? nested(depth, kind, value) : nested(depth - 1, kind, `{${name}:${value}}`)
+  for (const kind of ['array', 'object'] as const) {
+    const event = maskedEvent(levels(MAX_JSON_DEPTH + 1, kind, key, inner), masker.mask)
+    assert.deepEqual(event, { text: levels(MAX_JSON_DEPTH + 1, kind, '"\\t***"', expected) }, kind)
+    // The walk, one level shallower, masks the same strings the same way.
+    const walked = maskedEvent(levels(MAX_JSON_DEPTH, kind, key, inner), masker.mask)
+    assert.ok('json' in walked, kind)
+    assert.equal(JSON.stringify(walked.json), levels(MAX_JSON_DEPTH, kind, '"\\t***"', expected), kind)
+  }
+})
+
+test('a JSON line nested past the bound arrives as its text, masked, and nothing throws', () => {
   const masker = createMasker()
   masker.remember({ SFCC_SERVER: 'sandbox-41.example.com', SFCC_CLIENT_SECRET: 'invented-secret-0041' })
   const inner = '"sandbox-41.example.com with invented-secret-0041"'
