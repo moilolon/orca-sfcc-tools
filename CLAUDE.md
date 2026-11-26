@@ -94,9 +94,11 @@ Changing it needs the owner's yes.
       `client-id:client-secret` raw and form-encoded, and `user:REDACTED` and
       `client-id:REDACTED` as `b2c` redacts a header; UTF-8, and Latin-1 when it differs;
       standard and URL-safe alphabets, with and without padding); the percent-encoded and
-      JSON-escaped forms of a value; the home folder as `~`. A value shorter than eight characters is masked only where it stands alone (a user
-      `admin` leaves `admin-fix` whole). A host the file does not hold, or an IP address, is not
-      masked.
+      JSON-escaped forms of a value; the home folder as `~`. A value shorter than eight
+      characters is masked only where it stands alone (a user `admin` leaves `admin-fix` whole),
+      and a masked neighbour counts as an edge (`admin.<host>` gives `***.***`). Where two values
+      overlap, both are masked whole (a client id that begins the secret leaves none of it). A
+      host the file does not hold, or an IP address, is not masked.
     - Error details, the stderr events of `start()` (raw lines without their ANSI escape
       sequences, and the strings and keys of a JSON line, once the line is whole; a line nested
       deeper than `MAX_JSON_DEPTH` arrives as its text with each string masked as the walk
@@ -106,8 +108,11 @@ Changing it needs the owner's yes.
       a panel of them goes through `b2c.mask(text)` first (it reads no file: join the rows and
       mask once; it strips ANSI escape sequences before masking, and the child is started with
       `NO_COLOR=1` and without `FORCE_COLOR` or `CLICOLOR_FORCE`, so `b2c` prints no colour that
-      a chunk could cut in two). The masker builds one pattern per change of the known values
-      and masks a text in one pass. A piece finds its own instance in a list with
+      a chunk could cut in two). The masker builds two patterns per change of the known values
+      (one for the long values, one for the short ones that must stand alone), finds every match
+      of each, overlapping ones included, and masks their union, a run of it as one `***`. Its
+      test keeps the per-value masker it replaced and fails if the new one ever masks less on
+      thousands of seeded lines. A piece finds its own instance in a list with
       `b2c.isHost(role, value)`, never by holding the host.
     - One workspace uploads, the one picked by hand; it never follows the focused workspace. A
       workspace on another host (`hostId` other than `local`) is never read as a local folder.

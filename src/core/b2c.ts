@@ -526,6 +526,79 @@ function percentEncoded(value: string): string {
   }
 }
 
+/** A part of a text, from `start` up to `end` (not included). */
+type Span = [start: number, end: number]
+
+/**
+ * Every needle `finder` finds in `text`, overlapping ones included, in order of where they start:
+ * `finder` is the alternation of the needles, the longest first, so at each position where a
+ * needle starts it gives the longest one that does, and the next try starts one character on,
+ * inside it. Every needle found is inside the span of the longest one at its position.
+ */
+function findAll(finder: RegExp, text: string): Span[] {
+  const spans: Span[] = []
+  finder.lastIndex = 0
+  for (let match = finder.exec(text); match !== null; match = finder.exec(text)) {
+    const start = match.index
+    spans.push([start, start + match[0].length])
+    finder.lastIndex = start + ((text.codePointAt(start) ?? 0) > 0xffff ? 2 : 1)
+  }
+  return spans
+}
+
+/**
+ * The union of two lists of spans, each in order of where its spans start, as one list in order
+ * whose spans neither overlap nor touch: those that do are joined into one. Linear.
+ */
+function union(a: Span[], b: Span[]): Span[] {
+  const out: Span[] = []
+  let i = 0
+  let j = 0
+  while (i < a.length || j < b.length) {
+    const [start, end] = j >= b.length || (i < a.length && a[i][0] <= b[j][0]) ? a[i++] : b[j++]
+    const last = out[out.length - 1]
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end)
+    else out.push([start, end])
+  }
+  return out
+}
+
+/** How many characters `spans` cover, when no two of them overlap. */
+function covered(spans: Span[]): number {
+  return spans.reduce((sum, [start, end]) => sum + end - start, 0)
+}
+
+/** `text` with each of `spans` (in order, apart) replaced by `fill` of its length. */
+function replaced(text: string, spans: Span[], fill: (length: number) => string): string {
+  const parts: string[] = []
+  let at = 0
+  for (const [start, end] of spans) {
+    parts.push(text.slice(at, start), fill(end - start))
+    at = end
+  }
+  parts.push(text.slice(at))
+  return parts.join('')
+}
+
+/** What a masker builds once per change of the values it knows (`createMasker`). */
+type Finders = { long: RegExp | null; short: RegExp | null; shortCount: number; opens: Set<string>; closes: Set<string> }
+
+/** A character a word is made of, so one that keeps a short value beside it from standing alone. */
+const WORD_CHARACTER = /^[\p{L}\p{N}_-]$/u
+
+/** The character of `text` that begins at `index`; empty past its end. */
+function charFrom(text: string, index: number): string {
+  const code = text.codePointAt(index)
+  return code === undefined ? '' : String.fromCodePoint(code)
+}
+
+/** The character of `text` that ends right before `index`; empty at its start. */
+function charBefore(text: string, index: number): string {
+  if (index <= 0) return ''
+  const pair = index >= 2 ? text.slice(index - 2, index) : ''
+  return [...pair].length === 1 ? pair : text.charAt(index - 1)
+}
+
 /**
  * What hides the values of dw.json in a text. It masks by exact value and never by shape:
  * guessing what looks like a host destroys ordinary names (`jquery.min.js`,
@@ -543,21 +616,33 @@ function percentEncoded(value: string): string {
  * - `home`, the user's folder (its last part is usually the account name), as `~`.
  * A value shorter than eight characters is masked only where it stands alone: a user called
  * `admin` leaves `admin-fix`, `bm_admin_tools` and `Administrator` as they are.
+ *
+ * How: every place where a needle (a value or one of its forms) occurs is found, overlapping
+ * ones included, and the union of those places is masked, each run of them as one `***`. So
+ * where two values overlap neither hides the other (a client id that begins a secret leaves no
+ * part of the secret), and every long needle is found in one pass over the text. The short
+ * needles, those that must stand alone, are then looked for in a pass of their own over the text
+ * with the long ones already masked, so a masked neighbour counts as an edge (`admin.<host>` is
+ * `***.***`); and again over what that pass masked, only when a short needle that begins or ends
+ * with a character a word is not made of could stand beside it. A text is read twice, and once
+ * more per short needle at the very most; the test against the per-value masker this replaced
+ * holds it to masking at least what that one did.
  */
 export function createMasker(home?: string) {
   const values = new Set<string>()
   const hosts = new Set<string>()
-  /** The pattern of everything remembered; rebuilt only when a value is added or becomes a host. */
-  let pattern: RegExp | null = null
+  /** The finders of everything remembered; rebuilt only when a value is added or becomes a host. */
+  let finders: Finders = { long: null, short: null, shortCount: 0, opens: new Set(), closes: new Set() }
   let stale = false
   let compiled = 0
 
   /**
-   * One pattern for everything remembered: each needle is an alternative, the longest first, so a
-   * single pass over a text masks them all, and a value is masked whole before a shorter one
-   * that starts where it does. Null when there is nothing to mask.
+   * Two finders for everything remembered: one for the needles that count anywhere, one for those
+   * that count only where they stand alone. Each joins its needles into one alternation, the
+   * longest first (`findAll`). Null where there is no needle of the kind. With them, the
+   * characters a word is not made of that begin a short needle (`opens`) and end one (`closes`).
    */
-  function compile(): RegExp | null {
+  function compile(): typeof finders {
     const needles = new Map<string, { text: string; anyCase: boolean; alone: boolean }>()
     const add = (text: string, anyCase: boolean, alone: boolean) => {
       const key = anyCase ? text.toLowerCase() : text
@@ -577,14 +662,61 @@ export function createMasker(home?: string) {
       const label = host ? value.split('.')[0] : ''
       if (namesInstance(label) && label !== value) add(label, true, label.length < LONG_VALUE)
     }
-    if (needles.size === 0) return null
-    const alternatives = [...needles.values()]
-      .sort((a, b) => b.text.length - a.text.length)
-      .map(({ text, anyCase, alone }) => {
-        const body = anyCase ? anyCaseSource(text) : escapeRegExp(text)
-        return alone ? `${ALONE_BEFORE}${body}${ALONE_AFTER}` : body
-      })
-    return new RegExp(alternatives.join('|'), 'gu')
+    const finder = (alone: boolean): RegExp | null => {
+      const alternatives = [...needles.values()]
+        .filter((needle) => needle.alone === alone)
+        .sort((a, b) => b.text.length - a.text.length)
+        .map(({ text, anyCase }) => {
+          const body = anyCase ? anyCaseSource(text) : escapeRegExp(text)
+          return alone ? `${ALONE_BEFORE}${body}${ALONE_AFTER}` : body
+        })
+      return alternatives.length ? new RegExp(alternatives.join('|'), 'gu') : null
+    }
+    const short = [...needles.values()].filter((needle) => needle.alone)
+    const edges = (pick: (chars: string[]) => string | undefined) =>
+      new Set(short.map(({ text }) => pick([...text]) ?? '').filter((char) => char && !WORD_CHARACTER.test(char)))
+    return { long: finder(false), short: finder(true), shortCount: short.length, opens: edges((chars) => chars[0]), closes: edges((chars) => chars.at(-1)) }
+  }
+
+  /** The parts of `text` to mask, in order, apart from each other. */
+  function spans(text: string): Span[] {
+    if (stale) {
+      finders = compile()
+      stale = false
+      compiled++
+    }
+    const { long, short, shortCount, opens, closes } = finders
+    const stars = (length: number) => '*'.repeat(length)
+    let found = long ? union([], findAll(long, text)) : []
+    let scanned = found.length ? replaced(text, found, stars) : text
+    /**
+     * Whether a needle masked at `[start, end]` can let a short needle right beside it stand alone
+     * now: only one that begins (or ends) with a character a word is not made of, since the short
+     * needle masked stood alone itself, so what follows it is no such character. A short needle
+     * holding a star could stand on stars anywhere, so with one every round is run.
+     */
+    const opensBeside = (start: number, end: number) => {
+      if (opens.has('*') || closes.has('*')) return true
+      const after = charFrom(scanned, end)
+      if (opens.has(after) || (after === '.' && opens.has(charFrom(scanned, end + 1)))) return true
+      const before = charBefore(scanned, start)
+      return closes.has(before) || (before === '.' && closes.has(charBefore(scanned, start - 1)))
+    }
+    // Each round looks again with what was masked so far as stars, an edge for a short needle
+    // beside it. As many rounds as short needles find at least what masking one needle after
+    // another found (the per-value masker this replaced); a round that adds nothing, or adds
+    // nothing a short needle could stand beside, ends it.
+    let more = short ? findAll(short, scanned) : []
+    for (let round = 0; more.length && round < shortCount; round++) {
+      const next = union(found, more)
+      if (covered(next) === covered(found)) break
+      found = next
+      const opened = (opens.size > 0 || closes.size > 0) && more.some(([start, end]) => opensBeside(start, end))
+      if (!opened || round + 1 >= shortCount) break
+      scanned = replaced(text, found, stars)
+      more = findAll(short as RegExp, scanned)
+    }
+    return found
   }
 
   const root = home?.replace(/[\\/]+$/, '')
@@ -602,21 +734,23 @@ export function createMasker(home?: string) {
       for (const form of basicForms(vars)) keep(form, false)
     },
     /**
-     * `text` without its ANSI escape sequences, with everything remembered masked in one pass.
-     * Anything that is not a text comes back as it is.
+     * `text` without its ANSI escape sequences, with everything remembered masked. Anything that
+     * is not a text comes back as it is.
      */
     mask(text: string): string {
       if (typeof text !== 'string') return text
-      if (stale) {
-        pattern = compile()
-        stale = false
-        compiled++
-      }
-      let out = stripAnsi(text)
-      if (pattern) out = out.replace(pattern, '***')
+      const plain = stripAnsi(text)
+      const out = replaced(plain, spans(plain), () => '***')
       return homePattern ? out.replace(homePattern, '~') : out
     },
-    /** How many times the pattern has been built: once per change of the values, for the tests. */
+    /**
+     * The parts of `text`, taken as it is (ANSI escapes are not stripped), that `mask` hides: in
+     * order, as `[start, end]`, those that touch already joined. For the tests.
+     */
+    spans(text: string): Span[] {
+      return spans(text)
+    },
+    /** How many times the finders have been built: once per change of the values, for the tests. */
     get compiled(): number {
       return compiled
     }

@@ -937,6 +937,206 @@ test('the masking pattern is built once per change of the known values, not on e
   assert.equal(masker.compiled, 3)
 })
 
+test('where two values overlap neither hides the other, and a short value beside a masked one stands alone', () => {
+  const overlapping = createMasker()
+  overlapping.remember({ SFCC_CLIENT_ID: 'invented-client', SFCC_CLIENT_SECRET: 'client-secret-invented-0041' })
+  // The id begins the secret: the secret is masked whole, and so is the id.
+  assert.equal(overlapping.mask('invented-client-secret-invented-0041'), '***')
+  assert.equal(overlapping.mask('id invented-client, secret client-secret-invented-0041.'), 'id ***, secret ***.')
+  const beside = createMasker()
+  beside.remember({ SFCC_SERVER: 'zz-001.example.com', SFCC_USERNAME: 'admin' })
+  assert.equal(beside.mask('signed in as admin.zz-001.example.com'), 'signed in as ***.***')
+  // The masked host is an edge on either side, as it was when the host was masked first.
+  assert.equal(beside.mask('zz-001.example.com.admin and zz-001.example.comadmin'), '***.*** and ***')
+  // A short value is still masked only where it stands alone.
+  assert.equal(beside.mask('admin-fix, bm_admin_tools, admin.tools and my.admin'), 'admin-fix, bm_admin_tools, admin.tools and my.admin')
+  // Two masked values that touch are one run of stars.
+  assert.equal(beside.mask('zz-001.example.comzz-001.example.com'), '***')
+  assert.deepEqual(beside.spans('as admin.zz-001.example.com!'), [[3, 8], [9, 27]])
+  // A short value that begins with a character a word is not made of stands alone once the
+  // short value right before it is masked, whichever of the two is the longer.
+  const chained = createMasker()
+  chained.remember({ SFCC_PASSWORD: 'pw-0041', SFCC_USERNAME: '\\u{61}+', SFCC_SHORTCODE: 'kv7' })
+  assert.equal(chained.mask('pw-0041\\u{61}+ and kv7\\u{61}+ but x\\u{61}+'), '*** and *** but x\\u{61}+')
+})
+
+// The per-value masker of `main` before the single pass, kept as the reference the single pass
+// is held to: one regular expression per needle, the longest first, each over what the earlier
+// ones left. Only `replace` is new, so the test can see which characters each pass hid.
+const REFERENCE_LONG_VALUE = 8
+const REFERENCE_ALONE_BEFORE = '(?<![\\p{L}\\p{N}_-])(?<![\\p{L}\\p{N}_-]\\.)'
+const REFERENCE_ALONE_AFTER = '(?![\\p{L}\\p{N}_-])(?!\\.[\\p{L}\\p{N}_-])'
+
+function referenceMasker(replace: (match: string) => string = () => '***') {
+  const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const namesInstance = (label: string) => label.length >= 6 && /[\d-]/.test(label)
+  const percentEncoded = (value: string) => {
+    try {
+      return encodeURIComponent(value)
+    } catch {
+      return value
+    }
+  }
+  const values = new Set<string>()
+  const hosts = new Set<string>()
+  let patterns: RegExp[] | null = null
+
+  function compile(): RegExp[] {
+    const needles = new Map<string, { text: string; anyCase: boolean; alone: boolean }>()
+    const add = (text: string, anyCase: boolean, alone: boolean) => {
+      const key = anyCase ? text.toLowerCase() : text
+      const same = needles.get(key)
+      if (text) needles.set(key, { text, anyCase: anyCase || !!same?.anyCase, alone: alone && (same?.alone ?? true) })
+    }
+    for (const value of values) {
+      const host = hosts.has(value)
+      const alone = value.length < REFERENCE_LONG_VALUE
+      add(value, host, alone)
+      const encoded = percentEncoded(value)
+      if (encoded !== value) add(encoded, true, alone)
+      const escaped = JSON.stringify(value).slice(1, -1)
+      if (escaped !== value) add(escaped, host, alone)
+      const label = host ? value.split('.')[0] : ''
+      if (namesInstance(label) && label !== value) add(label, true, label.length < REFERENCE_LONG_VALUE)
+    }
+    return [...needles.values()]
+      .sort((a, b) => b.text.length - a.text.length)
+      .map(
+        ({ text, anyCase, alone }) =>
+          new RegExp(alone ? `${REFERENCE_ALONE_BEFORE}${escapeRegExp(text)}${REFERENCE_ALONE_AFTER}` : escapeRegExp(text), anyCase ? 'giu' : 'gu')
+      )
+  }
+
+  return {
+    remember(vars: Record<string, string>): void {
+      const keep = (value: string, host: boolean) => {
+        if (!values.has(value) || (host && !hosts.has(value))) patterns = null
+        values.add(value)
+        if (host) hosts.add(value)
+      }
+      for (const [variable, value] of Object.entries(vars)) if (value) keep(value, variable === 'SFCC_SERVER')
+      for (const form of basicForms(vars)) keep(form, false)
+    },
+    mask(text: string): string {
+      patterns ??= compile()
+      let out = text
+      for (const pattern of patterns) out = out.replace(pattern, replace)
+      return out
+    }
+  }
+}
+
+/** A small seeded generator (mulberry32), so the lines are the same on every run. */
+function seededRandom(seed: number): () => number {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/**
+ * Four invented roles whose values overlap (an id that begins its secret, an id that is the start
+ * of another role's secret), are short, hold regular-expression syntax or non-ASCII letters. No
+ * value holds a `*`: the reference writes stars, and a needle with one could match across them.
+ */
+const FUZZ_ROLES: Record<string, string>[] = [
+  { SFCC_SERVER: 'zz-001.example.com', SFCC_USERNAME: 'admin', SFCC_PASSWORD: 'pw-0041', SFCC_CLIENT_ID: 'invented-client', SFCC_CLIENT_SECRET: 'client-secret-invented-0041' },
+  { SFCC_SERVER: 'Dev-Box7.Example.com', SFCC_CLIENT_ID: 'id-0041', SFCC_CLIENT_SECRET: 'secret (?<x>|.+[\\]^$ 0041', SFCC_SHORTCODE: 'kv7', SFCC_TENANT_ID: 'zzzz_001' },
+  { SFCC_SERVER: 'staging.example.com', SFCC_CLIENT_ID: 'example', SFCC_CLIENT_SECRET: 'examples-0041é', SFCC_USERNAME: '\\u{61}+', SFCC_PASSWORD: 'p@ss word/1"x' },
+  { SFCC_SERVER: 'shop-eu01-prd.example.com', SFCC_CLIENT_ID: 'shop-eu01-prd-client', SFCC_CLIENT_SECRET: 'naïve ünïcödé 41', SFCC_PASSWORD: '[^]{0,}(?=a)', SFCC_USERNAME: 'adm' }
+]
+
+const FUZZ_WORDS = ['admin-fix', 'bm_admin_tools', 'Administrator', 'staging', 'jquery.min.js', 'dw.order.calculate', 'example', 'client', 'secret', '0041', 'zz', 'a', 'aaa', 'shop', 'admin.tools']
+const FUZZ_SEPARATORS = ['', '', '', ' ', '.', '-', '_', '/', ':', '@', '%20', '"', '\\n', '\n', ',', '(', '=', '+']
+
+/** Lines made of the invented values, their forms, case variants, pieces, joins and ordinary words. */
+function fuzzLines(count: number, seed: number): string[] {
+  const random = seededRandom(seed)
+  const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)]
+  const values = FUZZ_ROLES.flatMap((role) => Object.values(role))
+  const hosts = FUZZ_ROLES.map((role) => role.SFCC_SERVER)
+  const randomCase = (text: string) => [...text].map((char) => (random() < 0.5 ? char.toUpperCase() : char.toLowerCase())).join('')
+  const overlapJoin = (a: string, b: string) => {
+    for (let k = Math.min(a.length, b.length) - 1; k > 0; k--) if (a.endsWith(b.slice(0, k))) return a + b.slice(k)
+    return a + b
+  }
+  const kinds: (() => string)[] = [
+    () => pick(values),
+    () => pick(values),
+    () => randomCase(pick(hosts)),
+    () => pick(hosts).split('.')[0].toUpperCase(),
+    () => randomCase(pick(values)),
+    () => encodeURIComponent(pick(values)),
+    () => encodeURIComponent(pick(values)).replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()),
+    () => JSON.stringify(pick(values)).slice(1, -1),
+    () => pick(basicForms(pick(FUZZ_ROLES))),
+    () => {
+      const value = pick(values)
+      const half = Math.floor(value.length / 2)
+      return random() < 0.5 ? value.slice(0, half) : value.slice(half)
+    },
+    () => overlapJoin(pick(values), pick(values)),
+    () => pick(FUZZ_WORDS),
+    () => pick(FUZZ_WORDS)
+  ]
+  const lines: string[] = []
+  for (let i = 0; i < count; i++) {
+    let line = ''
+    const tokens = 1 + Math.floor(random() * 6)
+    for (let t = 0; t < tokens; t++) line += (t ? pick(FUZZ_SEPARATORS) : '') + pick(kinds)()
+    lines.push(line)
+  }
+  return lines
+}
+
+test('on thousands of invented lines the masker hides at least every character the per-value masker of main hid', () => {
+  // What the reference hid: each match becomes U+E000 and then U+E001s, as long as the match, so
+  // the text keeps its length and positions; no value or line holds either character.
+  const tracked = referenceMasker((match) => '\ue000' + '\ue001'.repeat(match.length - 1))
+  const reference = referenceMasker()
+  const masker = createMasker()
+  for (const role of FUZZ_ROLES) {
+    tracked.remember(role)
+    reference.remember(role)
+    masker.remember(role)
+  }
+  const lines = fuzzLines(4000, 41)
+  let hidden = 0
+  let more = 0
+  for (const line of lines) {
+    assert.ok(!/[*\ue000\ue001]/.test(line), line)
+    const marked = tracked.mask(line)
+    // The tracking is faithful: with each run of marks as stars it is the reference's output.
+    assert.equal(marked.replace(/\ue000\ue001*/g, '***'), reference.mask(line), line)
+    const spans = masker.spans(line)
+    const inSpan = (index: number) => spans.some(([start, end]) => index >= start && index < end)
+    let mine = 0
+    for (let index = 0; index < marked.length; index++) {
+      const old = marked[index] === '\ue000' || marked[index] === '\ue001'
+      if (old) {
+        hidden++
+        assert.ok(inSpan(index), `${JSON.stringify(line)}: the reference hid ${index}, the masker shows it (${JSON.stringify(masker.mask(line))})`)
+      }
+      if (inSpan(index) && !old) mine++
+    }
+    if (mine) more++
+    // mask() writes one *** per span.
+    let expected = ''
+    let at = 0
+    for (const [start, end] of spans) {
+      expected += line.slice(at, start) + '***'
+      at = end
+    }
+    assert.equal(masker.mask(line), expected + line.slice(at), line)
+  }
+  // The lines exercise the masking: most hide something, and some hide more than the reference
+  // (where two values overlap, the reference left part of one visible).
+  assert.ok(hidden > lines.length, `only ${hidden} characters hidden`)
+  assert.ok(more > 0)
+})
+
 test('mask() strips ANSI escape sequences too, so stdout a piece masks cannot hide a short value behind a colour', () =>
   withWorkspace(async (root) => {
     const coloured = 'user \u001b[1madmin\u001b[22m on \u001b[36mSandbox-41\u001b[39m, then \u001b7admin\u001b8 saved'
