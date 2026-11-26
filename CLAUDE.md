@@ -21,10 +21,15 @@ Changing it needs the owner's yes.
       may declare the same hook or event: it is emitted once, and fails when their options
       differ.
     - `src/core/`: what every piece shares. `piece.ts` (the piece contracts and `PIECE_IDS`),
-      `b2c.ts` (the only module that starts a process), `dw-config.ts` (the only module that
+      `b2c.ts` (the only module that starts `b2c`), `dw-config.ts` (the only module that
       reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
-      namespace per piece), `workspaces.ts`, `i18n.ts` (texts, English and Spanish).
+      namespace per piece), `workspaces.ts`, `i18n.ts` (texts, English and Spanish),
+      `open-file.ts` (opens a file of a workspace at a line through `orca file open`).
+      `b2c.ts` and `open-file.ts` are the only modules that start a process: `open-file.ts`
+      imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe` (or `orca`) directly,
+      never through a shell or a `.cmd`, with the worker's environment plus `APPDATA`,
+      `LOCALAPPDATA` and `USERPROFILE`, and opens only a file inside the workspace.
       `test-support.ts` holds the invented `dw.json` and the fake process the tests use;
       `b2c-commands-fixture.ts` lists every command of the b2c the allow list was checked
       against, for the tests that walk it.
@@ -47,6 +52,12 @@ Changing it needs the owner's yes.
       expect nothing of what the pieces are today: keep them that way, and test a piece beside
       its own files. A section whose `setup` throws is shown as not started until the panel is
       opened again.
+    - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
+      beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
+      line; `frames.ts` finds which stack frames are files of a local cartridge. A read stores
+      per signature only its counters and a masked, bounded sample, never a raw entry; a
+      notification says how many, never what. The workspace whose cartridges a frame is looked
+      for in is chosen by `frameRoot()` in its `worker.ts`.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
