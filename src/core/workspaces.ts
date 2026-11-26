@@ -16,21 +16,42 @@ export function isLocal(workspace: Pick<Workspace, 'hostId'>): boolean {
   return workspace.hostId === null || workspace.hostId === 'local'
 }
 
+/** A workspace as `listWorkspaces` gives it: with the id of its project, when Orca names one. */
+export type ListedWorkspace = Workspace & { projectId: string | null }
+
 /**
  * Every workspace Orca lists, and whether the list is whole. A list Orca cut short
  * (`truncated`) says nothing about a workspace missing from it: never read that as removed.
+ * `signal` cancels the call (a caller passes `AbortSignal.timeout(…)` so a host that does not
+ * answer never holds it).
  */
-export async function listWorkspaces(host: OrcaWorkerApi['host']): Promise<{ workspaces: Workspace[]; complete: boolean }> {
-  const answer = await host.call('workspace.list')
+export async function listWorkspaces(host: OrcaWorkerApi['host'], options: { signal?: AbortSignal } = {}): Promise<{ workspaces: ListedWorkspace[]; complete: boolean }> {
+  const answer = await host.call('workspace.list', undefined, options)
   return {
-    workspaces: answer.workspaces.map(({ id, name, path, branch, kind, hostId }) => ({ id, name, path, branch, kind, hostId: hostId ?? null })),
+    workspaces: answer.workspaces.map(({ id, name, path, branch, kind, hostId, projectId }) => ({ id, name, path, branch, kind, hostId: hostId ?? null, projectId: projectId ?? null })),
     complete: answer.truncated !== true
+  }
+}
+
+/**
+ * The ids of the projects hidden from Orca's sidebar, whose workspaces `workspace.list` may leave
+ * out even when it is not truncated. Null when this Orca cannot say (no `project.list`, a list
+ * cut short, or a failure): then no project can be taken as fully listed.
+ */
+export async function hiddenProjects(host: OrcaWorkerApi['host'], options: { signal?: AbortSignal } = {}): Promise<string[] | null> {
+  if (!host.has('project.list')) return null
+  try {
+    const answer = await host.call('project.list', undefined, options)
+    if (answer.truncated) return null
+    return answer.projects.filter((project) => project.hidden === true).map((project) => project.id)
+  } catch {
+    return null
   }
 }
 
 export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store): Workspaces {
   async function list(): Promise<Workspace[]> {
-    return (await listWorkspaces(host)).workspaces
+    return (await listWorkspaces(host)).workspaces.map(({ projectId: _project, ...workspace }) => workspace)
   }
   async function byId(id: string | null | undefined): Promise<Workspace | null> {
     if (!id) return null

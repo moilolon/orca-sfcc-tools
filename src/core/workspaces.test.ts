@@ -3,7 +3,7 @@
 import { assert, test } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { createStore } from './store'
-import { createWorkspaces, isLocal, listWorkspaces } from './workspaces'
+import { createWorkspaces, hiddenProjects, isLocal, listWorkspaces } from './workspaces'
 
 type Listed = { id: string; kind: 'worktree' | 'folder'; name: string; path: string; branch: string | null; hostId: string | null }
 
@@ -66,10 +66,34 @@ test('dw.json is looked for in the uploading workspace, else the focused one, an
   assert.equal(await workspacesOver([LOCAL], null).configRoot(), null)
 })
 
-test('the list says whether it is whole: a truncated one is never complete', async () => {
+test('the list says whether it is whole, and each workspace’s project; a truncated one is never complete', async () => {
   const answering = (truncated: boolean | undefined) =>
-    ({ call: async () => ({ workspaces: [LOCAL], ...(truncated === undefined ? {} : { truncated }) }) }) as unknown as OrcaWorkerApi['host']
-  assert.deepEqual(await listWorkspaces(answering(false)), { workspaces: [LOCAL], complete: true })
-  assert.deepEqual(await listWorkspaces(answering(true)), { workspaces: [LOCAL], complete: false })
+    ({ call: async () => ({ workspaces: [{ ...LOCAL, projectId: 'p1' }], ...(truncated === undefined ? {} : { truncated }) }) }) as unknown as OrcaWorkerApi['host']
+  assert.deepEqual(await listWorkspaces(answering(false)), { workspaces: [{ ...LOCAL, projectId: 'p1' }], complete: true })
+  assert.deepEqual(await listWorkspaces(answering(true)), { workspaces: [{ ...LOCAL, projectId: 'p1' }], complete: false })
   assert.equal((await listWorkspaces(answering(undefined))).complete, true)
+})
+
+test('the list passes its signal on, so a caller can bound it', async () => {
+  let seen: unknown
+  const host = { call: async (_method: string, _params: unknown, options: unknown) => ((seen = options), { workspaces: [], truncated: false }) } as unknown as OrcaWorkerApi['host']
+  const signal = AbortSignal.timeout(1000)
+  await listWorkspaces(host, { signal })
+  assert.deepEqual(seen, { signal })
+})
+
+test('hidden projects: their ids, or null when Orca cannot say', async () => {
+  const projects = (answer: unknown, has = true) =>
+    ({
+      has: () => has,
+      call: async () => {
+        if (answer instanceof Error) throw answer
+        return answer
+      }
+    }) as unknown as OrcaWorkerApi['host']
+  const listed = { projects: [{ id: 'p1', hidden: true }, { id: 'p2' }, { id: 'p3', hidden: false }], truncated: false }
+  assert.deepEqual(await hiddenProjects(projects(listed)), ['p1'])
+  assert.equal(await hiddenProjects(projects({ ...listed, truncated: true })), null)
+  assert.equal(await hiddenProjects(projects(new Error('down'))), null)
+  assert.equal(await hiddenProjects(projects(listed, false)), null)
 })
