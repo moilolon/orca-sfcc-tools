@@ -5,6 +5,7 @@
 import type { CheckScenario } from 'orca/testing'
 import type { PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
+import { SETUP_VIEW, VIEW_KEY } from './views'
 
 export type PieceScenarios = Readonly<Record<string, CheckScenario>>
 
@@ -19,19 +20,40 @@ export const READY_STATUS: CoreStatus = {
   pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor']
 }
 
+/** A piece as the merge needs it: its scenarios, and whether its section has a view of its own. */
+export type ScenarioSource = { id: PieceId; scenarios: PieceScenarios; hasView: boolean }
+
+/** The view a scenario opens: the one it persists itself, else `view`. */
+function openingOn(scenario: CheckScenario, view: string): CheckScenario {
+  const plugin = scenario.persisted?.plugin ?? {}
+  if (VIEW_KEY in plugin) return scenario
+  return { ...scenario, persisted: { ...scenario.persisted, plugin: { ...plugin, [VIEW_KEY]: view } } }
+}
+
+/** The view a merged scenario names: `persisted.plugin.view`. Every merged scenario has one. */
+export function viewOf(scenario: CheckScenario): string | undefined {
+  const view = scenario.persisted?.plugin?.[VIEW_KEY]
+  return typeof view === 'string' ? view : undefined
+}
+
 /**
  * Core's scenarios, then each piece's in the order given. A piece's scenario must be named after
  * the piece (`sandbox`, `sandboxDeploying`): two pieces can then never claim one name, whatever
  * order they land in. A name used twice, or one that breaks the rule, throws naming the piece.
+ *
+ * Every scenario names the view it draws, in `persisted.plugin.view`: core's open the setup view,
+ * and a piece's open its own view (the setup view when its section has none), unless the scenario
+ * persists another. A test mounts each one and fails when it draws a different view.
  */
-export function mergeScenarios(core: PieceScenarios, pieces: readonly { id: PieceId; scenarios: PieceScenarios }[]): Record<string, CheckScenario> {
-  const merged: Record<string, CheckScenario> = { ...core }
-  for (const { id, scenarios } of pieces) {
+export function mergeScenarios(core: PieceScenarios, pieces: readonly ScenarioSource[]): Record<string, CheckScenario> {
+  const merged: Record<string, CheckScenario> = {}
+  for (const [name, scenario] of Object.entries(core)) merged[name] = openingOn(scenario, SETUP_VIEW)
+  for (const { id, scenarios, hasView } of pieces) {
     for (const [name, scenario] of Object.entries(scenarios)) {
       const own = name === id || (name.startsWith(id) && /^[A-Z0-9]/.test(name.slice(id.length)))
       if (!own) throw new Error(`${id}: the scenario "${name}" must be named ${id} or ${id}<Name>`)
       if (name in merged) throw new Error(`${id}: the scenario "${name}" already exists`)
-      merged[name] = { ...scenario, requests: { 'core.status': () => READY_STATUS, ...scenario.requests } }
+      merged[name] = openingOn({ ...scenario, requests: { 'core.status': () => READY_STATUS, ...scenario.requests } }, hasView ? id : SETUP_VIEW)
     }
   }
   return merged

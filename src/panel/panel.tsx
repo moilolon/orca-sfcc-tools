@@ -23,6 +23,7 @@ import {
   Separator,
   Stack,
   Text,
+  type IconName,
   type OrcaNode,
   type PanelContext
 } from 'orca'
@@ -31,10 +32,8 @@ import { ROLES, type ConfigState, type Role, type RoleState } from '../core/inst
 import type { PanelSection, PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import { SECTIONS } from './sections'
-import { Empty, ErrorState, Group, LabelledRow, ListRow, StateBadge, type StateTone } from './ui'
-
-/** The value of the setup view in the bar; every other view is a piece id. */
-const SETUP_VIEW = 'setup'
+import { ErrorState, Group, LabelledRow, ListRow, StateBadge, TONES, type StateTone } from './ui'
+import { FAILED_VIEW_KEY, SETUP_VIEW, VIEW_KEY, viewBoxKey } from './views'
 
 const status = atom<CoreStatus | null>(null)
 const loading = atom(false)
@@ -48,7 +47,14 @@ const broken = atom<readonly PieceId[]>([])
 /** Whether a setting names the configuration file; null when the setting could not be read. */
 const customFile = atom<boolean | null>(null)
 /** The view last picked in the bar, kept across runs of the plugin. Read through `activeView`. */
-const lastView = atom<string | null>('view', null, { persist: 'plugin' })
+const lastView = atom<string | null>(VIEW_KEY, null, { persist: 'plugin' })
+/**
+ * The view whose `render` threw last, kept across runs: opening the panel on it again would only
+ * show the same failure, so the next open goes to the setup view instead. A good render clears it.
+ */
+const failedView = atom<string | null>(FAILED_VIEW_KEY, null, { persist: 'plugin' })
+/** Raised by *Try again* on a view whose render threw, so the view is drawn again. */
+const attempt = atom(0)
 
 const ROLE_KEYS: Record<Role, CoreMessageKey> = {
   sandbox: 'roleSandbox',
@@ -64,10 +70,11 @@ const ROLE_SHORT_KEYS: Record<Role, CoreMessageKey> = {
   production: 'roleShortProduction'
 }
 
-const ROLE_STATES: Record<RoleState, { key: CoreMessageKey; tone: StateTone }> = {
-  ready: { key: 'roleReady', tone: 'ok' },
-  incomplete: { key: 'roleIncomplete', tone: 'attention' },
-  absent: { key: 'roleAbsent', tone: 'off' }
+/** Each state of an environment: its words, its tone and, so colour is never the only sign, its icon. */
+const ROLE_STATES: Record<RoleState, { key: CoreMessageKey; tone: StateTone; icon: IconName }> = {
+  ready: { key: 'roleReady', tone: 'ok', icon: 'check' },
+  incomplete: { key: 'roleIncomplete', tone: 'attention', icon: 'warning' },
+  absent: { key: 'roleAbsent', tone: 'off', icon: 'remove' }
 }
 
 const CONFIG_STATES: Record<ConfigState, { key: CoreMessageKey; tone: StateTone }> = {
@@ -131,23 +138,50 @@ function RefreshButton({ busy }: { busy: boolean }) {
  * attention, what in a few words and a button to the setup view (Orca's buttons take no warning
  * tone, so the words go in a badge).
  */
+/**
+ * One fact of the status line as a small button that opens the setup view: an icon and a short
+ * name, with the whole state in its tooltip (`Development: Not configured`). The icon says the
+ * state without colour; the tone adds it where Orca draws one.
+ */
+function StatusChip({ name, tooltip, icon, tone, onPress }: { name: string; tooltip: string; icon: IconName; tone: StateTone; onPress: () => void }) {
+  return (
+    <Button size="xs" variant="ghost" tone={TONES[tone]} icon={icon} tooltip={tooltip} onPress={onPress}>
+      {name}
+    </Button>
+  )
+}
+
 function StatusLine({ current, failure, busy, attention, onAttention }: { current: CoreStatus | null; failure: string | null; busy: boolean; attention: Attention | null; onAttention?: () => void }) {
+  const toSetup = () => set(lastView, SETUP_VIEW)
   let state: OrcaNode = null
   if (current) {
     state = [
-      ...ROLES.map((role) => (
-        <StateBadge key={role} tone={ROLE_STATES[current.instances[role]].tone}>
-          {text(ROLE_SHORT_KEYS[role])}
-        </StateBadge>
-      )),
+      ...ROLES.map((role) => {
+        const roleState = ROLE_STATES[current.instances[role]]
+        return (
+          <StatusChip
+            key={role}
+            name={text(ROLE_SHORT_KEYS[role])}
+            tooltip={text('stateTooltip', { name: text(ROLE_KEYS[role]), state: text(roleState.key) })}
+            icon={roleState.icon}
+            tone={roleState.tone}
+            onPress={toSetup}
+          />
+        )
+      }),
       current.b2c.found ? (
         <Text key="b2c" size="sm" muted>
           {text('b2cShort', { version: current.b2c.version ?? '' }).trim()}
         </Text>
       ) : (
-        <StateBadge key="b2c" tone="failed">
-          {text('b2cShort', { version: '' }).trim()}
-        </StateBadge>
+        <StatusChip
+          key="b2c"
+          name={text('b2cShort', { version: '' }).trim()}
+          tooltip={text('stateTooltip', { name: text('b2c'), state: text('b2cMissing') })}
+          icon="close"
+          tone="failed"
+          onPress={toSetup}
+        />
       )
     ]
   } else if (!failure) {
@@ -288,11 +322,63 @@ function SetupView({ sections, failed, locale, busy }: { sections: readonly Pane
   )
 }
 
-/** A piece's view: its body, an empty state while it has nothing, or why it did not start. */
+/** An element as Orca's runtime builds it: what `drawNow` needs of it. */
+type DrawnElement = { readonly $$typeof: symbol; readonly type: unknown; readonly props: Record<string, unknown>; readonly key?: unknown }
+
+function isDrawnElement(node: unknown): node is DrawnElement {
+  return typeof node === 'object' && node !== null && '$$typeof' in node && 'type' in node && 'props' in node
+}
+
+/**
+ * The tree a section returned, with the components in it already called. Orca calls them only
+ * once the panel's draw has returned, so a component that throws would escape `PieceView`'s guard
+ * and blank the whole panel; calling them here, as Orca would (components have no hooks), lets the
+ * guard catch it. Anything that does not look like an element is left for Orca to judge.
+ */
+function drawNow(node: OrcaNode, depth = 0): OrcaNode {
+  if (depth > 256) return node
+  if (Array.isArray(node)) return node.map((child: OrcaNode) => drawNow(child, depth + 1))
+  if (!isDrawnElement(node)) return node
+  if (typeof node.type === 'function') {
+    const drawn = drawNow((node.type as (props: Record<string, unknown>) => OrcaNode)(node.props), depth + 1)
+    // A key given to the component (a row of a list) stays on what it drew.
+    return node.key !== undefined && node.key !== null && isDrawnElement(drawn) && (drawn.key === undefined || drawn.key === null) ? ({ ...drawn, key: node.key } as OrcaNode) : drawn
+  }
+  if (!('children' in node.props)) return node
+  return { ...node, props: { ...node.props, children: drawNow(node.props.children as OrcaNode, depth + 1) } } as OrcaNode
+}
+
+/** Records, after this draw, which view's render threw last; atoms cannot change while drawing. */
+function noteFailedRender(view: string | null): void {
+  void Promise.resolve().then(() => {
+    if (read(failedView) !== view) set(failedView, view)
+  })
+}
+
+/**
+ * A piece's view: its body; a loading placeholder until the piece has its first answer (`render`
+ * returns null); why it did not start; or, when its `render` throws, an error state with a retry,
+ * so the bar and the status line stay and the person can go elsewhere.
+ */
 function PieceView({ section, failed, locale }: { section: PanelSection; failed: boolean; locale: string }) {
   if (failed) return <FailedSection section={section} locale={locale} />
-  const body = section.render(locale)
-  return body === null || body === undefined || body === false ? <Empty title={text('emptyTitle')} guidance={text('emptyGuidance')} icon={section.icon} /> : body
+  read(attempt)
+  let body: OrcaNode
+  try {
+    body = drawNow(section.render(locale))
+  } catch {
+    noteFailedRender(section.id)
+    return (
+      <ErrorState
+        title={text('viewFailedTitle', { piece: section.title(locale) })}
+        message={text('viewFailedBody')}
+        retryLabel={text('tryAgain')}
+        onRetry={() => set(attempt, read(attempt) + 1)}
+      />
+    )
+  }
+  if (read(failedView) === section.id) noteFailedRender(null)
+  return body === null || body === undefined || body === false ? <Skeleton lines={3} label={text('viewLoading', { piece: section.title(locale) })} /> : body
 }
 
 /**
@@ -304,21 +390,25 @@ function Bar({ views, active, locale }: { views: readonly PanelSection[]; active
   return (
     <Row align="center" gap="xs" wrap>
       {views.map((section) => (
-        <Button key={`view-${section.id}`} size="sm" variant={section.id === active ? 'solid' : 'ghost'} icon={section.icon} onPress={pick(section.id)}>
+        <Button key={`bar-${section.id}`} size="sm" variant={section.id === active ? 'solid' : 'ghost'} icon={section.icon} onPress={pick(section.id)}>
           {section.title(locale)}
         </Button>
       ))}
-      <Button key={`view-${SETUP_VIEW}`} size="sm" variant={active === SETUP_VIEW ? 'solid' : 'ghost'} icon="settings" onPress={pick(SETUP_VIEW)}>
+      <Button key={`bar-${SETUP_VIEW}`} size="sm" variant={active === SETUP_VIEW ? 'solid' : 'ghost'} icon="settings" onPress={pick(SETUP_VIEW)}>
         {text('setup')}
       </Button>
     </Row>
   )
 }
 
-/** The view to draw: the one last picked while it still exists, else the first piece's. */
+/**
+ * The view to draw: the first piece's until one is picked; then the one picked while it still
+ * exists, else the setup view.
+ */
 function activeView(views: readonly PanelSection[], stored: string | null): string {
-  if (stored === SETUP_VIEW || views.some((section) => section.id === stored)) return stored as string
-  return views[0]?.id ?? SETUP_VIEW
+  if (stored === null) return views[0]?.id ?? SETUP_VIEW
+  if (stored === SETUP_VIEW || views.some((section) => section.id === stored)) return stored
+  return SETUP_VIEW
 }
 
 /**
@@ -341,6 +431,12 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
         }
       }
       set(broken, failed)
+      // The view whose render threw on the last open is not opened again: the setup view is.
+      const lastFailed = read(failedView)
+      if (lastFailed !== null) {
+        if (read(lastView) === lastFailed) set(lastView, SETUP_VIEW)
+        set(failedView, null)
+      }
       void load()
     },
     Panel() {
@@ -353,7 +449,7 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
       // No piece to show: the setup view alone, with no bar that would offer one choice.
       if (views.length === 0) {
         return (
-          <Stack gap="md">
+          <Stack key={viewBoxKey(SETUP_VIEW)} gap="md">
             <Row justify="between" align="center">
               <Heading level={2}>{text('setup')}</Heading>
               <RefreshButton busy={busy} />
@@ -371,7 +467,7 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
           <Bar views={views} active={active} locale={locale} />
           <Separator />
           <StatusLine current={current} failure={failure} busy={busy} attention={attention} onAttention={open ? () => set(lastView, SETUP_VIEW) : undefined} />
-          <Box paddingY="xs">
+          <Box key={viewBoxKey(active)} paddingY="xs">
             {open ? (
               <PieceView section={open} failed={failed.includes(open.id)} locale={locale} />
             ) : (

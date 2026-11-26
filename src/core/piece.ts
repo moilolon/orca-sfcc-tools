@@ -85,9 +85,10 @@ export type PanelSection = {
    */
   setup?(ctx: PanelContext): void | (() => void)
   /**
-   * The body of the piece's view, built from the blocks of src/panel/ui.tsx; null while the piece
-   * has nothing to show (the panel then draws an empty state). Never called when `hasView` is
-   * false or the piece is not delivered.
+   * The body of the piece's view, built from the blocks of src/panel/ui.tsx. Null until the piece
+   * has its first answer: the panel draws a loading placeholder. With nothing to show, the piece
+   * draws `Empty` with its own words. If it throws, the panel draws an error state with a retry in
+   * its place. Never called when `hasView` is false or the piece is not delivered.
    */
   render(locale: string): OrcaNode
 }

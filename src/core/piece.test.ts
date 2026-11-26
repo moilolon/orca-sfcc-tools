@@ -59,11 +59,6 @@ test('the registries list every piece, in the order of PIECE_IDS', () => {
   }
 })
 
-test('ISML works in the editor only: its section has no view of its own in the panel', () => {
-  const isml = SECTIONS.find((section) => section.id === 'isml')
-  assert.equal(isml?.hasView, false)
-})
-
 test('src/protocol.ts imports the protocol of every piece that has one', () => {
   const imports = importsOf(join(SRC, 'protocol.ts'))
   for (const id of PIECE_IDS.filter((id) => !NO_WORKER.includes(id))) assert.ok(imports.includes(`./pieces/${id}/protocol`), id)

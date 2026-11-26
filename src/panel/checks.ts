@@ -2,15 +2,17 @@
 // src/pieces/<piece>/scenarios.ts. src/panel/panel.check.ts hands them to Orca; they live here
 // because a test cannot import a `*.check.ts` file. Nothing reads a real dw.json: no workspace is
 // focused, so the real worker finds no file.
+import { hostError } from 'orca/testing'
 import { scenarios as debuggerScenarios } from '../pieces/debugger/scenarios'
 import { scenarios as editor } from '../pieces/editor/scenarios'
 import { scenarios as engine } from '../pieces/engine/scenarios'
 import { scenarios as errors } from '../pieces/errors/scenarios'
 import { scenarios as isml } from '../pieces/isml/scenarios'
 import { scenarios as sandbox } from '../pieces/sandbox/scenarios'
-import { hostError } from 'orca/testing'
+import type { PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import { mergeScenarios, READY_STATUS, type PieceScenarios } from './scenarios'
+import { SECTIONS } from './sections'
 
 const NO_INSTANCES: CoreStatus['instances'] = { sandbox: 'absent', development: 'absent', staging: 'absent', production: 'absent' }
 
@@ -53,11 +55,16 @@ const CORE_SCENARIOS: PieceScenarios = {
   }
 }
 
+/** Whether a piece's section has a view, so its scenarios open it. */
+function hasView(id: PieceId): boolean {
+  return SECTIONS.some((section) => section.id === id && section.hasView)
+}
+
 export const CHECKS = mergeScenarios(CORE_SCENARIOS, [
-  { id: 'isml', scenarios: isml },
-  { id: 'sandbox', scenarios: sandbox },
-  { id: 'errors', scenarios: errors },
-  { id: 'debugger', scenarios: debuggerScenarios },
-  { id: 'engine', scenarios: engine },
-  { id: 'editor', scenarios: editor }
+  { id: 'isml', scenarios: isml, hasView: hasView('isml') },
+  { id: 'sandbox', scenarios: sandbox, hasView: hasView('sandbox') },
+  { id: 'errors', scenarios: errors, hasView: hasView('errors') },
+  { id: 'debugger', scenarios: debuggerScenarios, hasView: hasView('debugger') },
+  { id: 'engine', scenarios: engine, hasView: hasView('engine') },
+  { id: 'editor', scenarios: editor, hasView: hasView('editor') }
 ])

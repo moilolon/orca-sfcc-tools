@@ -5,15 +5,17 @@
 // Nothing here says what the pieces of the plugin are today. The panel is tested over sections
 // written in this file, and the plugin's own panel only against what `SECTIONS` and the piece
 // ids say, so a phase that delivers a piece from its folder never has to edit this file.
-import { atom, plugin, read, set, Text } from 'orca'
+import { atom, Button, plugin, read, set, Text, type OrcaNode } from 'orca'
 import { afterEach, assert, hostError, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import { PIECE_IDS, type PanelSection } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import * as panelModule from './panel'
 import { createPanel } from './panel'
 import { CHECKS } from './checks'
-import { mergeScenarios, READY_STATUS } from './scenarios'
+import { mergeScenarios, READY_STATUS, viewOf as namedView } from './scenarios'
 import { SECTIONS } from './sections'
+import { Actions, Group, ListRow, StateBadge } from './ui'
+import { SETUP_VIEW, viewBoxKey } from './views'
 
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
@@ -198,9 +200,12 @@ test('words a failure that has no code as the panel’s own action_failed, in bo
 // ---------------------------------------------------------------------------------------------
 // The bar of views
 
-/** The buttons of the bar: the only `Button`s drawn `solid` (the open view) or `ghost`. */
+/**
+ * The buttons of the bar: `Button`s drawn `solid` (the open view) or `ghost`, with no tooltip
+ * (the status line's ghost buttons all have one).
+ */
 function barButtons(target: TestPanel) {
-  return target.findAll({ type: 'Button' }).filter((button) => button.props.variant === 'solid' || button.props.variant === 'ghost')
+  return target.findAll({ type: 'Button' }).filter((button) => (button.props.variant === 'solid' || button.props.variant === 'ghost') && !button.props.tooltip)
 }
 
 /** The names in the bar, in order. */
@@ -211,11 +216,13 @@ function barOf(target: TestPanel): string[] {
 /** The views of VIEWS by name, as the bar shows them in English. */
 const VIEW_NAMES: Record<string, string> = { sandbox: 'Sandbox and upload', errors: 'Errors', setup: 'Setup' }
 
-/** The view open now: the one whose button in the bar is solid. */
+/** The view drawn now, by the key of the box that holds it; its bar button agrees. */
 function openView(target: TestPanel): string | null {
-  const open = barButtons(target).filter((button) => button.props.variant === 'solid')
-  assert.ok(open.length <= 1, 'one view open at most')
-  return Object.keys(VIEW_NAMES).find((view) => VIEW_NAMES[view] === open[0]?.text) ?? null
+  const drawn = [SETUP_VIEW, ...PIECE_IDS].filter((view) => target.find({ testId: viewBoxKey(view) }))
+  assert.ok(drawn.length <= 1, `one view drawn at most: ${drawn.join(', ')}`)
+  const solid = barButtons(target).filter((button) => button.props.variant === 'solid')
+  if (solid.length > 0) assert.equal(solid.length, 1, 'one view open in the bar')
+  return drawn[0] ?? null
 }
 
 /** Opens a view from the bar. */
@@ -252,7 +259,7 @@ test('the setup view lists the delivered pieces discreetly, those with no view i
   assert.ok(panel.find({ text: 'b2c 9.8.7' }))
 })
 
-test('the last view is remembered, and one that no longer exists falls back to the first', async () => {
+test('the last view is remembered, and one that no longer exists falls back to the setup view', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en' })
   await pick(panel, 'errors')
   assert.ok(panel.find({ text: 'Errors body' }))
@@ -265,29 +272,124 @@ test('the last view is remembered, and one that no longer exists falls back to t
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en', persisted: { plugin: { view: 'setup' } } })
   assert.equal(openView(panel), 'setup')
   panel.unmount()
-  // A piece that is gone, or one with no view, is not a view to open.
-  for (const view of ['debugger', 'isml']) {
+  // Never picked: the first piece's view.
+  panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en' })
+  assert.equal(openView(panel), 'sandbox')
+  panel.unmount()
+  // A piece that is gone, or one with no view, is not a view to open: the setup view is.
+  for (const view of ['debugger', 'isml', 'nothing']) {
     panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en', persisted: { plugin: { view } } })
-    assert.equal(openView(panel), 'sandbox', view)
+    assert.equal(openView(panel), 'setup', view)
     panel.unmount()
   }
   panel = undefined
 })
 
-test('a delivered piece with nothing to show draws an empty state with a line of guidance', async () => {
-  panel = await mount(panelOver([viewOf('errors', 'Errors', 'Errores', null)]), { host: hostAnswering(FOUND), locale: 'en' })
-  const empty = panel.find({ type: 'EmptyState' })
-  assert.equal(empty?.label, 'Nothing to show yet')
-  assert.equal(empty?.props.description, 'This piece has nothing to show at the moment.')
+test('a piece still waiting for its first answer draws the loading state, never an empty one', async () => {
+  const answered = atom(false)
+  const waiting: PanelSection = { ...viewOf('errors', 'Errors', 'Errores'), render: () => (read(answered) ? <Text>Errors body</Text> : null) }
+  panel = await mount(panelOver([waiting]), { host: hostAnswering(FOUND), locale: 'en' })
+  assert.equal(panel.find({ type: 'Skeleton' })?.props.label, 'Loading Errors')
+  assert.equal(panel.find({ type: 'EmptyState' }), null)
+  assert.match(panel.summary().join('\n'), /Loading Errors/)
+  // Its first answer replaces the placeholder.
+  set(answered, true)
+  await panel.settled()
+  assert.equal(panel.find({ type: 'Skeleton' }), null)
+  assert.ok(panel.find({ text: 'Errors body' }))
   panel.unmount()
   panel = await mount(panelOver([viewOf('errors', 'Errors', 'Errores', null)]), { host: hostAnswering(FOUND), locale: 'es' })
-  assert.equal(panel.find({ type: 'EmptyState' })?.label, 'Nada que mostrar todavía')
+  assert.equal(panel.find({ type: 'Skeleton' })?.props.label, 'Cargando Errores')
+})
+
+/** A section whose render throws while `broken` says so, directly or from a component it draws. */
+function throwingSection(state: { broken: boolean; nested?: boolean }): PanelSection {
+  function Nested(): OrcaNode {
+    throw new Error('render broke')
+  }
+  return {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => {
+      if (!state.broken) return <Text>Errors body</Text>
+      if (state.nested) return <Nested />
+      throw new Error('render broke')
+    }
+  }
+}
+
+test('a view whose render throws shows an error state with a retry, keeping the bar and the status line', async () => {
+  for (const nested of [false, true]) {
+    const state = { broken: true, nested }
+    const module = panelOver([viewOf('sandbox', 'Sandbox and upload', 'Sandbox y subida'), throwingSection(state)])
+    panel = await mount(module, { host: hostAnswering(ALL_READY), locale: 'en', persisted: { plugin: { view: 'errors' } } })
+    const label = nested ? 'from a component' : 'directly'
+    assert.deepEqual(panel.errors, [], label)
+    assert.equal(openView(panel), 'errors', label)
+    assert.match(panel.summary().join('\n'), /Errors could not be drawn/, label)
+    assert.ok(panel.find({ text: 'Its view failed while drawing. Try again, or open another view.' }), label)
+    // The bar and the status line are still there, so the person can go elsewhere.
+    assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'], label)
+    assert.ok(panel.find({ role: 'button', label: 'Refresh' }), label)
+    assert.equal(panel.persisted.plugin.viewFailed, 'errors', label)
+    // Trying again draws the view again; once it draws, the failure is forgotten.
+    await panel.press({ role: 'button', text: 'Try again' })
+    assert.match(panel.summary().join('\n'), /Errors could not be drawn/, label)
+    state.broken = false
+    await panel.press({ role: 'button', text: 'Try again' })
+    assert.ok(panel.find({ text: 'Errors body' }), label)
+    assert.equal(panel.persisted.plugin.viewFailed, null, label)
+    await pick(panel, 'sandbox')
+    assert.ok(panel.find({ text: 'Sandbox and upload body' }), label)
+    panel.unmount()
+  }
+  panel = await mount(panelOver([throwingSection({ broken: true })]), { host: hostAnswering(ALL_READY), locale: 'es' })
+  assert.match(panel.summary().join('\n'), /No se ha podido dibujar Errores/)
+  assert.ok(panel.find({ role: 'button', text: 'Reintentar' }))
+})
+
+test('a view built from the blocks draws and answers presses through the guard', async () => {
+  const pressed: string[] = []
+  const rows = ['first', 'second', 'third']
+  const built: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => (
+      <Group title="Log" action={<StateBadge tone="failed">3 new</StateBadge>}>
+        {rows.map((row) => (
+          <ListRow key={row} tone="failed" title={row} note="1×" onPress={() => pressed.push(row)} />
+        ))}
+        <Actions>
+          <Button size="sm" onPress={() => pressed.push('seen')}>
+            Mark all seen
+          </Button>
+        </Actions>
+      </Group>
+    )
+  }
+  panel = await mount(panelOver([built]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  assert.deepEqual(panel.errors, [])
+  assert.deepEqual(panel.warnings, [])
+  assert.deepEqual(panel.findAll({ type: 'Link' }).map((link) => link.text), rows)
+  await panel.press({ type: 'Link', text: 'second' })
+  await panel.press({ role: 'button', text: 'Mark all seen' })
+  assert.deepEqual(pressed, ['second', 'seen'])
+})
+
+test('the panel opens on the setup view when the remembered view failed on its last render', async () => {
+  const module = panelOver([viewOf('sandbox', 'Sandbox and upload', 'Sandbox y subida'), throwingSection({ broken: true })])
+  panel = await mount(module, { host: hostAnswering(ALL_READY), locale: 'en', persisted: { plugin: { view: 'errors', viewFailed: 'errors' } } })
+  assert.equal(openView(panel), 'setup')
+  assert.equal(panel.persisted.plugin.view, 'setup')
+  assert.equal(panel.persisted.plugin.viewFailed, null)
+  panel.unmount()
+  // A failure of another view does not move the remembered one.
+  panel = await mount(module, { host: hostAnswering(ALL_READY), locale: 'en', persisted: { plugin: { view: 'sandbox', viewFailed: 'errors' } } })
+  assert.equal(openView(panel), 'sandbox')
 })
 
 // ---------------------------------------------------------------------------------------------
 // The status line
 
-const ATTENTION = /^(Setup unreadable|dw\.json invalid|b2c not found|A piece did not start|No dw\.json|Incomplete environment|Configuración ilegible|dw\.json no válido|b2c no encontrado|Una pieza no ha arrancado|No hay dw\.json|Entorno incompleto)$/
+const ATTENTION = /^(Setup unreadable|dw\.json invalid|b2c not found|Piece failed|No dw\.json|Incomplete environment|Configuración ilegible|dw\.json no válido|b2c no encontrado|Pieza fallida|No hay dw\.json|Entorno incompleto)$/
 
 /** The status line's button to the setup view, or null. */
 function attentionButton(target: TestPanel) {
@@ -301,22 +403,36 @@ function attentionOf(target: TestPanel): string | null {
   return badge?.text ?? null
 }
 
-test('the status line shows each environment by tone and the b2c version', async () => {
+/** The status line's facts: its buttons with a tooltip, as [name, icon, tone, tooltip]. */
+function chipsOf(target: TestPanel): [string, unknown, unknown, unknown][] {
+  return target.findAll({ type: 'Button' }).filter((button) => button.props.tooltip).map((button) => [button.text, button.props.icon, button.props.tone, button.props.tooltip])
+}
+
+test('the status line says each environment’s state by icon and in words, not by colour alone', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'en' })
-  const tones = Object.fromEntries(panel.findAll({ type: 'Badge' }).map((badge) => [badge.text, badge.props.tone]))
-  assert.deepEqual(tones, { SBX: 'success', DEV: 'success', STG: 'warning', PRD: 'neutral', 'Incomplete environment': 'warning' })
+  assert.deepEqual(chipsOf(panel), [
+    ['SBX', 'check', 'success', 'Sandbox: Ready'],
+    ['DEV', 'check', 'success', 'Development: Ready'],
+    ['STG', 'warning', 'warning', 'Staging: Incomplete'],
+    ['PRD', 'remove', 'neutral', 'Production: Not configured']
+  ])
+  // Every state has an icon of its own.
+  assert.equal(new Set(chipsOf(panel).map(([, icon]) => icon)).size, 3)
   assert.ok(panel.find({ text: 'b2c 9.8.7' }))
   assert.ok(panel.find({ role: 'button', label: 'Refresh' }))
+  // A fact leads to the setup view, where it is explained.
+  await panel.press({ type: 'Button', text: 'PRD' })
+  assert.equal(openView(panel), 'setup')
   panel.unmount()
-  panel = await mount(VIEWS, { host: hostAnswering(ALL_READY), locale: 'es' })
-  assert.deepEqual(panel.findAll({ type: 'Badge' }).map((badge) => badge.text), ['SBX', 'DEV', 'STG', 'PRD'])
+  panel = await mount(VIEWS, { host: hostAnswering(FOUND), locale: 'es' })
+  assert.deepEqual(chipsOf(panel).map(([, , , tooltip]) => tooltip), ['Sandbox: Listo', 'Desarrollo: Listo', 'Staging: Incompleto', 'Producción: Sin configurar'])
   assert.ok(panel.find({ role: 'button', label: 'Actualizar' }))
 })
 
 test('with everything ready the status line asks for nothing', async () => {
   panel = await mount(VIEWS, { host: hostAnswering(ALL_READY), locale: 'en' })
   assert.equal(attentionOf(panel), null)
-  assert.equal(panel.findAll({ type: 'Badge' }).filter((badge) => badge.props.tone === 'success').length, 4)
+  assert.deepEqual(chipsOf(panel).map(([name, icon]) => `${name} ${icon}`), ['SBX check', 'DEV check', 'STG check', 'PRD check'])
 })
 
 test('the status line says what needs attention, by tone, and leads to the setup view', async () => {
@@ -344,9 +460,9 @@ test('the status line says what needs attention, by tone, and leads to the setup
   panel = undefined
 })
 
-test('b2c missing shows in the status line as a badge in the failed tone', async () => {
+test('b2c missing shows in the status line with an icon and its state in words', async () => {
   panel = await mount(VIEWS, { host: hostAnswering({ ...ALL_READY, b2c: MISSING.b2c }), locale: 'en' })
-  assert.equal(panel.find({ type: 'Badge', text: 'b2c' })?.props.tone, 'danger')
+  assert.deepEqual(chipsOf(panel).at(-1), ['b2c', 'close', 'danger', 'b2c CLI: Not found'])
   assert.equal(panel.find({ text: /^b2c \d/ }), null)
 })
 
@@ -420,7 +536,7 @@ test('a section whose setup throws shows as not started until the panel is reope
     assert.match(panel.summary().join('\n'), /Errors could not start/)
     assert.ok(panel.find({ text: /^Its part of this panel failed to start/ }))
     assert.equal(panel.find({ text: 'errors body' }), null)
-    assert.equal(attentionOf(panel), 'A piece did not start')
+    assert.equal(attentionOf(panel), 'Piece failed')
     // The other section started and draws its body.
     await pick(panel, 'sandbox')
     assert.ok(panel.find({ text: 'uploads: 0' }))
@@ -443,7 +559,7 @@ test('a section whose setup throws shows as not started until the panel is reope
   panel.unmount()
   panel = await mount(module, { host: hostAnswering(ALL_READY), locale: 'es' })
   assert.match(panel.summary().join('\n'), /Errores no ha podido arrancar/)
-  assert.equal(attentionOf(panel), 'Una pieza no ha arrancado')
+  assert.equal(attentionOf(panel), 'Pieza fallida')
   await panel.press({ type: 'Button', text: 'Configuración' })
   assert.equal(panel.findAll({ text: 'No ha arrancado' }).length, 1)
   assert.equal(panel.findAll({ text: 'Disponible' }).length, 1)
@@ -504,13 +620,13 @@ test('a piece adds check scenarios from its own folder: they are merged under it
   const core = { found: {}, missing: { settings: { b2cPath: 'x' } } }
   const answer = { state: 'watching' }
   const merged = mergeScenarios(core, [
-    { id: 'sandbox', scenarios: { sandbox: {}, sandboxWatching: { requests: { 'probe.status': answer }, settings: { b2cPath: 'y' } } } },
-    { id: 'errors', scenarios: { errorsNew: { requests: { 'core.status': MISSING } } } },
-    { id: 'isml', scenarios: {} }
+    { id: 'sandbox', hasView: true, scenarios: { sandbox: {}, sandboxWatching: { requests: { 'probe.status': answer }, settings: { b2cPath: 'y' } } } },
+    { id: 'errors', hasView: true, scenarios: { errorsNew: { requests: { 'core.status': MISSING } } } },
+    { id: 'isml', hasView: false, scenarios: {} }
   ])
   assert.deepEqual(Object.keys(merged), ['found', 'missing', 'sandbox', 'sandboxWatching', 'errorsNew'])
-  // Core's scenarios are untouched.
-  assert.equal(merged.found, core.found)
+  // Core's scenarios keep what they say, and open the setup view.
+  assert.deepEqual(merged.missing, { settings: { b2cPath: 'x' }, persisted: { plugin: { view: 'setup' } } })
   // A piece's scenario is drawn over a ready setup unless it stubs core.status itself.
   const status = merged.sandboxWatching.requests?.['core.status']
   assert.equal(typeof status === 'function' ? status({}) : status, READY_STATUS)
@@ -519,10 +635,59 @@ test('a piece adds check scenarios from its own folder: they are merged under it
   assert.equal(merged.errorsNew.requests?.['core.status'], MISSING)
 
   // Named after another piece, after none, or twice: refused, naming the piece.
-  assert.throws(() => mergeScenarios(core, [{ id: 'errors', scenarios: { sandboxBroken: {} } }]), /errors: the scenario "sandboxBroken" must be named errors or errors<Name>/)
-  assert.throws(() => mergeScenarios(core, [{ id: 'errors', scenarios: { found: {} } }]), /errors: the scenario "found" must be named/)
-  assert.throws(() => mergeScenarios(core, [{ id: 'errors', scenarios: { errorsx: {} } }]), /must be named/)
-  assert.throws(() => mergeScenarios({ errorsNew: {} }, [{ id: 'errors', scenarios: { errorsNew: {} } }]), /errors: the scenario "errorsNew" already exists/)
+  assert.throws(() => mergeScenarios(core, [{ id: 'errors', hasView: true, scenarios: { sandboxBroken: {} } }]), /errors: the scenario "sandboxBroken" must be named errors or errors<Name>/)
+  assert.throws(() => mergeScenarios(core, [{ id: 'errors', hasView: true, scenarios: { found: {} } }]), /errors: the scenario "found" must be named/)
+  assert.throws(() => mergeScenarios(core, [{ id: 'errors', hasView: true, scenarios: { errorsx: {} } }]), /must be named/)
+  assert.throws(() => mergeScenarios({ errorsNew: {} }, [{ id: 'errors', hasView: true, scenarios: { errorsNew: {} } }]), /errors: the scenario "errorsNew" already exists/)
+})
+
+test('every scenario names the view it draws: a piece’s its own, core’s the setup view, unless it says otherwise', () => {
+  const merged = mergeScenarios({ found: {}, ownView: { persisted: { plugin: { view: 'sandbox', other: 1 } } } }, [
+    { id: 'sandbox', hasView: true, scenarios: { sandbox: {}, sandboxSetup: { persisted: { plugin: { view: 'setup' } } } } },
+    { id: 'isml', hasView: false, scenarios: { isml: { persisted: { workspace: { kept: true } } } } }
+  ])
+  assert.deepEqual(Object.fromEntries(Object.entries(merged).map(([name, scenario]) => [name, namedView(scenario)])), {
+    found: 'setup',
+    ownView: 'sandbox',
+    sandbox: 'sandbox',
+    sandboxSetup: 'setup',
+    isml: 'setup'
+  })
+  // What a scenario persists besides the view is kept.
+  assert.deepEqual(merged.ownView.persisted, { plugin: { view: 'sandbox', other: 1 } })
+  assert.deepEqual(merged.isml.persisted, { workspace: { kept: true }, plugin: { view: 'setup' } })
+})
+
+/** Mounts a panel module as `orca plugin check` draws a scenario, and returns the view drawn. */
+async function viewDrawnBy(module: Parameters<typeof mount>[0], scenario: (typeof CHECKS)[string]): Promise<string | null> {
+  const { persisted, theme, events, ...hostOptions } = scenario
+  void events
+  panel = await mount(module, { host: mockHost({ capabilities: CAPABILITIES, ...hostOptions }), persisted, theme, locale: 'en' })
+  const drawn = openView(panel)
+  panel.unmount()
+  panel = undefined
+  return drawn
+}
+
+test('a scenario that names a view it cannot open is caught', async () => {
+  // Over VIEWS, a scenario naming a piece that is not delivered draws the setup view instead.
+  const [debuggerScenario, errorsScenario] = Object.values(
+    mergeScenarios({}, [
+      { id: 'debugger', hasView: true, scenarios: { debugger: {} } },
+      { id: 'errors', hasView: true, scenarios: { errors: {} } }
+    ])
+  )
+  assert.equal(namedView(debuggerScenario), 'debugger')
+  assert.equal(await viewDrawnBy(VIEWS, debuggerScenario), 'setup')
+  assert.equal(await viewDrawnBy(VIEWS, errorsScenario), 'errors')
+})
+
+test('every check scenario of the plugin draws the view it names', async () => {
+  for (const [name, scenario] of Object.entries(CHECKS)) {
+    const named = namedView(scenario)
+    assert.ok(named, `${name} names a view`)
+    assert.equal(await viewDrawnBy(panelModule, scenario), named, `${name} draws ${named}`)
+  }
 })
 
 test('the panel’s checks hold core’s scenarios first, then only scenarios named after a piece', () => {

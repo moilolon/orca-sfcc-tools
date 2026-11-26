@@ -142,3 +142,16 @@ test('ListRow leads with a state mark and ends with a short note', async () => {
   shown = await draw(() => <ListRow tone="ok" title="main" />)
   assert.deepEqual(shown.findAll({ type: 'Text' }).map((item) => item.text), ['main'])
 })
+
+test('ListRow opens its item when given a press action, through a link on its name', async () => {
+  let opened = 0
+  let shown = await draw(() => <ListRow tone="failed" title="TypeError in a script" note="3×" noteTone="failed" onPress={() => opened++} />)
+  const link = shown.find({ type: 'Link' })
+  assert.equal(link?.text, 'TypeError in a script')
+  await shown.press({ type: 'Link' })
+  assert.equal(opened, 1)
+  shown.unmount()
+  // Without one, the name is plain text.
+  shown = await draw(() => <ListRow tone="failed" title="TypeError in a script" />)
+  assert.equal(shown.find({ type: 'Link' }), null)
+})

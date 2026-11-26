@@ -2,7 +2,7 @@
 // look like one panel. Each block is built only from Orca's own components and holds no text of
 // its own: the caller words everything in Orca's language. CLAUDE.md, "Panel look", says which
 // block goes where.
-import { Badge, Box, Button, Callout, EmptyState, Row, Spinner, Stack, Text, type IconName, type OrcaNode, type Tone } from 'orca'
+import { Badge, Box, Button, Callout, EmptyState, Link, Row, Spinner, Stack, Text, type IconName, type OrcaNode, type Tone } from 'orca'
 
 /**
  * The plugin's tones, by what they mean rather than by colour: `ok` done or ready, `busy` working
@@ -124,15 +124,30 @@ export function ErrorState({
 
 /**
  * One item of a list: a state mark, its name (cut when it does not fit) and a short note on the
- * right (`uploading…`, `3 new`). `current` sets the name in a heavier weight.
+ * right (`uploading…`, `3 new`). `current` sets the name in a heavier weight. With `onPress` the
+ * name is a link that opens the item (the log entry, the file at its line).
  */
-export function ListRow({ tone, title, note, noteTone, current = false }: { tone: StateTone; title: string; note?: string; noteTone?: StateTone; current?: boolean }) {
+export function ListRow({
+  tone,
+  title,
+  note,
+  noteTone,
+  current = false,
+  onPress
+}: {
+  tone: StateTone
+  title: string
+  note?: string
+  noteTone?: StateTone
+  current?: boolean
+  onPress?: () => unknown
+}) {
   return (
     <Row justify="between" align="center" gap="sm">
       <Row align="center" gap="sm">
         <StateMark tone={tone} label={note ?? title} />
         <Text truncate weight={current ? 'medium' : 'regular'}>
-          {title}
+          {onPress ? <Link onPress={onPress}>{title}</Link> : title}
         </Text>
       </Row>
       {note ? (
