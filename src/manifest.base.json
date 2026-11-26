@@ -3,6 +3,7 @@
   "id": "sfcc-tools",
   "name": "SFCC Tools",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Salesforce Commerce Cloud work in Orca: ISML, cartridge upload, sandbox status and the new errors of its log, over the official b2c CLI.",
   "repository": "https://github.com/moilolon/orca-sfcc-tools",
   "author": {
