@@ -158,13 +158,35 @@ export function flagOf(arg: string): string | null {
 }
 
 /**
+ * The debugger's own client id, the one value `--client-id` may take, and only on `debug`. That
+ * flag names the debugger client the adapter creates on the instance, not a credential: two
+ * sessions with the same id take each other over silently, and b2c's default is shared with
+ * other tools. Since `debug` runs only on the sandbox (`ALLOWED_COMMANDS`), so does the flag.
+ */
+export const DEBUGGER_CLIENT_ID = 'orca-sfcc-tools'
+
+/**
+ * Whether the argument at `at` is `--client-id` as the debugger may pass it: on the `debug`
+ * command, once, with exactly `DEBUGGER_CLIENT_ID` as its value, joined (`--client-id=…`) or in
+ * the next argument.
+ */
+function isDebuggerClientId(args: readonly string[], at: number): boolean {
+  const arg = args[at]
+  if (flagOf(arg) !== '--client-id' || commandOf(args) !== 'debug') return false
+  if (args.filter((each) => flagOf(each) === '--client-id').length !== 1) return false
+  return arg === `--client-id=${DEBUGGER_CLIENT_ID}` || (arg === '--client-id' && args[at + 1] === DEBUGGER_CLIENT_ID)
+}
+
+/**
  * The position of the first argument that starts with `-` and is not an allowed flag, or -1.
  * The whole name must match, so `-s x`, `-s=x`, `--server x` and `--server=x` are all refused,
- * and so are grouped short flags (`-ar`), a value glued to one (`-shost`) and a bare `--`.
+ * and so are grouped short flags (`-ar`), a value glued to one (`-shost`) and a bare `--`. The
+ * one exception is the debugger's client id (`isDebuggerClientId`): any other value, form or
+ * command with `--client-id` is refused like the rest.
  */
 export function refusedFlag(args: readonly string[]): number {
-  return args.findIndex((arg) => {
+  return args.findIndex((arg, at) => {
     const flag = flagOf(arg)
-    return flag !== null && !ALLOWED_FLAGS.has(flag)
+    return flag !== null && !ALLOWED_FLAGS.has(flag) && !isDebuggerClientId(args, at)
   })
 }

@@ -28,12 +28,14 @@ one at a time.
 | ⬆️ | **Upload** | Deploys the workspace you pick to a code version of its own, activates it and uploads every change after that; removing the workspace deletes its version |
 | 🚦 | **Sandbox** | Started, stopped or busy, with start and stop, and which workspace uploads to which code version, in the status bar |
 | 🪵 | **Errors** | The new errors of each environment's log, one row per error however often it repeats, until marked as seen; the sandbox's count in the status bar |
+| 🐞 | **Debugger** | Breakpoints on the sandbox, and the threads, call stack and variables of a request halted on one, with continue and step |
 
 ---
 
 ## 🧭 How it works
 
-- **On the official CLI.** Upload, logs and the sandbox go through `b2c`, Salesforce's CLI.
+- **On the official CLI.** Upload, logs, the sandbox and debugging go through `b2c`,
+  Salesforce's CLI.
   It is the only thing the plugin needs installed: it ships no binaries of its own.
 - **Four environments.** The sandbox reads the plain keys of `dw.json`; development, staging
   and production read the same keys with a suffix (`-dev`, `-stg`, `-prd`, set in Settings).

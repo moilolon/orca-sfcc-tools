@@ -36,7 +36,9 @@ Changing it needs the owner's yes.
       against, for the tests that walk it.
     - `src/protocol.ts`: the panel–worker contract (`core.status`), importing each piece's
       `protocol.ts`. Request names start with the piece id.
-    - `src/worker/worker.ts` builds core and starts every piece of `src/worker/pieces.ts`;
+    - `src/worker/worker.ts` builds core and starts every piece of `src/worker/pieces.ts`; its
+      `deactivate()` awaits every piece's `dispose()` (which may be async) side by side, each
+      within `DISPOSE_BOUND_MS`, then core's own handlers, logging only piece ids and codes;
       `src/panel/panel.tsx` draws a bar with one view per delivered piece of
       `src/panel/sections.ts` that has one, the status line and the setup view (the whole panel
       while no piece has a view), knowing no piece by name; `src/panel/ui.tsx` holds the blocks
@@ -78,6 +80,14 @@ Changing it needs the owner's yes.
       of its lines) and the view says "some entries may have been missed since <time>", never a
       notification.
       Phase 4's command line has the same limit.
+    - `src/pieces/debugger/`: `dap-client.ts` (the debug adapter protocol's framing and
+      request matching), `session.ts` (one `b2c debug` session: its states, driven by the
+      adapter's events, never by its responses), `breakpoints.ts` (the single store of
+      breakpoints, per workspace, paths relative to it; the editor phase reads and writes it
+      too), `workspace.ts` (which workspace is debugged and how a file is opened, each in one
+      function), `files.ts`, and `fake-adapter.ts`, the scripted adapter its tests use. Every
+      way out of a session disconnects first (a halted request is otherwise held), and a flag
+      in its storage makes the next start run a cleanup session after an unclean end.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
@@ -104,7 +114,10 @@ Changing it needs the owner's yes.
     - Arguments: a flag passes only when it is in `ALLOWED_FLAGS` (`flag_not_allowed`
       otherwise): nothing that names a host, a user, a credential, an instance, a configuration
       or `.env` file, a project folder, a certificate or a sign-in method goes in it, and
-      `--wait` is left out on purpose with its `--poll-interval` and `--timeout`. No argument
+      `--wait` is left out on purpose with its `--poll-interval` and `--timeout`. The one
+      exception is the debugger's own client id: `--client-id orca-sfcc-tools` (or
+      `--client-id=orca-sfcc-tools`, `DEBUGGER_CLIENT_ID`), once, on `debug` only, so only on
+      the sandbox; any other value, form or command with it is refused. No argument
       may hold a value of `dw.json` or a base64 form of its Basic pairs, in any letter case (one
       of eight characters or more anywhere in it, a shorter one as the whole argument or the
       whole value of `--flag=value`), and when `b2c` is a

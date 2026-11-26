@@ -43,7 +43,11 @@ export type Workspaces = {
 export const PIECE_IDS = ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor'] as const
 export type PieceId = (typeof PIECE_IDS)[number]
 
-export type Disposable = { dispose(): void }
+/**
+ * Something to stop. `dispose` may return a promise: the worker's deactivation waits for it, within
+ * a bound, so a piece can finish what must not be cut off (the debugger's disconnect).
+ */
+export type Disposable = { dispose(): void | Promise<void> }
 
 export type Logger = (message: string) => void
 
