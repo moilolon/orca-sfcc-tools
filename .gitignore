@@ -1,0 +1,3 @@
+# Worktrees of agent sessions and Orca workspaces
+.claude/worktrees/
+node_modules/
