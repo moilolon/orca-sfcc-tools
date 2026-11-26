@@ -113,8 +113,9 @@ export type RunResult = { stdout: string; stderr: string; json: unknown }
 
 /**
  * One line of a long-lived command's stderr: its JSON event, or the raw text. Both arrive
- * masked, once the line is whole: the text, and every string of the JSON at any depth, keys
- * included (b2c names the host in its messages). Only the values of dw.json are masked: a file
+ * masked, once the line is whole: the text, and every string of the JSON, keys included (b2c
+ * names the host in its messages). A JSON line nested deeper than `MAX_JSON_DEPTH` arrives as
+ * its text. Only the values of dw.json are masked: a file
  * name, a code version or a cartridge name in an event is as b2c wrote it.
  */
 export type B2cEvent = { json: unknown } | { text: string }
@@ -379,8 +380,28 @@ export function childEnvironment(
  */
 const LONG_VALUE = 8
 
-/** From this length the first label of a host names the instance, and is masked with the host. */
+/**
+ * From this length the first label of a host can name the instance, and is masked on its own
+ * when it also holds a digit or a hyphen (`abcd-005`, `shop-eu01-test`). A plain word
+ * (`staging`, `production`) is an ordinary word: it is masked only as part of the whole host.
+ */
 const INSTANCE_LABEL = 6
+
+/** Whether the first label of a host names an instance rather than being an ordinary word. */
+function namesInstance(label: string): boolean {
+  return label.length >= INSTANCE_LABEL && /[\d-]/.test(label)
+}
+
+/**
+ * The base64 of `user:password`, as an `Authorization: Basic` header carries it: the standard
+ * and the URL-safe alphabets, each with and without its padding.
+ */
+function basicPairs(user: string, password: string): string[] {
+  const padded = Buffer.from(`${user}:${password}`, 'utf8').toString('base64')
+  const bare = padded.replace(/=+$/, '')
+  const urlSafe = (text: string) => text.replace(/\+/g, '-').replace(/\//g, '_')
+  return [...new Set([padded, bare, urlSafe(padded), urlSafe(bare)])]
+}
 
 /**
  * The position of the first argument that holds a value read from dw.json, or -1, in any letter
@@ -436,7 +457,10 @@ function percentEncoded(value: string): string {
  * It remembers every value it is given and never forgets one, so a text is masked the same
  * whichever workspace is focused when it is masked. What is masked:
  * - each value, as it is written in the file; a host in any letter case;
- * - the first label of a host, when it has six characters or more: it names the instance;
+ * - the first label of a host, when it has six characters or more and holds a digit or a
+ *   hyphen: it names the instance. A plain word (`staging`) is masked only within the host;
+ * - the base64 of `user:password` when a role has both, as a Basic sign-in sends it, in the
+ *   standard and the URL-safe alphabets, with and without padding;
  * - the percent-encoded and the JSON-escaped form of a value, where they differ from it;
  * - `home`, the user's folder (its last part is usually the account name), as `~`.
  * A value shorter than eight characters is masked only where it stands alone: a user called
@@ -465,7 +489,7 @@ export function createMasker(home?: string) {
       const escaped = JSON.stringify(value).slice(1, -1)
       if (escaped !== value) add(escaped, host, alone)
       const label = host ? value.split('.')[0] : ''
-      if (label.length >= INSTANCE_LABEL && label !== value) add(label, true, label.length < LONG_VALUE)
+      if (namesInstance(label) && label !== value) add(label, true, label.length < LONG_VALUE)
     }
     // The longest first, so a value is masked whole before a shorter one that is part of it.
     return [...needles.values()]
@@ -479,12 +503,13 @@ export function createMasker(home?: string) {
   return {
     /** Adds the values of one role, as dw.json has them. The host is the one b2c is sent to. */
     remember(vars: B2cEnvironment): void {
-      for (const [variable, value] of Object.entries(vars)) {
-        if (!value) continue
-        if (!values.has(value) || (variable === 'SFCC_SERVER' && !hosts.has(value))) patterns = null
+      const keep = (value: string, host: boolean) => {
+        if (!values.has(value) || (host && !hosts.has(value))) patterns = null
         values.add(value)
-        if (variable === 'SFCC_SERVER') hosts.add(value)
+        if (host) hosts.add(value)
       }
+      for (const [variable, value] of Object.entries(vars)) if (value) keep(value, variable === 'SFCC_SERVER')
+      if (vars.SFCC_USERNAME && vars.SFCC_PASSWORD) for (const pair of basicPairs(vars.SFCC_USERNAME, vars.SFCC_PASSWORD)) keep(pair, false)
     },
     /** `text` with everything remembered masked. Anything that is not a text comes back as it is. */
     mask(text: string): string {
@@ -498,14 +523,24 @@ export function createMasker(home?: string) {
 }
 
 /**
- * A parsed JSON value with every string in it passed through `mask`, at any depth, keys
- * included (a host can be the key of a map as well as a value). Two keys that mask alike are
- * both kept, the later one numbered.
+ * How deep a JSON line of stderr is walked. b2c's events are a few levels deep; a line nested
+ * further (twenty thousand brackets would overflow the stack) arrives as its raw text, masked.
  */
-function maskDeep(value: unknown, mask: (text: string) => string): unknown {
+export const MAX_JSON_DEPTH = 100
+
+/** Thrown inside `maskDeep` when a value is nested past `MAX_JSON_DEPTH`. */
+class TooDeep extends Error {}
+
+/**
+ * A parsed JSON value with every string in it passed through `mask`, keys included (a host can
+ * be the key of a map as well as a value). Two keys that mask alike are both kept, the later one
+ * numbered. Throws `TooDeep` past `MAX_JSON_DEPTH` levels, before the stack runs out.
+ */
+function maskDeep(value: unknown, mask: (text: string) => string, depth = 0): unknown {
   if (typeof value === 'string') return mask(value)
-  if (Array.isArray(value)) return value.map((item) => maskDeep(item, mask))
   if (!value || typeof value !== 'object') return value
+  if (depth >= MAX_JSON_DEPTH) throw new TooDeep()
+  if (Array.isArray(value)) return value.map((item) => maskDeep(item, mask, depth + 1))
   const used = new Set<string>()
   const entries: [string, unknown][] = []
   for (const [key, item] of Object.entries(value)) {
@@ -513,9 +548,24 @@ function maskDeep(value: unknown, mask: (text: string) => string): unknown {
     let name = masked
     for (let count = 2; used.has(name); count++) name = `${masked} ${count}`
     used.add(name)
-    entries.push([name, maskDeep(item, mask)])
+    entries.push([name, maskDeep(item, mask, depth + 1)])
   }
   return Object.fromEntries(entries)
+}
+
+/**
+ * One whole line of stderr as the event a caller gets: its JSON masked when the line parses and
+ * is no deeper than `MAX_JSON_DEPTH`, else its text masked. Never throws on what b2c printed.
+ */
+export function maskedEvent(line: string, mask: (text: string) => string): B2cEvent {
+  const json = parseJson(line)
+  if (json === undefined) return { text: mask(line) }
+  try {
+    return { json: maskDeep(json, mask) }
+  } catch {
+    // Too deep to walk, or anything else a hostile line could cause: the raw text, masked.
+    return { text: mask(line) }
+  }
 }
 
 /**
@@ -756,10 +806,7 @@ export function createB2c(deps: B2cDeps): B2c {
       let done = false
       let stdinOpen = !!child.stdin
       let grace: ReturnType<typeof setTimeout> | undefined
-      const lines = lineSplitter((line) => {
-        const json = parseJson(line)
-        options.onEvent?.(json === undefined ? { text: prepared.mask(line) } : { json: maskDeep(json, prepared.mask) })
-      })
+      const lines = lineSplitter((line) => options.onEvent?.(maskedEvent(line, prepared.mask)))
       const decoder = streamDecoder()
       // Both streams are read whether or not anyone listens: a full pipe would block the process.
       child.stderr?.on('data', (chunk) => {
