@@ -73,9 +73,9 @@ Changing it needs the owner's yes.
       otherwise): nothing that names a host, a user, a credential, an instance, a configuration
       or `.env` file, a project folder, a certificate or a sign-in method goes in it, and
       `--wait` is left out on purpose with its `--poll-interval` and `--timeout`. No argument
-      may hold a value of `dw.json`, in any letter case (one of eight characters or more
-      anywhere in it, a shorter one as the whole argument or the whole value of
-      `--flag=value`), and when `b2c` is a
+      may hold a value of `dw.json` or a base64 form of its Basic pairs, in any letter case (one
+      of eight characters or more anywhere in it, a shorter one as the whole argument or the
+      whole value of `--flag=value`), and when `b2c` is a
       `.cmd` or `.bat` none may hold `" % ^ & | < > !` or a control character
       (`unsafe_argument`, with the position of the argument): a version manager's shim would
       let it run another command.
@@ -90,12 +90,19 @@ Changing it needs the owner's yes.
       What is masked is every value the runner has read from a `dw.json` since the worker
       started, for every role and from every file, so it does not depend on the workspace
       focused at the moment: each value as written; a host in any letter case, and its first
-      label when it has six characters or more; the percent-encoded and JSON-escaped forms of a
-      value; the home folder as `~`. A value shorter than eight characters is masked only where
-      it stands alone (a user `admin` leaves `admin-fix` whole). A host the file does not hold,
-      or an IP address, is not masked.
-    - Error details, the stderr events of `start()` (raw lines, and the strings and keys of a
-      JSON line at any depth, once the line is whole) and the runner's own log lines are
+      label on its own when it has six characters or more and holds a digit or a hyphen
+      (`abcd-005`; a plain word such as `staging` is masked only within the whole host); the
+      base64 of each role's Basic pairs, `basicForms` (`user:password`,
+      `client-id:client-secret` raw and form-encoded, and `user:REDACTED` and
+      `client-id:REDACTED` as `b2c` redacts a header; UTF-8, and Latin-1 when it differs;
+      standard and URL-safe alphabets, with and without padding); the percent-encoded and
+      JSON-escaped forms of a value; the home folder as `~`. A value shorter than eight characters is masked only where it stands alone (a user
+      `admin` leaves `admin-fix` whole). A host the file does not hold, or an IP address, is not
+      masked.
+    - Error details, the stderr events of `start()` (raw lines without their ANSI escape
+      sequences, and the strings and keys of a JSON line, once the line is whole; a line nested
+      deeper than `MAX_JSON_DEPTH` arrives as its text with each string masked as the walk
+      would, so masking never throws on what `b2c` prints) and the runner's own log lines are
       already masked. `run()` results and stdout chunks are as `b2c` printed them, hosts
       included, because a piece needs the data: whatever a piece shows, logs, stores or sends to
       a panel of them goes through `b2c.mask(text)` first (it reads no file: join the rows and

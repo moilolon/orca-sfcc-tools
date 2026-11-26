@@ -14,7 +14,7 @@
     "manifest": "node scripts/build-manifest.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "typescript": "~5.6.3"
+    "@types/node": "24.19.4",
+    "typescript": "7.0.2"
   }
 }
