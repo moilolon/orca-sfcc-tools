@@ -67,6 +67,32 @@
         "description": "Appended to each key of dw.json (hostname, client-id, ...) to find the production instance.",
         "type": "string",
         "default": "-prd"
+      },
+      {
+        "key": "errorsInterval",
+        "title": "Errors: read interval",
+        "description": "Minutes between reads of the sandbox's log for new errors. 0 turns the timer off; the other environments are read only when asked.",
+        "type": "number",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 1440
+      },
+      {
+        "key": "errorsFilter",
+        "title": "Errors: log files",
+        "description": "The log file prefixes read for errors, separated by commas.",
+        "type": "string",
+        "default": "error,customerror",
+        "placeholder": "error,customerror"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "errors-new",
+        "text": "0",
+        "icon": "bug",
+        "tone": "warning",
+        "tooltip": "New errors on the sandbox"
       }
     ],
     "syntaxes": [
