@@ -84,6 +84,15 @@
         "type": "string",
         "default": "error,customerror",
         "placeholder": "error,customerror"
+      },
+      {
+        "key": "codeVersionPrefix",
+        "title": "Code version prefix",
+        "description": "Put before the workspace name to make the code version each workspace uploads to (ws-checkout-fix). Letters, digits, - and _; empty means ws-. A workspace keeps the name it got first, and a new name never takes a version already on the sandbox.",
+        "type": "string",
+        "default": "ws-",
+        "maxLength": 16,
+        "placeholder": "ws-"
       }
     ],
     "statusBarItems": [
@@ -93,6 +102,20 @@
         "icon": "bug",
         "tone": "warning",
         "tooltip": "New errors on the sandbox"
+      },
+      {
+        "id": "sandbox",
+        "text": "Sandbox",
+        "icon": "cloud",
+        "tooltip": "Sandbox state. Press to refresh.",
+        "command": "sandbox.refresh"
+      },
+      {
+        "id": "sandbox-upload",
+        "text": "Upload",
+        "icon": "upload",
+        "tooltip": "The upload to the sandbox.",
+        "command": "sandbox.refresh"
       }
     ],
     "syntaxes": [
@@ -105,6 +128,42 @@
         "extensions": [
           ".isml"
         ]
+      }
+    ],
+    "commands": [
+      {
+        "id": "sandbox.pick",
+        "title": "SFCC: Upload from this workspace",
+        "when": "workspace"
+      },
+      {
+        "id": "sandbox.release",
+        "title": "SFCC: Stop uploading"
+      },
+      {
+        "id": "sandbox.deploy",
+        "title": "SFCC: Deploy everything again"
+      },
+      {
+        "id": "sandbox.reload",
+        "title": "SFCC: Reload the code version"
+      },
+      {
+        "id": "sandbox.refresh",
+        "title": "SFCC: Refresh sandbox status"
+      },
+      {
+        "id": "sandbox.start",
+        "title": "SFCC: Start sandbox"
+      },
+      {
+        "id": "sandbox.stop",
+        "title": "SFCC: Stop sandbox"
+      }
+    ],
+    "events": [
+      {
+        "on": "workspace.removed"
       }
     ]
   },
