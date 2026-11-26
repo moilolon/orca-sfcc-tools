@@ -1,0 +1,23 @@
+<!-- ${pdict.count} and <isinclude template="a/b"/> stay ISML -->
+<p class="after-comment">x</p>
+<isif condition="${pdict.type == "a"}">A</isif>
+<isinclude url="${URLUtils.url("Page-Include", "cid", "x")}"/>
+<a href="${URLUtils.url('Home-Show')">open</a>
+<a title="${a">x</a> <b title="${b}">y</b>
+<p title='${Resource.msg('k', 'f', null)}'>z</p>
+<Script type="x">var a = "<p>";</Script>
+<STYLE>p { color: red; }</STYLE>
+<isscript
+   type="x">
+var a = 1;
+</isscript>
+<iscomment
+>hidden <p>x</p></iscomment>
+<p>${`a}b`} and ${`x ${pdict.y} z`}</p>
+<isscript>
+s.replace(/'/g, '');
+/^https?:\/\//.test(x); var z = 2;
+var q = a / b / c;
+return /x[/]y/i;
+</isscript>
+<p class="end">done</p>
