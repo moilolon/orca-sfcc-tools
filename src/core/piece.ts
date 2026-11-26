@@ -24,9 +24,12 @@ export type Workspaces = {
   focused(): Promise<Workspace | null>
   /** The workspace picked by hand to upload to the sandbox (phase 2), or null. */
   uploading(): Promise<Workspace | null>
-  /** The uploading workspace and the code version it uploads to, or null while none uploads. */
+  /** The uploading workspace and the code version it uploads to; null while nothing uploads. */
   upload(): Promise<{ workspace: Workspace; codeVersion: string } | null>
-  /** Only the sandbox piece calls it, when a workspace is picked or released. */
+  /**
+   * Only the sandbox piece calls it, when a workspace is picked or released. `codeVersion` is the
+   * version that workspace uploads to; null or left out, `upload()` answers null.
+   */
   setUploading(workspaceId: string | null, codeVersion?: string | null): Promise<void>
   /**
    * Where to look for dw.json: the uploading workspace, else the focused one (so the panel can
