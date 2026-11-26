@@ -6,3 +6,14 @@
 <p class="after-condition">Still HTML</p>
 <div data-x='${ {open: 1 '>Text</div>
 <p class="after-braces">Still HTML</p>
+<div data-x="${ {a: 1} ">Text</div>
+<p class="next">t</p>
+<isif condition="${pdict.a}">
+    <span class="b">${pdict.b}</span>
+</isif>
+<a href="${url}">link</a>
+<a title="${a" data-x="{}">x</a>
+<a title="${cls" onclick="f({a: 1})">x</a>
+<div data-y="${ {a: {b: 1}}.a }">Two levels</div>
+<!-- an expression left open in a comment ${a -->
+<p class="end">end</p>

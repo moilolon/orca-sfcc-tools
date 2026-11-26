@@ -426,7 +426,7 @@
           "name": "punctuation.section.embedded.begin.isml"
         }
       },
-      "end": "(\\})|(?=</)|$",
+      "end": "(\\})|(?=</)|(?=-->)|$",
       "endCaptures": {
         "1": {
           "name": "punctuation.section.embedded.end.isml"
@@ -461,7 +461,7 @@
     "expression-closed": {
       "name": "meta.embedded.expression.isml",
       "contentName": "source.js.embedded.isml",
-      "begin": "\\$\\{(?=(?:[^\"'`}\\n\\\\$]|\\\\.|\\$(?!\\{)|\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\\\n]|\\\\.)*`)*\\})",
+      "begin": "\\$\\{(?=(?:[^\"'`{}\\n\\\\$]|\\\\.|\\$(?!\\{)|\\{(?:[^\"'`{}\\n\\\\]|\\\\.|\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\\\n]|\\\\.)*`)*\\}|\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\\\n]|\\\\.)*`)*\\})",
       "beginCaptures": {
         "0": {
           "name": "punctuation.section.embedded.begin.isml"
@@ -583,7 +583,7 @@
     },
     "expression-braces": {
       "begin": "\\{",
-      "end": "\\}|(?=</)|$",
+      "end": "\\}|(?=</)|(?=-->)|$",
       "patterns": [
         {
           "include": "#expression-body"

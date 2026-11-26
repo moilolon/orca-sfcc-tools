@@ -512,6 +512,73 @@ test('an unclosed ${ stops at the end of the line, the closing quote or the clos
   token(doc, 8, 'p', 'entity.name.tag.html')
 })
 
+test('an unclosed ${ with a later } on its line still stops at the quote of its value', () => {
+  // The } of a nested object, or of a later attribute, is not the expression's own: the value
+  // still closes at its quote, and every following line is HTML again.
+  const doc = fixture('unclosed.isml')
+  inside(doc, 9, '{a: 1} ', 'meta.embedded.expression.isml')
+  token(doc, 9, '"', 'string.quoted.double.html', 2)
+  token(doc, 9, 'Text', 'text.html.isml')
+  token(doc, 10, 'p', 'entity.name.tag.html')
+  token(doc, 10, 'class', 'entity.other.attribute-name.html')
+  token(doc, 11, 'isif', 'entity.name.tag.isml')
+  token(doc, 12, 'span', 'entity.name.tag.html')
+  token(doc, 12, '}', 'punctuation.section.embedded.end.isml')
+  token(doc, 14, '}', 'punctuation.section.embedded.end.isml')
+  token(doc, 14, 'link', 'text.html.isml')
+  // A } in a later attribute of the same tag.
+  token(doc, 15, 'data-x', 'entity.other.attribute-name.html')
+  token(doc, 15, '"{}"', 'string.quoted.double.html')
+  token(doc, 15, 'x', 'text.html.isml', 2)
+  token(doc, 16, 'onclick', 'entity.other.attribute-name.html')
+  token(doc, 16, '"f({a: 1})"', 'string.quoted.double.html')
+  // Two levels of braces, closed: read by the variant that stops at the quote, and still right.
+  token(doc, 17, '}', 'punctuation.section.embedded.end.isml', 3)
+  token(doc, 17, 'Two levels', 'text.html.isml')
+})
+
+test('an unclosed ${ in an HTML comment stops before -->', () => {
+  const doc = fixture('unclosed.isml')
+  token(doc, 18, '${', 'punctuation.section.embedded.begin.isml')
+  token(doc, 18, '-->', 'comment.block.html')
+  token(doc, 19, 'p', 'entity.name.tag.html')
+  token(doc, 19, 'end', 'text.html.isml', 2)
+  const closed = tokenize('<!-- ${a} --> <p>')
+  token(closed, 1, '}', 'punctuation.section.embedded.end.isml')
+  token(closed, 1, ' -->', 'comment.block.html')
+  token(closed, 1, 'p', 'entity.name.tag.html')
+})
+
+test('lines of 1,000 characters built to make a pattern backtrack are read in linear time', () => {
+  // Orca tokenizes lines of up to 1,000 characters, with 50 ms each. A pattern that backtracks
+  // would take seconds here; the bound is loose so that a busy machine does not fail it.
+  const fill = (prefix: string, unit: string) => (prefix + unit.repeat(1000)).slice(0, 1000)
+  const lines = [
+    fill('<a title="', '${'),
+    fill('<a title="', '${"'),
+    fill('<a title="', "${'"),
+    fill('<a title="', '${`'),
+    fill('<a title="${', '"a" '),
+    fill('<a title="${', `'"\`'"\``),
+    fill('<a title="${', '{'),
+    fill('<a title="${', '{"a" '),
+    fill('<a title="${"', '\\'),
+    fill('', '<a t="${x" '),
+    fill('<p>', '${'),
+    fill('<!-- ', '${'),
+    fill('<!-- ', '<is'),
+    fill('<isscript>', '(/a'),
+    fill('<isscript>x', '=/['),
+    fill('<isscript>x', '=/[/')
+  ]
+  for (const line of lines) {
+    const started = performance.now()
+    tokenize(line)
+    const took = performance.now() - started
+    assert.ok(took < 1000, `${JSON.stringify(line.slice(0, 24))}… took ${took.toFixed(1)} ms`)
+  }
+})
+
 // ---------------------------------------------------------------------------------------------
 // The review's samples, on src/pieces/isml/fixtures/edges.isml
 
