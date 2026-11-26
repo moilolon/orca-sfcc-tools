@@ -8,7 +8,8 @@ import type { PieceContext } from '../../core/piece'
 import { plainSettings } from '../../core/test-support'
 import type { SandboxStatus } from './protocol'
 import { STATUS_ITEM, UPLOAD_ITEM } from './status-bar'
-import { coded, FakeB2c, FakeTimers, FIX, fakeWorkspaces, memoryStorage, pieceStore, REMOTE, settle, SHOP } from './testing'
+import { coded, FakeB2c, FakeTimers, FIX, fakeWorkspaces, memoryStorage, pieceStore, REMOTE, SANDBOX_HOST, settle, SHOP, type Listed } from './testing'
+import { FOLLOW_INTERVAL_MS } from './status'
 import { HOST_TIMEOUT_MS } from './ownership'
 import { COMMANDS, startSandbox } from './worker'
 
@@ -62,10 +63,18 @@ function fakeOrca(settings: Record<string, unknown> = {}) {
   }
 }
 
-async function start(options: { b2c?: FakeB2c; settings?: Record<string, unknown>; locale?: string } = {}) {
+/**
+ * `listed` replaces the workspace list, `focused` is focused before the worker starts, and `files`
+ * gives each folder's dw.json (its sandbox host): b2c then reads the one `configRoot()` names.
+ */
+async function start(
+  options: { b2c?: FakeB2c; settings?: Record<string, unknown>; locale?: string; listed?: Listed[]; focused?: string; files?: Record<string, string> } = {}
+) {
   const b2c = options.b2c ?? new FakeB2c()
   const storage = memoryStorage()
-  const host = fakeWorkspaces(undefined, storage)
+  const host = fakeWorkspaces(options.listed, storage)
+  host.state.focused = options.focused ?? null
+  if (options.files) b2c.files = { configRoot: () => host.workspaces.configRoot(), hosts: options.files }
   const fake = fakeOrca(options.settings)
   const timers = new FakeTimers()
   const ctx: PieceContext = {
@@ -211,6 +220,66 @@ test('start and stop are fired from a command and followed on the list', async (
   await sandbox.flush()
   assert.equal(fake.bar(STATUS_ITEM)?.text, 'Sandbox starting')
   assert.equal(await fake.command(COMMANDS.stop), 'The sandbox is busy with another operation.')
+  sandbox.dispose()
+})
+
+test('a start or stop keeps the dw.json it began with until it settles, whatever the focus does', async () => {
+  const NOTES: Listed = { id: 'w-notes', kind: 'folder', name: 'Notes', path: 'C:/work/notes', branch: null, hostId: 'local' }
+  const ID = 'aaaaaaaa-1111-2222-3333-444444444444'
+  const b2c = new FakeB2c()
+  b2c.sandboxList = { data: [{ id: ID, state: 'stopped', hostName: SANDBOX_HOST }] }
+  // Shop's dw.json names the sandbox; the fix's names another one; the notes have none.
+  const files = { [SHOP.path]: SANDBOX_HOST, [FIX.path]: 'sandbox-02.example.com' }
+  const { fake, host, timers, sandbox } = await start({ b2c, listed: [SHOP, FIX, NOTES], focused: SHOP.id, files })
+  assert.equal((await sandbox.status()).sandbox.state, 'stopped')
+
+  assert.equal(await fake.command(COMMANDS.start), 'Starting the sandbox. The status bar follows it until it is started.')
+  assert.deepEqual(b2c.runs.at(-1)?.args, ['sandbox', 'start', ID])
+  const followed = b2c.runs.length
+
+  // The focus moves to a workspace with no dw.json: the follow, and a refresh by hand, keep Shop's.
+  host.state.focused = NOTES.id
+  await timers.advance(FOLLOW_INTERVAL_MS)
+  let current = await fake.request('sandbox.refresh')
+  assert.equal(current.config, 'ok')
+  assert.equal(current.sandbox.following, 'start')
+  assert.equal(current.sandbox.reason, null)
+  assert.equal(current.sandbox.state, 'busy')
+
+  // Then to one whose dw.json names another sandbox: the same.
+  host.state.focused = FIX.id
+  await timers.advance(FOLLOW_INTERVAL_MS)
+  current = await fake.request('sandbox.refresh')
+  assert.equal(current.sandbox.following, 'start')
+  assert.equal(current.sandbox.reason, null)
+  const during = b2c.runs.slice(followed)
+  assert.ok(during.length >= 4)
+  assert.ok(during.every((run) => run.root === SHOP.path), 'every read while followed used the dw.json it began with')
+
+  b2c.sandboxList = { data: [{ id: ID, state: 'started', hostName: SANDBOX_HOST }] }
+  await timers.advance(FOLLOW_INTERVAL_MS)
+  current = await sandbox.status()
+  assert.equal(current.sandbox.state, 'started')
+  assert.equal(current.sandbox.following, null)
+
+  // Settled: the hold is gone, and the focus decides again while nothing uploads.
+  current = await fake.request('sandbox.refresh')
+  assert.equal(b2c.runs.at(-1)?.root, FIX.path)
+  assert.equal(current.sandbox.reason, 'sandbox_not_listed')
+
+  // A stop keeps its dw.json the same way.
+  host.state.focused = SHOP.id
+  await fake.request('sandbox.refresh')
+  assert.equal(await fake.command(COMMANDS.stop), 'Stopping the sandbox. The status bar follows it until it is stopped.')
+  const stopped = b2c.runs.length
+  host.state.focused = NOTES.id
+  b2c.sandboxList = { data: [{ id: ID, state: 'stopped', hostName: SANDBOX_HOST }] }
+  await timers.advance(FOLLOW_INTERVAL_MS)
+  current = await sandbox.status()
+  assert.equal(current.sandbox.state, 'stopped')
+  assert.ok(b2c.runs.slice(stopped).every((run) => run.root === SHOP.path))
+  current = await fake.request('sandbox.refresh')
+  assert.equal(current.config, 'missing', 'released once it settled')
   sandbox.dispose()
 })
 

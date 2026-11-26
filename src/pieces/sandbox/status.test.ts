@@ -15,8 +15,19 @@ const other = { id: 'bbbbbbbb-1111-2222-3333-444444444444', state: 'stopped', ho
 function watch(b2c = new FakeB2c()) {
   const timers = new FakeTimers()
   const problems: { action: SandboxAction; code: string | null }[] = []
-  const sandbox = new SandboxWatch({ b2c, timers, onChange: () => {}, onProblem: (action, code) => void problems.push({ action, code }) })
-  return { b2c, timers, problems, sandbox }
+  /** How many holds on dw.json are taken and not released. */
+  const holds = { taken: 0, held: 0 }
+  const hold = async () => {
+    holds.taken++
+    holds.held++
+    let released = false
+    return () => {
+      if (!released) holds.held--
+      released = true
+    }
+  }
+  const sandbox = new SandboxWatch({ b2c, timers, onChange: () => {}, onProblem: (action, code) => void problems.push({ action, code }), hold })
+  return { b2c, timers, problems, sandbox, holds }
 }
 
 test('the API states are shown in four words', () => {
@@ -134,4 +145,40 @@ test('a sandbox that turns failed while followed is unknown', async () => {
   assert.deepEqual(sandbox.snapshot().state, 'unknown')
   assert.equal(sandbox.snapshot().reason, 'sandbox_failed')
   assert.equal(sandbox.snapshot().following, null)
+})
+
+test('dw.json is held from the fire until following ends, whichever way it ends', async () => {
+  const { b2c, timers, sandbox, holds } = watch()
+  b2c.sandboxList = { data: [live('stopped')] }
+  await sandbox.refresh()
+  assert.equal(holds.taken, 0, 'a read alone holds nothing')
+
+  // Settled on the list.
+  await sandbox.fire('start')
+  assert.equal(holds.held, 1)
+  b2c.sandboxList = { data: [live('started')] }
+  await timers.advance(FOLLOW_INTERVAL_MS)
+  assert.equal(holds.held, 0)
+
+  // Refused by b2c.
+  b2c.fail.set('sandbox stop', 'role_refused')
+  await sandbox.fire('stop')
+  await settle()
+  assert.equal(holds.held, 0)
+  b2c.fail.clear()
+
+  // Gone from the list, failed, timed out, or the worker stopped.
+  for (const end of ['gone', 'failed', 'timeout', 'dispose'] as const) {
+    b2c.sandboxList = { data: [live('started')] }
+    await sandbox.refresh()
+    await sandbox.fire('stop')
+    assert.equal(holds.held, 1, end)
+    if (end === 'gone') b2c.sandboxList = { data: [other] }
+    if (end === 'failed') b2c.sandboxList = { data: [live('failed')] }
+    if (end === 'dispose') sandbox.dispose()
+    else await timers.advance(end === 'timeout' ? FOLLOW_TIMEOUT_MS + FOLLOW_INTERVAL_MS : FOLLOW_INTERVAL_MS)
+    assert.equal(holds.held, 0, end)
+    assert.equal(sandbox.snapshot().following, null, end)
+  }
+  assert.equal(holds.taken, 6)
 })

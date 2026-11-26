@@ -27,7 +27,11 @@
 //     or a two-letter country code (three labels or more on a two-letter or word-like ending,
 //     `WORD_LIKE_DOMAINS`), never a file name (`Cart.js`, `dw.json`, an extension of
 //     `FILE_EXTENSIONS`), a `dw.*` name, a Java package or a script expression (`request.site`,
-//     `this.store`, `logger.info`: `PACKAGE_ROOTS`)                    -> `<host>`
+//     `this.store`, `logger.info`: `PACKAGE_ROOTS`)                    -> `<host>`. Where the
+//     text around says it is a host, fewer labels do: inside `[]`, `()`, `<>` or quotes, two
+//     labels on a two-letter ending (`domain [brand.eu]`); right after `domain`, `host`,
+//     `hostname`, `server`, `url`, `@` or `//`, two labels on any known ending, in any letter
+//     case. A file name, a `dw.*` name, a Java package or a script expression stays even there
 //   - IP addresses, version 4 and 6                                  -> `<ip>`
 //   - quoted values (`"…"`, `'…'`)                                   -> `<q>`, except a quoted script
 //     path (`'app_x/cartridge/controllers/Cart.js'`), kept: it says which script failed
@@ -112,19 +116,49 @@ const WORD_LIKE_DOMAINS = new Set(['app', 'info', 'site', 'store', 'shop', 'loca
 
 const HOST = /(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24})(?::\d{1,5})?(?![\w.@-]*[\w@])/g
 
+/**
+ * A dotted token right after a word that names a host (`domain`, `host`, `hostname`, `server`,
+ * `url`, then an optional `:` or `=` and an opening bracket or quote), or right after `@` or `//`,
+ * in any letter case: the word before it, and the token.
+ */
+const NAMED_HOST =
+  /(\b(?:domain|host|hostname|server|url)\b\s*[:=]?\s*[[(<'"]?|(?<![\w.+-])@|(?<![\w:/])\/\/)((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24}))(?::\d{1,5})?(?![\w.@-]*[\w@])/gi
+
+/** The closing character of each opening bracket or quote a host may stand in. */
+const CLOSERS: Readonly<Record<string, string>> = { '[': ']', '(': ')', '<': '>', "'": "'", '"': '"' }
+
+/**
+ * How sure the text around a token is that it is a host: `plain` in free text; `enclosed` inside
+ * `[]`, `()`, `<>` or quotes; `named` after a word that names a host, `@` or `//`.
+ */
+type HostContext = 'plain' | 'enclosed' | 'named'
+
 /** Whether a dotted lower-case token is a host: see the rules above. */
-function hostOrNot(token: string, tld: string): string {
+function hostOrNot(token: string, tld: string, context: HostContext = 'plain'): string {
   const labels = token.replace(/:\d+$/, '').split('.')
   if (labels.length < 2) return token
-  if (FILE_EXTENSIONS.includes(tld) || NOT_HOST_ENDINGS.has(tld) || PACKAGE_ROOTS.has(labels[0])) return token
+  if (FILE_EXTENSIONS.includes(tld) || PACKAGE_ROOTS.has(labels[0])) return token
+  // After a word that names a host, an ending that is also a word (`brand.it`) is a country's.
+  if (NOT_HOST_ENDINGS.has(tld) && context !== 'named') return token
   if (!(TOP_LEVEL_DOMAINS.includes(tld) || tld.length === 2)) return token
   // On a word-like or a two-letter ending, two labels read as a property (`config.local`): a host
-  // needs three (`shop.example.de`). A two-letter first label with a two-letter or word-like
-  // ending is a package written backwards (`de.example.ui`).
-  const weak = WORD_LIKE_DOMAINS.has(tld) || tld.length === 2
-  if (weak && labels.length < 3) return token
-  if (weak && labels[0].length === 2) return token
+  // needs three (`shop.example.de`), unless the text around says it is one: inside brackets or
+  // quotes a two-letter ending is a country's (`[brand.eu]`), and after a word that names a host
+  // any ending is. A two-letter first label with a two-letter or word-like ending is a package
+  // written backwards (`de.example.ui`).
+  const soft = WORD_LIKE_DOMAINS.has(tld) || tld.length === 2
+  const needsThree = context === 'plain' ? soft : context === 'enclosed' && WORD_LIKE_DOMAINS.has(tld)
+  if (needsThree && labels.length < 3) return token
+  if (soft && context !== 'named' && labels[0].length === 2) return token
   return '<host>'
+}
+
+/** A token the `HOST` rule found, seen with the text around it. */
+function hostInText(token: string, tld: string, offset: number, text: string): string {
+  const opener = text[offset - 1] ?? ''
+  const closer = CLOSERS[opener]
+  const enclosed = closer !== undefined && text[offset + token.length] === closer
+  return hostOrNot(token, tld, enclosed ? 'enclosed' : 'plain')
 }
 
 /** Whether a quoted value is a script path, which says which script failed. */
@@ -178,7 +212,12 @@ const RULES: readonly Rule[] = [
   [/\b([a-z]\w*(?:Id|ID|No|Number)|id|ID|pid|uuid|UUID)\s*([=:])\s*(?:'[^'\n]*'|"[^"\n]*"|[^\s,;)'"]+)/g, '$1$2#'],
   [/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<uuid>'],
   [/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '<email>'],
-  [HOST, (token, tld: string) => hostOrNot(token, tld)],
+  [NAMED_HOST, (whole, before: string, token: string, tld: string) => {
+    const kept = hostOrNot(token.toLowerCase(), tld.toLowerCase(), 'named')
+    return kept === '<host>' ? `${before}<host>` : whole
+  }],
+  // A replacer is handed the offset of the match (a number) and the whole text after its groups.
+  [HOST, (token, tld: string, offset: string | number, text: string) => hostInText(token, tld, Number(offset), text)],
   [/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<ip>'],
   // IPv6: with `::`, or with at least four colons, so a time (`10:15:02`) is never one.
   [/(?<![\w:])(?=[0-9a-f:]*::|(?:[0-9a-f]{1,4}:){4})(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])/gi, '<ip>'],

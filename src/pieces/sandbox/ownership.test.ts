@@ -319,6 +319,61 @@ test('a failed delete keeps the version queued and says so', async () => {
   assert.deepEqual(problems.at(-1), { action: 'delete', code: null })
 })
 
+test('a delete that times out while Salesforce goes on deleting counts as done; one still listed is retried', async () => {
+  const { b2c, ownership, problems } = setup()
+  await ownership.pick(FIX.id)
+  await settle()
+  await ownership.pick(SHOP.id)
+  await settle()
+  // The server renames the version it deletes, and the delete answers a timeout.
+  b2c.fail.set('code delete', 'b2c_timeout')
+  b2c.sideEffects.set('code delete', (args) => {
+    b2c.codeVersions = b2c.codeVersions.map((v) => (v.id === args[2] ? { ...v, id: `.deleted_1_${v.id}` } : v))
+  })
+  await ownership.removed(FIX.id)
+  await settle()
+  assert.equal(ownership.pendingCount(), 0, 'renamed: deleted')
+  assert.deepEqual(problems.at(-1), { action: 'delete', code: null }, 'not shown as a failure')
+  assert.equal(b2c.commands().filter((c) => c === 'code delete ws-checkout-fix --force').length, 1)
+  assert.equal(b2c.commands().at(-1), 'code list', 'the list was read again after the failure')
+
+  // A renamed version is never a workspace's and never deleted again, even when queued.
+  assert.equal(ownership.versionOf(FIX.id), null)
+  assert.ok(!Object.values(ownership.storedVersions()).some((v) => v.startsWith('.deleted_')))
+  await ownership.reload()
+  await settle()
+  assert.ok(!b2c.commands().some((c) => c.startsWith('code delete .deleted_')))
+
+  // Gone altogether after the timeout: deleted too.
+  await ownership.pick(FIX.id)
+  await settle()
+  await ownership.pick(SHOP.id)
+  await settle()
+  b2c.sideEffects.set('code delete', (args) => {
+    b2c.codeVersions = b2c.codeVersions.filter((v) => v.id !== args[2])
+  })
+  await ownership.removed(FIX.id)
+  await settle()
+  assert.equal(ownership.pendingCount(), 0, 'gone: deleted')
+  assert.deepEqual(problems.at(-1), { action: 'delete', code: null })
+
+  // Still listed under its own name: a real failure, retried at the next activation.
+  await ownership.pick(FIX.id)
+  await settle()
+  await ownership.pick(SHOP.id)
+  await settle()
+  b2c.sideEffects.clear()
+  await ownership.removed(FIX.id)
+  await settle()
+  assert.equal(ownership.pendingCount(), 1, 'still there: kept')
+  assert.deepEqual(problems.at(-1), { action: 'delete', code: 'b2c_timeout' })
+  b2c.fail.clear()
+  await ownership.reload()
+  await settle()
+  assert.equal(ownership.pendingCount(), 0, 'retried')
+  assert.ok(!b2c.codeVersions.some((v) => v.id === 'ws-checkout-fix-2' || v.id === 'ws-checkout-fix'))
+})
+
 test('a version left by a workspace removed unheard is deleted only by hand, and only from a whole list', async () => {
   const { b2c, ownership, host } = setup()
   await ownership.pick(FIX.id)

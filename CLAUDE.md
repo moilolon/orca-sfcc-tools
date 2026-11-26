@@ -24,8 +24,10 @@ Changing it needs the owner's yes.
       `b2c.ts` (the only module that starts `b2c`), `dw-config.ts` (the only module that
       reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
-      namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
-      with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish),
+      namespace per piece), `workspaces.ts` (the workspace list, the uploading workspace
+      with its code version: `uploading()`, `upload()`, and `holdConfigRoot()`, which keeps
+      `configRoot()` on the folder it answers now, whatever the focus does, until released;
+      a workspace picked to upload still wins), `i18n.ts` (texts, English and Spanish),
       `open-file.ts` (opens a file of a workspace at a line through `orca file open`).
       `b2c.ts` and `open-file.ts` are the only modules that start a process: `open-file.ts`
       imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe` (or `orca`) directly,
@@ -59,7 +61,9 @@ Changing it needs the owner's yes.
       uploading, failed; deletes the version of a removed workspace, deferred while active),
       `code-version.ts` (`<prefix><slug>`, kept per workspace id), `uploader.ts` (reads
       `code watch --jsonl` lines), `status.ts` (the sandbox state from `sandbox list`, start and
-      stop followed on it), `status-bar.ts` (its two items' texts), `worker.ts` (requests,
+      stop followed on it, holding the `dw.json` they began with until they settle, fail or time
+      out, so moving the focus never loses the sandbox), `status-bar.ts` (its two items'
+      texts), `worker.ts` (requests,
       commands, `workspace.removed`); `testing.ts` holds the fakes its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
       beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
@@ -69,7 +73,12 @@ Changing it needs the owner's yes.
       for in is chosen by `frameRoot()` in its `worker.ts`. A read passes `--level ERROR` and
       `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
       reduced to its path, its locale segment to `<locale>`, and a host written without a scheme
-      to `<host>` (never a file name, a `dw.*` name or a Java package). Numbers become `#`, but
+      to `<host>` (never a file name, a `dw.*` name or a Java package); where the text around
+      says it is one, fewer labels do (`domain [<host>]` for a two-label `.eu` inside brackets
+      or quotes, and any known ending after `domain`, `host`, `hostname`, `server`, `url`, `@`
+      or `//`), while a script expression stays. A read is marked as asked in storage until it
+      ends, so one a worker restart cut short runs again when the worker starts (within ten
+      minutes of being asked). Numbers become `#`, but
       an HTTP status after `status`, `statusCode` or `HTTP` and an error code after `error code`:
       an order, a gift card, a product or a one-time code is never kept, and a `LETTERS-digits`
       token becomes `<code>`. **The limit of `b2c logs get`:**
@@ -171,7 +180,11 @@ Changing it needs the owner's yes.
       and after `dispose()` nothing queued starts and nothing is deployed. A version is deleted only on its workspace's
       `workspace.removed` event (once another version is active) or by a person's hand, from a
       whole list and never for a project hidden from the sidebar; a workspace missing from a
-      list is never taken as removed. A worker restart restarts the
+      list is never taken as removed. A delete that fails is checked in `code list`: Salesforce
+      can answer a timeout and go on deleting, renaming the version `.deleted_<n>_<name>`, so a
+      version gone or renamed counts as deleted and one still there waits for the next
+      activation; a `.deleted_…` version is never shown as a workspace's or deleted again. A
+      worker restart restarts the
       watcher without a redeploy, but only for a version whose last full deploy ended; the
       others show that a deploy is needed and are never reloaded.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
@@ -258,6 +271,21 @@ text characters (no `●`, `→` as a control, ASCII boxes).
   the copies as one development plugin: load one copy at a time. Before loading another,
   `orca plugin dev unload <the other folder>`; `orca plugin list --json` shows which folder is
   loaded.
+- **Loading the plugin for a live check:** never from the repository's checkout. Orca watches
+  the whole development folder, `.claude/worktrees/` included, so a plugin loaded from the
+  checkout reloads, and its worker restarts (dropping a debugger session, cutting a log read
+  short and restarting `code watch`), every time an agent saves a file in any worktree. Load
+  it from a clean copy of the branch outside the repository instead:
+    1. `git archive <ref> | tar -x -C <dir>`, with `<dir>` a new, empty folder outside the
+       repository (no `.claude/`, no worktrees, no `.git`);
+    2. `npm install` in `<dir>`;
+    3. `orca plugin dev unload` the copy loaded before, if any, then the owner loads `<dir>`
+       (`orca plugin dev load <dir>`). It is a folder Orca has not seen, so it needs the owner's
+       approval once; never pass `--approve`.
+  For the next round, extract the new ref into the same `<dir>` (empty it first, keep
+  `node_modules` or run `npm install` again): Orca reloads it once.
+- `orca plugin inspect .` is refused in a checkout whose worktrees push the folder over its
+  size limit; run it on such a clean copy (`orca plugin inspect <dir> --json`).
 
 ## Git
 

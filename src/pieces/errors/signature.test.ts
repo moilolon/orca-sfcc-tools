@@ -210,6 +210,48 @@ test('a script expression is never a host; a host of three labels on a word-like
   for (const [input, expected] of hosts) assert.equal(normalize(input), expected, input)
 })
 
+test('a domain of two labels becomes <host> inside brackets or quotes, or after a word that names a host', () => {
+  const hosts: [string, string][] = [
+    ['Cannot resolve domain [example.eu] with selector [default]', 'Cannot resolve domain [<host>] with selector [default]'],
+    ['Lookup failed (example.de)', 'Lookup failed (<host>)'],
+    ['Redirect to <example.fr> refused', 'Redirect to <<host>> refused'],
+    ['Cookie for example.eu: rejected [example.nl]', 'Cookie for example.eu: rejected [<host>]'],
+    ['Unknown host example.it', 'Unknown host <host>'],
+    ['Unknown Host: Example.IT', 'Unknown Host: <host>'],
+    ['hostname=example.app refused', 'hostname=<host> refused'],
+    ['server example.store is down', 'server <host> is down'],
+    ['domain: example.local', 'domain: <host>'],
+    ['URL //example.shop/cart failed', 'URL //<host>/cart failed'],
+    ['Loaded from //cdn.example.de/app.js', 'Loaded from //<host>/app.js'],
+    ['Sent as @example.eu', 'Sent as @<host>'],
+    ['Domain [shop.example.eu:443] refused', 'Domain [<host>] refused']
+  ]
+  for (const [input, expected] of hosts) assert.equal(normalize(input), expected, input)
+  const line = (domain: string) => `PipelineCallServlet|1|Sites-A-Site|Cart-Show|PipelineCall|s custom.Http Cannot resolve domain [${domain}] with selector [default]`
+  assert.equal(signatureOf(line('example.eu')).signature, signatureOf(line('example.de')).signature)
+  assert.ok(!signatureOf(line('example.eu')).identity.message.includes('example'))
+
+  // Script expressions and file names stay where they stood, inside brackets or after those words.
+  const kept = [
+    'value of [basket.id] is empty',
+    'value of (this.store) is null',
+    'value of [config.local] is null',
+    'value of (obj.info) is null',
+    'value of [request.site] is null',
+    'loading (Cart.js) failed',
+    'loading [app.min.js] failed',
+    'reading (dw.json) failed',
+    'host dw.system.Site is null',
+    'server logger.info is null',
+    'url this.store is null',
+    'host Cart.js failed',
+    'calling (de.ui) failed',
+    'logger custom.Cart and system.core',
+    'value of (item.id) is empty'
+  ]
+  for (const input of kept) assert.equal(normalize(input), input, input)
+})
+
 test('IPv6 addresses become <ip>; a time does not', () => {
   assert.equal(normalize('from 2001:db8::7a3f refused'), 'from <ip> refused')
   assert.equal(normalize('from fe80::1 refused'), 'from <ip> refused')

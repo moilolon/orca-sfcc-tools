@@ -105,6 +105,15 @@ function readStrings(value: unknown): Record<string, string> {
   return isRecord(value) ? (Object.fromEntries(Object.entries(value).filter(([, v]) => typeof v === 'string')) as Record<string, string>) : {}
 }
 
+/**
+ * Whether a code version is one Salesforce is deleting: it renames a version it deletes
+ * `.deleted_<n>_<name>` and may keep it so for a while. Such a version is never a workspace's and
+ * is never deleted again by the plugin.
+ */
+export function isBeingDeleted(version: string): boolean {
+  return version.startsWith('.deleted_')
+}
+
 /** The ids of a `code list` answer. */
 function listedVersions(json: unknown): Record<string, unknown>[] {
   const data = isRecord(json) && Array.isArray(json.data) ? json.data : Array.isArray(json) ? json : []
@@ -218,12 +227,13 @@ export class Ownership {
   }
 
   versionOf(workspaceId: string): string | null {
-    return this.versions[workspaceId] ?? null
+    const version = this.versions[workspaceId]
+    return version && !isBeingDeleted(version) ? version : null
   }
 
-  /** Every stored code version, by workspace id. */
+  /** Every stored code version, by workspace id; never one Salesforce is deleting. */
   storedVersions(): VersionNames {
-    return this.versions
+    return Object.fromEntries(Object.entries(this.versions).filter(([, version]) => !isBeingDeleted(version)))
   }
 
   /** The project a workspace with a version belonged to, when Orca named one. */
@@ -446,7 +456,9 @@ export class Ownership {
 
   /**
    * Deletes every queued version that is not active; one that is no longer listed is forgotten.
-   * One pass at a time; a failure leaves the version queued for the next activation.
+   * One pass at a time. A delete that fails is looked for in `code list` again: Salesforce can
+   * answer a timeout and still go on deleting, renaming the version `.deleted_<n>_<name>`, so one
+   * gone or renamed counts as deleted; one still there stays queued for the next activation.
    */
   deletePending(): Promise<void> {
     this.deleting = this.deleting.then(() => this.deleteNow()).catch(() => undefined)
@@ -466,7 +478,7 @@ export class Ownership {
     let failure: string | null = null
     for (const version of [...this.pending]) {
       if (this.disposed) return
-      const entry = listed.find((item) => item.id === version)
+      const entry = isBeingDeleted(version) ? undefined : listed.find((item) => item.id === version)
       if (entry?.active === true) continue
       if (entry) {
         try {
@@ -476,8 +488,12 @@ export class Ownership {
           })
           this.deps.log(`deleted the code version ${version}`)
         } catch (error) {
-          failure = codeOf(error)
-          continue
+          if (this.disposed) return
+          if (await this.stillListed(version)) {
+            failure = codeOf(error)
+            continue
+          }
+          this.deps.log(`the code version ${version} is being deleted (${codeOf(error)})`)
         }
       }
       this.pending = this.pending.filter((item) => item !== version)
@@ -485,6 +501,19 @@ export class Ownership {
     await this.bounded(this.deps.store.set(KEYS.pending, [...this.pending]), HOST_LIMIT).catch(() => undefined)
     this.deps.onProblem('delete', failure)
     this.deps.onChange()
+  }
+
+  /**
+   * Whether `version` is still on the sandbox under its own name, after a delete that failed. A
+   * list that cannot be read says it may be: the version stays queued.
+   */
+  private async stillListed(version: string): Promise<boolean> {
+    try {
+      const { json } = await this.bounded(this.deps.b2c.run(['code', 'list'], { role: 'sandbox', timeoutMs: LIST_TIMEOUT_MS }), CODE_LIST_LIMIT)
+      return listedVersions(json).some((item) => item.id === version)
+    } catch {
+      return true
+    }
   }
 
   /** Stops the watcher and abandons a running deploy; returns the new generation. */

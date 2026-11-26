@@ -14,6 +14,14 @@ import type { Timers } from './status'
 export const SANDBOX_HOST = 'sandbox-01.example.com'
 
 export const READY: InstancesState = { config: 'ok', instances: { sandbox: 'ready', development: 'absent', staging: 'absent', production: 'absent' } }
+export const MISSING: InstancesState = { config: 'missing', instances: { sandbox: 'absent', development: 'absent', staging: 'absent', production: 'absent' } }
+
+/**
+ * The dw.json of each folder, as `configRoot()` names one: only its sandbox host. With it, a
+ * FakeB2c reads its state, its host and its credentials from the folder `configRoot()` answers at
+ * each call, as the real runner does; a folder with none has no dw.json.
+ */
+export type ConfigFiles = { configRoot: () => Promise<string | null>; hosts: Record<string, string> }
 
 /** For `assert.rejects`: the error carries this code. */
 export function coded(code: string): (error: unknown) => boolean {
@@ -54,7 +62,9 @@ export class FakeRunning implements Running {
 }
 
 export class FakeB2c implements B2c {
-  readonly runs: { args: string[]; options: RunOptions }[] = []
+  readonly runs: { args: string[]; options: RunOptions; root?: string | null }[] = []
+  /** Reads dw.json per folder instead of `state` (see `ConfigFiles`). */
+  files: ConfigFiles | null = null
   readonly watchers: FakeRunning[] = []
   readonly held: Deferred[] = []
   state: InstancesState = READY
@@ -66,6 +76,8 @@ export class FakeB2c implements B2c {
   hold = new Set<string>()
   /** Commands that fail, by their first words, with a code. */
   fail = new Map<string, string>()
+  /** What a command does on the sandbox before it fails (`fail`): a delete that times out goes on. */
+  sideEffects = new Map<string, (args: readonly string[]) => void>()
 
   private matches(args: readonly string[], key: string): boolean {
     return args.slice(0, key.split(' ').length).join(' ') === key
@@ -75,9 +87,27 @@ export class FakeB2c implements B2c {
     return this.runs.map((run) => run.args.join(' '))
   }
 
+  /** The sandbox host of the dw.json read now, in `files` mode; undefined when there is none. */
+  private async fileHost(): Promise<{ root: string | null; host: string | undefined }> {
+    const root = this.files ? await this.files.configRoot() : null
+    return { root, host: root === null ? undefined : this.files?.hosts[root] }
+  }
+
   async run(args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-    this.runs.push({ args: [...args], options })
-    for (const [key, code] of this.fail) if (this.matches(args, key)) throw new B2cError(code as never)
+    // Recorded at once, in the order called; the folder its dw.json came from once it is read.
+    const record: (typeof this.runs)[number] = { args: [...args], options }
+    this.runs.push(record)
+    if (this.files) {
+      const { root, host } = await this.fileHost()
+      record.root = root
+      // The runner refuses a role that dw.json does not configure, before starting anything.
+      if (options.role === 'sandbox' && host === undefined) throw new B2cError('role_not_configured')
+    }
+    for (const [key, code] of this.fail) {
+      if (!this.matches(args, key)) continue
+      for (const [effectKey, effect] of this.sideEffects) if (this.matches(args, effectKey)) effect(args)
+      throw new B2cError(code as never)
+    }
     if ([...this.hold].some((key) => this.matches(args, key))) {
       let resolve!: (json?: unknown) => void
       let reject!: (code: string) => void
@@ -129,13 +159,15 @@ export class FakeB2c implements B2c {
     return '2.11.0'
   }
   async instances(): Promise<InstancesState> {
+    if (this.files) return (await this.fileHost()).host === undefined ? MISSING : READY
     return this.state
   }
   async mask(text: string): Promise<string> {
     return text
   }
   async isHost(role: string, value: unknown): Promise<boolean> {
-    return role === 'sandbox' && typeof value === 'string' && value.toLowerCase() === SANDBOX_HOST
+    const host = this.files ? (await this.fileHost()).host : SANDBOX_HOST
+    return role === 'sandbox' && typeof value === 'string' && host !== undefined && value.toLowerCase() === host
   }
 }
 

@@ -2,7 +2,10 @@
 // sandbox role's host (`isHost`), never `sandbox get`, which can answer with a deleted record that
 // shares the live one's id. Start and stop are fired with the id the list gave, without waiting on
 // b2c, and followed on the list at a modest interval until the state settles or a timeout passes.
-// A list that is refused leaves the state unknown and breaks nothing else.
+// While one is followed, the dw.json it began with is held (`hold`): focusing another workspace
+// changes neither the credentials of the list nor the host it is matched by, so the sandbox is
+// never lost while it starts or stops. A list that is refused leaves the state unknown and breaks
+// nothing else.
 import { B2cError, type B2c } from '../../core/b2c'
 import type { SandboxAction, SandboxState, SandboxStatus } from './protocol'
 
@@ -97,6 +100,11 @@ export type SandboxWatchDeps = {
   onChange(): void
   /** A start, stop or list failed (`code`), or worked again (null). */
   onProblem(action: SandboxAction, code: string | null): void
+  /**
+   * Keeps the dw.json read now until the returned function is called; taken when a start or stop
+   * is fired, released when following it ends. None: nothing is held.
+   */
+  hold?(): Promise<() => void>
 }
 
 export class SandboxWatch {
@@ -106,6 +114,8 @@ export class SandboxWatch {
   /** The id the list gave the live sandbox; only ever handed back to b2c, never shown. */
   private id: string | null = null
   private following: { verb: 'start' | 'stop'; since: number } | null = null
+  /** Frees the dw.json held while a start or stop is followed. */
+  private release: (() => void) | null = null
   private timer: unknown = null
   private reading: Promise<void> | null = null
   private disposed = false
@@ -140,7 +150,7 @@ export class SandboxWatch {
         this.id = null
         this.state = 'unknown'
         this.reason = 'sandbox_not_listed'
-        this.following = null
+        this.stopFollowing()
       } else {
         this.id = found.id
         this.reason = null
@@ -162,10 +172,10 @@ export class SandboxWatch {
     }
     const target = this.following.verb === 'start' ? 'started' : 'stopped'
     if (listed === target) {
-      this.following = null
+      this.stopFollowing()
       this.state = listed
     } else if (raw === 'failed' || raw === 'deleted') {
-      this.following = null
+      this.stopFollowing()
       this.state = 'unknown'
       this.reason = raw === 'failed' ? 'sandbox_failed' : 'sandbox_not_listed'
     } else {
@@ -185,20 +195,36 @@ export class SandboxWatch {
     if (verb === 'stop' && this.state === 'stopped') throw new SandboxError('sandbox_already_stopped')
     const id = this.id
     if (!SAFE_ID.test(id)) throw new SandboxError('sandbox_not_listed')
-    this.following = { verb, since: this.deps.timers.now() }
+    const following = { verb, since: this.deps.timers.now() }
+    this.following = following
     this.state = 'busy'
     this.deps.onChange()
+    // Held before anything runs: the operation and every read that follows it use this dw.json.
+    const release = (await this.deps.hold?.().catch(() => null)) ?? null
+    if (this.following !== following || this.disposed) {
+      release?.()
+      return
+    }
+    this.release = release
     // Not awaited: the operation is followed on the list, never on b2c.
     void this.deps.b2c.run(['sandbox', verb, id], { role: 'sandbox', timeoutMs: LIST_TIMEOUT_MS }).then(
       () => this.deps.onProblem(verb, null),
       (error) => {
-        if (this.following?.verb !== verb) return
-        this.following = null
+        if (this.following !== following) return
+        this.stopFollowing()
         this.deps.onProblem(verb, codeOf(error))
         void this.refresh()
       }
     )
     this.schedule()
+  }
+
+  /** Ends following a start or stop, and frees the dw.json it held. */
+  private stopFollowing(): void {
+    this.following = null
+    const release = this.release
+    this.release = null
+    release?.()
   }
 
   private schedule(): void {
@@ -216,7 +242,7 @@ export class SandboxWatch {
     await this.refresh()
     if (!this.following) return
     if (this.deps.timers.now() - current.since >= FOLLOW_TIMEOUT_MS) {
-      this.following = null
+      this.stopFollowing()
       this.deps.onProblem(current.verb, 'sandbox_follow_timeout')
       await this.refresh()
       return
@@ -226,7 +252,7 @@ export class SandboxWatch {
 
   dispose(): void {
     this.disposed = true
-    this.following = null
+    this.stopFollowing()
     if (this.timer !== null) this.deps.timers.clearTimeout(this.timer)
     this.timer = null
   }

@@ -16,7 +16,7 @@ import { createWorkspaces } from '../../core/workspaces'
 import { createActivate, deactivate } from '../../worker/worker'
 import { cartError, LOGS_GET, paymentError } from './fixtures/logs'
 import type { RoleErrors } from './protocol'
-import { createErrorsPiece, FIRST_READ_MS, FULL_WINDOW_BYTES, intervalOf, MAX_ENTRIES, OVERLAP_MS, readArguments, START_DELAY_MS, STATUS_ITEM, type ErrorsDeps } from './worker'
+import { createErrorsPiece, FIRST_READ_MS, FULL_WINDOW_BYTES, intervalOf, MAX_ENTRIES, OVERLAP_MS, readArguments, RESUME_MS, START_DELAY_MS, STATUS_ITEM, type ErrorsDeps } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const MACHINE = {
@@ -290,6 +290,82 @@ test('a read that fails keeps its code, and the rows read before', async () => {
     fail = false
     assert.equal((await readNow(worker, { role: 'sandbox' })).error, null, 'a good read clears it')
     await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('two reads in a row both complete and both move the time of the last read, a mark between them', async () => {
+  const root = makeWorkspace()
+  try {
+    let clock = NOW
+    const { worker, logsCalls } = await mountPiece(hostFor(root), b2cAnswering(), { now: () => clock })
+    const first = await readNow(worker, { role: 'sandbox' })
+    assert.equal(first.lastRead, NOW)
+    await worker.request('errors.mark', { role: 'sandbox', signatures: [first.rows[0].signature] })
+    clock += 60_000
+    const second = await readNow(worker, { role: 'sandbox' })
+    assert.equal(logsCalls().length, 2, 'the second read ran')
+    assert.equal(second.lastRead, NOW + 60_000)
+    clock += 60_000
+    const third = await readNow(worker, { role: 'sandbox' })
+    assert.equal(logsCalls().length, 3, 'the third read ran')
+    assert.equal(third.lastRead, NOW + 120_000)
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a read a worker restart cut short runs again when the worker starts, and only within its window', async () => {
+  const root = makeWorkspace()
+  try {
+    const host = hostFor(root)
+    let clock = NOW
+    const pending: SpawnCall[] = []
+    const holding = (call: SpawnCall) => {
+      if (call.args[0] === 'logs' && call.args[1] === 'get') pending.push(call)
+      else b2cAnswering()(call)
+    }
+    /** Starts a read that never ends, then stops the worker as Orca restarts it. */
+    async function cutShort(role: Role): Promise<void> {
+      const doomed = await mountPiece(host, holding, { now: () => clock })
+      assert.equal((await doomed.worker.request('errors.refresh', { role })).reading, true)
+      await until(() => pending.length === 1, `the ${role} read started`)
+      await doomed.worker.deactivate()
+      // The old process goes away; its read ends, unfinished.
+      pending.shift()?.child.finish(1, '', 'ERROR: stopped\n')
+      await settle()
+    }
+
+    await cutShort('sandbox')
+    clock += 60_000
+    const second = await mountPiece(host, b2cAnswering(), { now: () => clock })
+    await settle()
+    assert.equal(second.logsCalls().length, 0, 'not while the worker starts')
+    assert.deepEqual(second.live().map((timer) => timer.ms), [START_DELAY_MS], 'a read is scheduled shortly after the start')
+    for (const timer of second.live()) timer.run()
+    const list = await readEnded(second.worker, 'sandbox')
+    assert.equal(second.logsCalls().length, 1, 'the cut read ran again')
+    assert.equal(list.lastRead, clock)
+    assert.equal(list.error, null)
+    assert.equal(list.rows.length, 5)
+    await second.worker.deactivate()
+
+    // A read that ended is not run again.
+    const third = await mountPiece(host, b2cAnswering(), { now: () => clock })
+    await settle()
+    assert.equal(third.live().length, 0)
+    await third.worker.deactivate()
+
+    // One asked too long ago neither.
+    await cutShort('development')
+    clock += RESUME_MS
+    const late = await mountPiece(host, b2cAnswering(), { now: () => clock })
+    await settle()
+    assert.equal(late.live().length, 0, 'too old to run again')
+    assert.equal(late.logsCalls().length, 0)
+    await late.worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
