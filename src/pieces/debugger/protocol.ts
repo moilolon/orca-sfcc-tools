@@ -29,7 +29,8 @@ export type DebuggerState = {
   /**
    * Why the session failed or ended, as a code the panel words: one of the runner's codes
    * (`credentials_missing`, `b2c_not_found`, …), `launch_failed`, `adapter_exited`, `timeout`,
-   * `terminated`, `start_failed`. Null otherwise.
+   * `terminated`, `start_failed`, `disconnect_unconfirmed` (the session ended but a disconnect got no
+   * answer, so the next start cleans up first). Null otherwise.
    */
   reason: string | null
   /** The adapter's own words for it, masked, cut to a reasonable length. */

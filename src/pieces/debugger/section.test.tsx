@@ -115,6 +115,17 @@ test('a sandbox that is not ready says so and the start is disabled', async () =
   assert.equal(target.find({ type: 'Button', text: 'Start' })?.props.disabled, true)
 })
 
+test('an ended session says when the sandbox did not confirm the disconnect, instead of saying the debugger left', async () => {
+  const target = await open({ 'debugger.state': (): DebuggerState => ({ ...stateOf('debugger'), status: 'ended', reason: 'disconnect_unconfirmed' }) })
+  const text = JSON.stringify(target.tree())
+  assert.ok(text.includes('the sandbox did not confirm the debugger left it'))
+  assert.ok(!text.includes('the debugger left the sandbox'))
+  // A clean end still says it left.
+  panel?.unmount()
+  const clean = await open({ 'debugger.state': (): DebuggerState => ({ ...stateOf('debugger'), status: 'ended' }) })
+  assert.ok(JSON.stringify(clean.tree()).includes('The session ended and the debugger left the sandbox.'))
+})
+
 test('the worker’s posts redraw the view', async () => {
   const target = await open(scenarios.debugger.requests)
   target.post('debugger.state', stateOf('debuggerHalted'))

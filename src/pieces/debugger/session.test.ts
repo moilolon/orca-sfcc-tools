@@ -3,7 +3,7 @@
 // unclean end, and masking of what the adapter says.
 import { assert, test } from 'orca/testing'
 import { B2cError } from '../../core/b2c'
-import { FAKE_HOST, FAKE_ROOT, FAKE_SECRET_VALUE, FakeAdapter, type FakeConfig } from './fake-adapter'
+import { FAKE_HOST, FAKE_ROOT, FAKE_SECRET_VALUE, FakeAdapter, type FakeConfig, type Handler } from './fake-adapter'
 import { createSession, type SessionSnapshot } from './session'
 
 const PAGE = 'cartridges/app_example/cartridge/controllers/Page.js'
@@ -338,6 +338,236 @@ test('the instance ending the session (terminated) ends it with the adapter’s 
   adapter.last.event('terminated')
   await until(() => session.snapshot().status === 'ended', 'ended')
   assert.deepEqual([session.snapshot().reason, session.snapshot().message], ['terminated', 'Script debugger was disabled on ***'])
+})
+
+test('the terminated path still disconnects, and an answered disconnect clears the flag', async () => {
+  const { adapter, session, flag } = await attached()
+  adapter.last.event('terminated')
+  await until(() => session.snapshot().status === 'ended', 'ended')
+  assert.equal(adapter.last.commands.at(-1), 'disconnect')
+  assert.ok(adapter.last.ended)
+  assert.equal(flag.value, false)
+})
+
+test('a stop whose disconnect gets no answer ends as disconnect_unconfirmed and keeps the flag', async () => {
+  const { adapter, session, flag } = await attached()
+  adapter.handlers.disconnect = () => 'none'
+  const answer = await session.stop()
+  assert.deepEqual([answer.status, answer.reason], ['ended', 'disconnect_unconfirmed'])
+  assert.equal(flag.value, true)
+  // An answered one ends with no reason.
+  const clean = await attached()
+  assert.deepEqual([(await clean.session.stop()).reason, clean.flag.value], [null, false])
+})
+
+test('text is masked whole before it is cut: a value straddling the cut never leaves a piece of itself', async () => {
+  const { adapter, session } = setup()
+  const long = `${'x'.repeat(1990)}${FAKE_HOST}/path`
+  adapter.handlers.launch = () => ({ fail: long })
+  const failed = await session.start(FAKE_ROOT, BREAKPOINTS)
+  assert.equal(failed.message, `${'x'.repeat(1990)}***/path`)
+  // Past the cut too: masked first, then cut, so no fragment of the host survives either way.
+  const other = setup({ ...CONFIG, variables: { 1: [{ name: 'v', value: `${'y'.repeat(1995)}${FAKE_HOST}${'z'.repeat(3000)}`, variablesReference: 0 }] } })
+  await other.session.start(FAKE_ROOT, BREAKPOINTS)
+  other.adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => other.session.snapshot().status === 'halted', 'halted')
+  const [variable] = await other.session.variables({ reference: 1 })
+  assert.ok(!variable.value.includes('sandbox'), 'no part of the host')
+  assert.ok(variable.value.startsWith(`${'y'.repeat(1995)}***`))
+  assert.ok(variable.value.endsWith('…'))
+})
+
+test('a stray line or a malformed frame from the adapter is dropped; the session goes on and the log has only the count', async () => {
+  const { adapter, session, logs } = await attached()
+  const process = adapter.last
+  process.options.onStdout?.(new TextEncoder().encode(`Warning: something about ${FAKE_HOST}\n`))
+  process.options.onStdout?.(new TextEncoder().encode('Content-Length: abc\r\n\r\n{"seq":1}'))
+  process.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  assert.equal(session.snapshot().status, 'halted', 'the next frame still reads')
+  await until(() => session.snapshot().frames.length > 0, 'the stack')
+  assert.deepEqual(
+    logs.filter((line) => line.includes('dropped')),
+    ['dropped 1 malformed frame(s) from the adapter']
+  )
+  assert.ok(!logs.join('\n').includes('Warning') && !logs.join('\n').includes(FAKE_HOST))
+})
+
+// ---------------------------------------------------------------------------------------------
+// A stop or a dispose landing at each await of the start sequence
+
+type Gate = { reached: Promise<void>; release(): void }
+
+/** A point the start waits at, held until the test lets it go. */
+function gate(): Gate & { arrive(): void; passed: Promise<void> } {
+  let arrive: () => void = () => {}
+  let release: () => void = () => {}
+  const reached = new Promise<void>((resolve) => (arrive = resolve))
+  const passed = new Promise<void>((resolve) => (release = resolve))
+  return { reached, passed, arrive, release }
+}
+
+/** Holds a request until released, then answers it as the fake would. */
+function holdRequest(adapter: FakeAdapter, command: string, onlyProcess?: number): Gate {
+  const held = gate()
+  adapter.handlers[command] = async (request, process) => {
+    if (onlyProcess !== undefined && adapter.processes.indexOf(process) !== onlyProcess) return defaultReply(command, request, process)
+    held.arrive()
+    await held.passed
+    return defaultReply(command, request, process)
+  }
+  return held
+}
+
+function defaultReply(command: string, request: Parameters<Handler>[0], process: Parameters<Handler>[1]) {
+  if (command === 'launch') {
+    process.respond(request, {})
+    process.event('initialized')
+    return 'none' as const
+  }
+  if (command === 'setBreakpoints') return { body: { breakpoints: [{ id: 1, line: 11, verified: true }] } }
+  return {}
+}
+
+type Point = { name: string; unclean?: boolean; hold(adapter: FakeAdapter, flag: GatedFlag): Gate }
+type Held = ReturnType<typeof gate>
+type GatedFlag = { value: boolean; holdGet: Held | null; holdSet: Held | null }
+
+const POINTS: Point[] = [
+  { name: 'reading the flag', hold: (_adapter, flag) => (flag.holdGet = gate()) },
+  { name: 'the cleanup session’s launch', unclean: true, hold: (adapter) => holdRequest(adapter, 'launch', 0) },
+  {
+    name: 'starting b2c',
+    hold: (adapter) => {
+      const held = gate()
+      const start = adapter.b2c.start
+      adapter.b2c.start = async (...args) => {
+        held.arrive()
+        await held.passed
+        return start(...args)
+      }
+      return held
+    }
+  },
+  { name: 'initialize', hold: (adapter) => holdRequest(adapter, 'initialize') },
+  { name: 'setting the flag', hold: (_adapter, flag) => (flag.holdSet = gate()) },
+  { name: 'launch', hold: (adapter) => holdRequest(adapter, 'launch') },
+  {
+    name: 'the initialized event',
+    hold: (adapter) => {
+      const held = gate()
+      adapter.handlers.launch = (request, process) => {
+        process.respond(request, {})
+        held.arrive()
+        void held.passed.then(() => process.event('initialized'))
+        return 'none'
+      }
+      return held
+    }
+  },
+  { name: 'setBreakpoints', hold: (adapter) => holdRequest(adapter, 'setBreakpoints') },
+  { name: 'configurationDone', hold: (adapter) => holdRequest(adapter, 'configurationDone') }
+]
+
+function gatedSession(point: Point) {
+  const adapter = new FakeAdapter(CONFIG)
+  // As the real adapter can: it reads stdin until it is closed and answers the disconnect late,
+  // so anything a start still wrote meanwhile would reach it.
+  adapter.exitOnEnd = false
+  adapter.handlers.disconnect = (request, process) => {
+    setTimeout(() => process.respond(request, {}), 30)
+    return 'none'
+  }
+  const flag: GatedFlag = { value: point.unclean === true, holdGet: null, holdSet: null }
+  const held = point.hold(adapter, flag)
+  const session = createSession({
+    b2c: adapter.b2c,
+    log: () => {},
+    platform: 'linux',
+    timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 },
+    unclean: {
+      get: async () => {
+        if (flag.holdGet) {
+          flag.holdGet.arrive()
+          await flag.holdGet.passed
+        }
+        return flag.value
+      },
+      set: async (value) => {
+        if (value && flag.holdSet) {
+          flag.holdSet.arrive()
+          await flag.holdSet.passed
+        }
+        flag.value = value
+      }
+    },
+    onChange: () => {}
+  })
+  return { adapter, flag, held, session }
+}
+
+for (const kind of ['stop', 'dispose'] as const) {
+  test(`a ${kind} at each await of the start: nothing but the disconnect is written after it, every adapter closes, the flag clears only on an answered disconnect`, async () => {
+    for (const point of POINTS) {
+      const { adapter, flag, held, session } = gatedSession(point)
+      const where = `${kind} at ${point.name}`
+      const started = session.start(FAKE_ROOT, BREAKPOINTS)
+      await held.reached
+      const before = adapter.processes.map((process) => process.commands.length)
+      const processesBefore = adapter.processes.length
+      const ending = kind === 'stop' ? session.stop() : session.dispose()
+      held.release()
+      await ending
+      await started
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      // No new adapter after it, and in each one only a disconnect, once.
+      assert.ok(adapter.processes.length <= Math.max(processesBefore, point.name === 'starting b2c' ? 1 : 0), `${where}: no new adapter`)
+      adapter.processes.forEach((process, i) => {
+        const after = process.commands.slice(before[i] ?? 0)
+        assert.ok(
+          after.every((command) => command === 'disconnect'),
+          `${where}: wrote ${after.join(', ')}`
+        )
+        assert.ok(after.length <= 1, `${where}: one disconnect at most`)
+        const launched = process.commands.includes('launch')
+        if (launched) assert.equal(process.commands.at(-1), 'disconnect', `${where}: a launched adapter is disconnected last`)
+        assert.ok(process.ended || process.stopped || process.exitCode !== null, `${where}: the adapter is closed`)
+      })
+      const launchedAny = adapter.processes.some((process) => process.commands.includes('launch'))
+      if (launchedAny) assert.equal(flag.value, false, `${where}: the answered disconnect cleared the flag`)
+      if (kind === 'stop') assert.equal(session.snapshot().status, 'ended', where)
+      if (kind === 'dispose') {
+        const count = adapter.processes.length
+        await session.start(FAKE_ROOT, BREAKPOINTS)
+        assert.equal(adapter.processes.length, count, `${where}: a start after disposal is refused`)
+      }
+    }
+  })
+}
+
+test('the reviewed race: a stop while initialize is unanswered leaves no launch, breakpoints or configurationDone after it', async () => {
+  const { adapter, session, held, flag } = gatedSession(POINTS.find((point) => point.name === 'initialize') as Point)
+  const started = session.start(FAKE_ROOT, BREAKPOINTS)
+  await held.reached
+  const stopping = session.stop()
+  held.release()
+  await stopping
+  await started
+  assert.deepEqual(adapter.last.commands, ['initialize'])
+  assert.equal(flag.value, false)
+})
+
+test('the reviewed race: a dispose during the cleanup session’s launch opens no new adapter and disconnects the cleanup’s', async () => {
+  const { adapter, session, held, flag } = gatedSession(POINTS.find((point) => point.name === 'the cleanup session’s launch') as Point)
+  const started = session.start(FAKE_ROOT, BREAKPOINTS)
+  await held.reached
+  const disposing = session.dispose()
+  held.release()
+  await disposing
+  await started
+  assert.equal(adapter.processes.length, 1)
+  assert.deepEqual(adapter.last.commands, ['initialize', 'launch', 'disconnect'])
+  assert.equal(flag.value, false, 'the cleanup ran to its disconnect')
+  assert.notEqual(session.snapshot().status, 'attached')
 })
 
 test('the adapter’s own output (Connected to <host>) never reaches the state', async () => {

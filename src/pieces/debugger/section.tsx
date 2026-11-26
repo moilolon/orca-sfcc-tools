@@ -278,6 +278,10 @@ function SessionGroup({ current, working }: { current: DebuggerState; working: b
           onRetry={ready ? () => void start() : undefined}
           busy={working}
         />
+      ) : current.status === 'ended' && current.reason ? (
+        <Text size="sm" muted>
+          {[wordReason(locale, current.reason), current.message ?? ''].filter(Boolean).join(' ')}
+        </Text>
       ) : hint ? (
         <Text size="sm" muted>
           {text(hint)}
@@ -443,7 +447,7 @@ function Breakpoints({ current }: { current: DebuggerState }) {
       title={text('breakpoints')}
       action={
         files.length > 0 ? (
-          <Button size="xs" variant="ghost" icon="delete" tooltip={text('removeAllTooltip')} onPress={() => void clearAll()}>
+          <Button size="xs" variant="ghost" icon="delete" onPress={() => void clearAll()}>
             {text('removeAll')}
           </Button>
         ) : undefined

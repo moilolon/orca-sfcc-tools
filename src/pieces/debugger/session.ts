@@ -71,9 +71,22 @@ export class SessionError extends Error {
   }
 }
 
+/** A start that `stop()` or `dispose()` overtook: it writes nothing more and reports nothing. */
+class Cancelled extends Error {
+  constructor() {
+    super('cancelled')
+  }
+}
+
 type Connection = {
   running: Running
   client: DapClient
+  /** Whether `launch` was ever written: from then on a debugger client may exist on the instance. */
+  launched: boolean
+  /** The `launch` still waiting for its answer: a disconnect waits for it, or it could land first. */
+  launching: Promise<unknown> | null
+  /** Set once `close` began, so every caller shares the one close. */
+  closing: Promise<boolean> | null
   /** The last line b2c wrote on stderr, masked by the runner: why it ended before speaking. */
   lastStderr: string | null
   /** The last `important` or `stderr` output event of the adapter, masked. */
@@ -115,11 +128,19 @@ function asText(value: unknown): string {
 export function createSession(deps: SessionDeps) {
   const timeouts: Timeouts = { ...DEFAULT_TIMEOUTS, ...deps.timeouts }
   const paths = (deps.platform ?? process.platform) === 'win32' ? win32 : posix
-  const mask = async (text: string) => cut(await deps.b2c.mask(cut(text)))
+  // The whole text is masked before it is cut: a value cut in two would no longer match the masker.
+  const mask = async (text: string) => cut(await deps.b2c.mask(text))
 
   let root: string | null = null
   let conn: Connection | null = null
   let stopping: Promise<void> | null = null
+  /** Every adapter started and not yet closed, the cleanup session's included. */
+  const opened = new Set<Connection>()
+  /** Raised by every start, stop and dispose: a start whose number is no longer this one stops. */
+  let attempt = 0
+  /** The start under way, so a stop or a dispose can wait for it to wind down. */
+  let starting: Promise<SessionSnapshot> | null = null
+  let disposed = false
   let state: SessionSnapshot = empty('idle')
   const halted = new Set<number>()
   /** Each frame's path in the workspace, as the adapter gave it, to open it; kept only while the session runs. */
@@ -178,6 +199,10 @@ export function createSession(deps: SessionDeps) {
     client = createDapClient({
       write: (bytes) => running.write(bytes),
       defaultTimeoutMs: timeouts.requestMs,
+      // Only how many: what was dropped could hold anything.
+      onDropped: (count) => {
+        if (count === 1 || count % 100 === 0) deps.log(`dropped ${count} malformed frame(s) from the adapter`)
+      },
       onEvent: (event) => {
         for (const resolve of eventWaiters.get(event.event) ?? []) resolve()
         eventWaiters.delete(event.event)
@@ -187,6 +212,9 @@ export function createSession(deps: SessionDeps) {
     connection = {
       running,
       client,
+      launched: false,
+      launching: null,
+      closing: null,
       lastStderr: null,
       lastOutput: null,
       alive: true,
@@ -207,6 +235,7 @@ export function createSession(deps: SessionDeps) {
       }
     }
     for (const chunk of early.splice(0)) client.receive(chunk)
+    opened.add(connection)
     const self = connection
     void running.exited.then(() => {
       self.alive = false
@@ -215,41 +244,72 @@ export function createSession(deps: SessionDeps) {
     return connection
   }
 
-  /** Disconnects, closes stdin and waits a moment for the process; stops it if it lingers. */
-  async function close(connection: Connection, { disconnect }: { disconnect: boolean }): Promise<boolean> {
-    let clean = false
-    if (disconnect && connection.alive) {
-      try {
-        await connection.client.request('disconnect', { terminateDebuggee: false }, { timeoutMs: timeouts.disconnectMs })
-        clean = true
-      } catch (error) {
-        deps.log(`disconnect failed (${error instanceof DapError ? error.code : 'error'})`)
-      }
+  /** Writes `launch` and remembers it is in flight, so a disconnect never overtakes it. */
+  function launch(connection: Connection): Promise<unknown> {
+    connection.launched = true
+    const answer = connection.client.request('launch', {}, { timeoutMs: timeouts.launchMs })
+    connection.launching = answer
+    const settled = () => {
+      if (connection.launching === answer) connection.launching = null
     }
-    connection.running.end()
-    if (!(await within(connection.running.exited, timeouts.exitMs))) connection.running.stop()
-    connection.client.close()
-    return clean
+    answer.then(settled, settled)
+    return answer
+  }
+
+  /**
+   * Closes an adapter, once whoever asks: a disconnect if it ever launched (after that launch is
+   * answered, so the disconnect cannot land first), then stdin, then a moment for it to exit before
+   * it is stopped. The disconnect is written before the first await when no launch is in flight.
+   * When it launched, the disconnect was answered and no other launched adapter is still open,
+   * the unclean-end flag is cleared. Answers whether it left nothing on the instance.
+   */
+  function close(connection: Connection): Promise<boolean> {
+    if (connection.closing) return connection.closing
+    connection.closing = (async () => {
+      let clean = !connection.launched
+      if (connection.launched && connection.alive) {
+        if (connection.launching) await connection.launching.catch(() => {})
+        try {
+          await connection.client.request('disconnect', { terminateDebuggee: false }, { timeoutMs: timeouts.disconnectMs })
+          clean = true
+        } catch (error) {
+          deps.log(`disconnect failed (${error instanceof DapError ? error.code : 'error'})`)
+        }
+      }
+      connection.running.end()
+      if (!(await within(connection.running.exited, timeouts.exitMs))) connection.running.stop()
+      connection.client.close()
+      opened.delete(connection)
+      if (clean && connection.launched && ![...opened].some((other) => other.launched)) await deps.unclean.set(false)
+      return clean
+    })()
+    return connection.closing
+  }
+
+  /** Closes every adapter open now; each disconnect is written before this awaits anything. */
+  function closeAll(): Promise<boolean[]> {
+    return Promise.all([...opened].map((connection) => close(connection)))
   }
 
   /**
    * A session of its own that only replaces the debugger client a session left on the instance:
    * `launch` deletes any client with the same id before it creates its own, and `disconnect`
-   * deletes that one. Whatever goes wrong here, the real start goes on and says it.
+   * deletes that one, which clears the flag. Whatever goes wrong here, the real start goes on and
+   * says it; a stop or a dispose ends it where it stands (`live` throws).
    */
-  async function cleanup(cwd: string): Promise<void> {
+  async function cleanup(cwd: string, live: () => void): Promise<void> {
     deps.log('cleaning up after a session that did not end cleanly')
     let connection: Connection | null = null
     try {
       connection = await open(cwd, () => {})
+      live()
       await connection.client.request('initialize', initializeArguments())
-      await connection.client.request('launch', {}, { timeoutMs: timeouts.launchMs })
-      if (await close(connection, { disconnect: true })) await deps.unclean.set(false)
-      connection = null
+      live()
+      await launch(connection)
     } catch (error) {
-      deps.log(`cleanup failed (${codeOf(error)})`)
+      if (!(error instanceof Cancelled)) deps.log(`cleanup failed (${codeOf(error)})`)
     } finally {
-      if (connection) await close(connection, { disconnect: true })
+      if (connection) await close(connection)
     }
   }
 
@@ -342,7 +402,7 @@ export function createSession(deps: SessionDeps) {
     halted.clear()
     framePaths = new Map()
     const message = connection.lastOutput
-    if (await close(connection, { disconnect: connection.alive })) await deps.unclean.set(false)
+    await close(connection)
     update({ ...empty('ended'), reason, message })
   }
 
@@ -431,83 +491,135 @@ export function createSession(deps: SessionDeps) {
      * once it is attached or failed; never throws.
      */
     async start(cwd: string, files: readonly BreakpointFile[]): Promise<SessionSnapshot> {
+      if (disposed) {
+        deps.log('start refused: the worker is stopping')
+        return state
+      }
       if (state.status === 'connecting' || running()) return state
       if (stopping) await stopping
+      if (disposed || statusNow() === 'connecting' || running()) return state
+      const token = ++attempt
+      /** Throws once a stop or a dispose overtook this start: from then on it writes nothing. */
+      const live = () => {
+        if (token !== attempt || disposed) throw new Cancelled()
+      }
       root = cwd
       halted.clear()
       framePaths = new Map()
       update(empty('connecting'))
-      let connection: Connection | null = null
+      const run = async (): Promise<SessionSnapshot> => {
+        let connection: Connection | null = null
+        try {
+          if (await deps.unclean.get()) {
+            live()
+            await cleanup(cwd, live)
+          }
+          live()
+          connection = await open(cwd, onEvent)
+          const self = connection
+          void connection.running.exited.then((exit) => onExit(self, exit))
+          live()
+          conn = connection
+          await connection.client.request('initialize', initializeArguments())
+          live()
+          // From here a debugger client may exist on the instance until a disconnect is answered.
+          await deps.unclean.set(true)
+          live()
+          const initialized = connection.waitEvent('initialized', timeouts.launchMs)
+          initialized.catch(() => {})
+          await launch(connection)
+          live()
+          await initialized
+          for (const file of files) {
+            live()
+            await sendFile(file)
+          }
+          live()
+          await connection.client.request('configurationDone')
+          live()
+          if (conn === connection && statusNow() === 'connecting') update({ status: 'attached' })
+          return state
+        } catch (error) {
+          if (error instanceof Cancelled || token !== attempt || disposed) {
+            // The stop or dispose that overtook this start owns the state; what it opened is closed.
+            if (connection) await close(connection)
+            return state
+          }
+          // The adapter ended by itself, and that was already said.
+          if (connection && conn !== connection && statusNow() === 'failed') return state
+          conn = null
+          const reason =
+            error instanceof B2cError ? error.code : error instanceof DapError ? (error.code === 'refused' ? 'launch_failed' : error.code === 'timeout' ? 'timeout' : 'adapter_exited') : 'start_failed'
+          let message: string | null = null
+          if (error instanceof DapError && error.detail) message = await mask(error.detail)
+          else if (connection) message = connection.lastOutput ?? connection.lastStderr
+          deps.log(`start failed (${reason})`)
+          if (connection) await close(connection)
+          update({ ...empty('failed'), reason, message })
+          return state
+        }
+      }
+      const current = run()
+      starting = current
       try {
-        if (await deps.unclean.get()) await cleanup(cwd)
-        connection = await open(cwd, onEvent)
-        conn = connection
-        const self = connection
-        void connection.running.exited.then((exit) => onExit(self, exit))
-        await connection.client.request('initialize', initializeArguments())
-        // From here a debugger client may exist on the instance until a disconnect succeeds.
-        await deps.unclean.set(true)
-        const initialized = connection.waitEvent('initialized', timeouts.launchMs)
-        initialized.catch(() => {})
-        await connection.client.request('launch', {}, { timeoutMs: timeouts.launchMs })
-        await initialized
-        for (const file of files) await sendFile(file)
-        await connection.client.request('configurationDone')
-        if (conn === connection && statusNow() === 'connecting') update({ status: 'attached' })
-        return state
-      } catch (error) {
-        if (connection && conn !== connection) return state
-        conn = null
-        const reason =
-          error instanceof B2cError ? error.code : error instanceof DapError ? (error.code === 'refused' ? 'launch_failed' : error.code === 'timeout' ? 'timeout' : 'adapter_exited') : 'start_failed'
-        let message: string | null = null
-        if (error instanceof DapError && error.detail) message = await mask(error.detail)
-        else if (connection) message = connection.lastOutput ?? connection.lastStderr
-        deps.log(`start failed (${reason})`)
-        if (connection && (await close(connection, { disconnect: connection.alive }))) await deps.unclean.set(false)
-        update({ ...empty('failed'), reason, message })
-        return state
+        return await current
+      } finally {
+        if (starting === current) starting = null
       }
     },
 
-    /** Disconnects (which releases a halted request), closes the adapter and answers once it ended. */
+    /**
+     * Disconnects (which releases a halted request), closes the adapter and answers once it ended.
+     * A start under way is overtaken: it writes nothing more, and what it opened is closed. Ends
+     * with `disconnect_unconfirmed` when the instance may still hold the debugger client (a
+     * disconnect got no answer), which the next start cleans up.
+     */
     async stop(): Promise<SessionSnapshot> {
       if (stopping) {
         await stopping
         return state
       }
-      const connection = conn
-      if (!connection) {
+      attempt += 1
+      const pending = starting
+      if (opened.size === 0 && !pending) {
         if (state.status !== 'failed' && state.status !== 'ended') update(empty('idle'))
         return state
       }
-      stopping = (async () => {
-        if (await close(connection, { disconnect: true })) await deps.unclean.set(false)
+      conn = null
+      const closing = closeAll()
+      const done = (async () => {
+        await closing
+        if (pending) await pending.catch(() => {})
       })()
+      stopping = done
       try {
-        await stopping
+        await done
       } finally {
-        stopping = null
-        conn = null
+        if (stopping === done) stopping = null
         halted.clear()
         framePaths = new Map()
-        update(empty('ended'))
+        const unconfirmed = await deps.unclean.get().catch(() => true)
+        update({ ...empty('ended'), reason: unconfirmed ? 'disconnect_unconfirmed' : null })
       }
       return state
     },
 
     /**
-     * The worker is going away: disconnect now. The request is written before this returns, so it
-     * reaches the adapter even if the worker goes first; the promise resolves once it is answered
-     * (or timed out) and the adapter closed. If it never completes, the flag stays set and the
-     * next start cleans up.
+     * The worker is going away: disconnect now. Each disconnect is written before this returns
+     * (an adapter whose launch is still unanswered waits for that answer first), so it reaches the
+     * adapter even if the worker goes first; the promise resolves once every adapter closed and a
+     * start under way wound down. Any later start is refused. If it never completes, the flag stays
+     * set and the next start cleans up.
      */
     dispose(): Promise<void> {
-      const connection = conn
+      disposed = true
+      attempt += 1
       conn = null
-      if (!connection || !connection.alive) return stopping ?? Promise.resolve()
+      const pending = starting
+      const closing = closeAll()
       const done = (async () => {
-        if (await close(connection, { disconnect: true })) await deps.unclean.set(false)
+        await closing
+        if (pending) await pending.catch(() => {})
       })().finally(() => {
         if (stopping === done) stopping = null
       })
