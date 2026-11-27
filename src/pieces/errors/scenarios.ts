@@ -18,12 +18,15 @@ function rows(now: number): ErrorRow[] {
       lastSeen: now - 4 * MINUTE,
       count: 27,
       markedAt: null,
-      message: "ISH-CORE-2368 Error executing script 'app_example/cartridge/controllers/Cart.js': TypeError: Cannot read property <q> of undefined (app_example/cartridge/scripts/helpers/cartHelper.js) at /on/demandware.store/<site>/<locale>/Cart-AddProduct",
+      message: "<code> Error executing script 'app_example/cartridge/controllers/Cart.js': TypeError: Cannot read property <q> of undefined (app_example/cartridge/scripts/helpers/cartHelper.js) at /on/demandware.store/<site>/<locale>/Cart-AddProduct",
       logger: 'system.core',
+      pipeline: 'Cart-AddProduct',
+      level: 'ERROR',
       frames: [
-        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'calculateLineTotal', line: 118, openable: true },
-        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'addProductToCart', line: 64, openable: true },
-        { file: 'app_example/cartridge/controllers/Cart.js', function: 'addProduct', line: 42, openable: true }
+        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'calculateLineTotal', line: 118, openable: true, path: 'cartridges/app_example/cartridge/scripts/helpers/cartHelper.js' },
+        { file: 'app_example/cartridge/scripts/helpers/cartHelper.js', function: 'addProductToCart', line: 64, openable: true, path: 'cartridges/app_example/cartridge/scripts/helpers/cartHelper.js' },
+        { file: 'app_example/cartridge/controllers/Cart.js', function: 'addProduct', line: 42, openable: true, path: 'cartridges/app_example/cartridge/controllers/Cart.js' },
+        { file: 'modules/server/route.js', function: 'next', line: 83, openable: false, path: null }
       ]
     },
     {
@@ -34,6 +37,8 @@ function rows(now: number): ErrorRow[] {
       markedAt: null,
       message: 'Payment authorization failed for order #, customer <email>, amount #.# EUR, reference <hex>',
       logger: 'custom.PaymentService',
+      pipeline: 'CheckoutServices-PlaceOrder',
+      level: 'ERROR',
       frames: []
     },
     {
@@ -44,9 +49,11 @@ function rows(now: number): ErrorRow[] {
       markedAt: now - 26 * HOUR,
       message: 'Job step failed: java.lang.IllegalStateException: Export file /remote/IMPEX/src/export_#_#.xml is locked',
       logger: 'system.job',
+      pipeline: null,
+      level: 'FATAL',
       frames: [
-        { file: 'ExportStep.java', function: 'example.jobs.ExportStep.run', line: 88, openable: false },
-        { file: 'JobExecutor.java', function: 'example.jobs.JobExecutor.execute', line: 120, openable: false }
+        { file: 'ExportStep.java', function: 'example.jobs.ExportStep.run', line: 88, openable: false, path: null },
+        { file: 'JobExecutor.java', function: 'example.jobs.JobExecutor.execute', line: 120, openable: false, path: null }
       ]
     }
   ]
@@ -67,6 +74,11 @@ function requests(state: (role: Role) => RoleErrors) {
     'errors.open': () => ({ opened: true })
   }
 }
+
+/** The signatures of the three invented errors: a script error, a payment one, a job's. */
+const SCRIPT_ERROR = 'a1b2c3d4e5f6a7b8c9d0'
+const NO_STACK = 'b2c3d4e5f6a7b8c9d0e1'
+const JOB_ERROR = 'c3d4e5f6a7b8c9d0e1f2'
 
 export const scenarios: PieceScenarios = {
   /** New errors on the sandbox, and one seen, read every five minutes. */
@@ -90,5 +102,15 @@ export const scenarios: PieceScenarios = {
   /** The last read may have missed entries: b2c returned as many as it keeps. */
   errorsMissed: { requests: requests((role) => answer(role, { missedSince: Date.now() - 6 * HOUR })) },
   /** A read is running. */
-  errorsReading: { requests: requests((role) => answer(role, { reading: true })) }
+  errorsReading: { requests: requests((role) => answer(role, { reading: true })) },
+  /**
+   * The detail of a new script error: its state, count and times, its actions, the fields of its
+   * first line, its message with placeholders as code, and its frames, three in the workspace and
+   * one that is not.
+   */
+  errorsDetail: { persisted: { plugin: { errorsDetail: SCRIPT_ERROR } }, requests: requests((role) => answer(role)) },
+  /** The detail of a new error whose entry has no stack trace. */
+  errorsDetailNoStack: { persisted: { plugin: { errorsDetail: NO_STACK } }, requests: requests((role) => answer(role)) },
+  /** The detail of a seen error of the platform: its frames muted, none to open. */
+  errorsDetailSeen: { persisted: { plugin: { errorsDetail: JOB_ERROR } }, requests: requests((role) => answer(role)) }
 }

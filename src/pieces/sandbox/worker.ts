@@ -29,6 +29,14 @@ export const COMMANDS = {
 /** How often the sandbox list is read again while nothing is followed. */
 export const SLOW_REFRESH_MS = 15 * 60_000
 
+/** How long whether a workspace has a configuration file is trusted before it is asked again. */
+const CONFIG_TTL_MS = 30_000
+
+/** A workspace's project, or the workspace alone when Orca names no project for it. */
+function projectKey(workspace: { id: string; projectId?: string | null }): string {
+  return workspace.projectId ?? `workspace:${workspace.id}`
+}
+
 /** The fewest milliseconds between two posts of the state: a checkout can change many files. */
 const POST_GAP_MS = 250
 
@@ -127,6 +135,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     const { config, instances } = await roles()
     const upload = ownership.snapshot()
     const ids = new Set(listed.workspaces.map((workspace) => workspace.id))
+    const inUse = await projectsInUse(listed, upload.workspaceId)
     // Only a whole list says a workspace is gone; even then only a person deletes its version.
     // Only a whole list says a workspace is gone, and not for a project hidden from the sidebar;
     // even then only a person deletes its version.
@@ -143,7 +152,9 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
       workspaces: listed.workspaces.map((workspace) => ({
         id: workspace.id,
         name: workspace.name,
+        branch: workspace.branch ?? null,
         local: isLocal(workspace),
+        inProject: inUse === null || workspace.id === upload.workspaceId || inUse.has(projectKey(workspace)),
         codeVersion: ownership.versionOf(workspace.id),
         owner: workspace.id === upload.workspaceId
       })),
@@ -152,6 +163,55 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
       leftovers,
       problem
     }
+  }
+
+  /** Whether a workspace's folder has a configuration file, asked of b2c at most every CONFIG_TTL_MS. */
+  const configured = new Map<string, { at: number; has: Promise<boolean> }>()
+  function hasConfig(workspace: Listing['workspaces'][number]): Promise<boolean> {
+    if (!isLocal(workspace)) return Promise.resolve(false)
+    const known = configured.get(workspace.path)
+    if (known && timers.now() - known.at < CONFIG_TTL_MS) return known.has
+    if (configured.size > 1_000) configured.clear()
+    const has = b2c.hasConfig(workspace.path).catch(() => false)
+    configured.set(workspace.path, { at: timers.now(), has })
+    return has
+  }
+
+  /** `work`'s answer, or `fallback` once HOST_TIMEOUT_MS passed without one. */
+  function bounded<T>(work: Promise<T>, fallback: T): Promise<T> {
+    return new Promise<T>((resolve) => {
+      const timer = timers.setTimeout(() => resolve(fallback), HOST_TIMEOUT_MS)
+      work.then(
+        (value) => (timers.clearTimeout(timer), resolve(value)),
+        () => (timers.clearTimeout(timer), resolve(fallback))
+      )
+    })
+  }
+
+  /**
+   * The projects the view lists first, only to choose what is shown, never what uploads: the
+   * uploading workspace's; else the focused workspace's when it has a configuration file; else
+   * every project with a workspace that has one. Only whether the file exists is asked, never what
+   * it holds. Null when no project has one: the view then lists every workspace as one.
+   */
+  async function projectsInUse(listed: Listing, ownerId: string | null): Promise<Set<string> | null> {
+    const byId = (id: string | null | undefined) => (id ? (listed.workspaces.find((workspace) => workspace.id === id) ?? null) : null)
+    const owner = byId(ownerId)
+    if (owner) return new Set([projectKey(owner)])
+    const focusedId = await new Promise<string | null>((resolve) => {
+      const timer = timers.setTimeout(() => resolve(null), HOST_TIMEOUT_MS)
+      workspaces.focused().then(
+        (workspace) => (timers.clearTimeout(timer), resolve(workspace?.id ?? null)),
+        () => (timers.clearTimeout(timer), resolve(null))
+      )
+    })
+    const focused = byId(focusedId)
+    if (focused && (await bounded(hasConfig(focused), false))) return new Set([projectKey(focused)])
+    // Asked side by side, each within HOST_TIMEOUT_MS: a folder that does not answer (a network
+    // drive gone) counts as having none, and never holds the status.
+    const answers = await Promise.all(listed.workspaces.map(async (workspace) => ((await bounded(hasConfig(workspace), false)) ? projectKey(workspace) : null)))
+    const projects = new Set(answers.filter((key): key is string => key !== null))
+    return projects.size > 0 ? projects : null
   }
 
   async function refresh(): Promise<void> {

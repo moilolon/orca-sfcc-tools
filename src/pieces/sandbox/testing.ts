@@ -87,6 +87,12 @@ export class FakeB2c implements B2c {
   fail = new Map<string, string>()
   /** What a command does on the sandbox before it fails (`fail`): a delete that times out goes on. */
   sideEffects = new Map<string, (args: readonly string[]) => void>()
+  /** The workspace folders that have a configuration file. */
+  configured = new Set<string>()
+
+  async hasConfig(root: string): Promise<boolean> {
+    return this.configured.has(root)
+  }
 
   private matches(args: readonly string[], key: string): boolean {
     return args.slice(0, key.split(' ').length).join(' ') === key

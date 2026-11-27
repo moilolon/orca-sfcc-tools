@@ -21,7 +21,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { extname, posix, resolve as resolvePath, win32 } from 'node:path'
-import { configFolderOf, DW_KEYS, loadConfig, mainCheckoutOf, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
+import { configFolderOf, DW_KEYS, hasConfigFile, loadConfig, mainCheckoutOf, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
 import { commandOf, guard, isRole, refusedFlag, ROLES, topicOf, type ConfigState, type Role, type RoleState } from './instances'
 import type { Logger } from './piece'
 import type { Settings } from './settings'
@@ -183,6 +183,12 @@ export type B2c = {
   version(): Promise<string | null>
   /** The state of dw.json and of each role. The only thing the rest of the plugin learns of it. */
   instances(options?: ConfigChoice): Promise<InstancesState>
+  /**
+   * Whether the workspace at `root` (a folder of this machine) has a configuration file to read,
+   * by the same rule as the one read for it (the setting, else its `dw.json`, else its main
+   * checkout's). Only whether it exists: the file is not read, and it never throws.
+   */
+  hasConfig(root: string): Promise<boolean>
   /**
    * `text` as it may be shown: every value the runner has read from a dw.json since the worker
    * started is masked, for every role and whichever workspace is focused now, and the home
@@ -1207,6 +1213,14 @@ export function createB2c(deps: B2cDeps): B2c {
       const instances = {} as Record<Role, RoleState>
       for (const role of ROLES) instances[role] = config.roles[role].state
       return { config: config.state, instances }
+    },
+
+    async hasConfig(root) {
+      try {
+        return await hasConfigFile(root, (await deps.settings.read()).configFile, isFile, deps.fs)
+      } catch {
+        return false
+      }
     },
 
     async mask(text) {

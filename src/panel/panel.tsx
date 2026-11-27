@@ -1,8 +1,9 @@
 // The SFCC sidebar panel: a bar with one view per delivered piece that has something to show,
-// a compact line with the state of the four environments and of b2c, the active view under it,
-// and a setup view that explains that state and how to fix it. While no piece has a view, the
-// setup view is the whole panel and there is no bar. Every text comes from src/core/i18n.ts or
-// the piece's own table, in Orca's language. It never shows a host, a path or a credential.
+// a compact line with the state of the four environments (and of b2c, only when it is missing),
+// the active view under it, and a setup view that says that state and how to fix it. While no
+// piece has a view, the setup view is the whole panel and there is no bar. Every text comes from
+// src/core/i18n.ts or the piece's own table, in Orca's language. It never shows a host, a path or
+// a credential.
 //
 // What the panel knows of a piece is its section (src/panel/sections.ts): the name, whether it is
 // delivered and has a view, what it listens to and what it draws. Nothing here names a piece.
@@ -10,7 +11,6 @@ import {
   atom,
   Box,
   Button,
-  Callout,
   env,
   Heading,
   IconButton,
@@ -31,9 +31,10 @@ import { CORE_MESSAGES, t, wordError, type CoreMessageKey } from '../core/i18n'
 import { ROLES, type ConfigState, type Role, type RoleState } from '../core/instances'
 import type { PanelSection, PieceId } from '../core/piece'
 import type { CoreStatus } from '../protocol'
+import { lastView } from './navigation'
 import { SECTIONS } from './sections'
-import { ErrorState, Group, LabelledRow, ListRow, StateBadge, TONES, type StateTone } from './ui'
-import { BAR_KEY, FAILED_VIEW_KEY, SETUP_VIEW, VIEW_KEY, viewBoxKey } from './views'
+import { ErrorState, Group, LabelledRow, ListRow, Notice, StateBadge, TONES, type StateTone } from './ui'
+import { BAR_KEY, FAILED_VIEW_KEY, SETUP_VIEW, viewBoxKey } from './views'
 
 const status = atom<CoreStatus | null>(null)
 const loading = atom(false)
@@ -46,8 +47,6 @@ const problem = atom<string | null>(null)
 const broken = atom<readonly PieceId[]>([])
 /** Whether a setting names the configuration file; null when the setting could not be read. */
 const customFile = atom<boolean | null>(null)
-/** The view last picked in the bar, kept across runs of the plugin. Read through `activeView`. */
-const lastView = atom<string | null>(VIEW_KEY, null, { persist: 'plugin' })
 /**
  * The view whose `render` threw last, kept across runs: opening the panel on it again would only
  * show the same failure, so the next open goes to the setup view instead. A good render clears it.
@@ -70,11 +69,14 @@ const ROLE_SHORT_KEYS: Record<Role, CoreMessageKey> = {
   production: 'roleShortProduction'
 }
 
-/** Each state of an environment: its words, its tone and, so colour is never the only sign, its icon. */
-const ROLE_STATES: Record<RoleState, { key: CoreMessageKey; tone: StateTone; icon: IconName }> = {
-  ready: { key: 'roleReady', tone: 'ok', icon: 'check' },
-  incomplete: { key: 'roleIncomplete', tone: 'attention', icon: 'warning' },
-  absent: { key: 'roleAbsent', tone: 'off', icon: 'remove' }
+/**
+ * Each state of an environment: its words, its tone, so colour is never the only sign its icon,
+ * and, when it is not ready, why in a few words.
+ */
+const ROLE_STATES: Record<RoleState, { key: CoreMessageKey; tone: StateTone; icon: IconName; reason: CoreMessageKey | null }> = {
+  ready: { key: 'roleReady', tone: 'ok', icon: 'check', reason: null },
+  incomplete: { key: 'roleIncomplete', tone: 'attention', icon: 'warning', reason: 'incompleteReason' },
+  absent: { key: 'roleAbsent', tone: 'off', icon: 'remove', reason: 'absentReason' }
 }
 
 const CONFIG_STATES: Record<ConfigState, { key: CoreMessageKey; tone: StateTone }> = {
@@ -147,9 +149,9 @@ function StatusChip({ name, tooltip, icon, tone, onPress }: { name: string; tool
 }
 
 /**
- * The line under the bar: each environment as a `StatusChip`, the b2c version, and, when something
- * needs attention, what in a few words and a button to the setup view (Orca's buttons take no
- * warning tone, so the words go in a badge).
+ * The line under the bar: each environment as a `StatusChip`; b2c only when it is missing (its
+ * version is in the setup view); and, when something needs attention, what in a few words and a
+ * button to the setup view (Orca's buttons take no warning tone, so the words go in a badge).
  */
 function StatusLine({ current, failure, busy, attention, onAttention }: { current: CoreStatus | null; failure: string | null; busy: boolean; attention: Attention | null; onAttention?: () => void }) {
   const toSetup = () => set(lastView, SETUP_VIEW)
@@ -169,14 +171,10 @@ function StatusLine({ current, failure, busy, attention, onAttention }: { curren
           />
         )
       }),
-      current.b2c.found ? (
-        <Text key="b2c" size="sm" muted>
-          {text('b2cShort', { version: current.b2c.version ?? '' }).trim()}
-        </Text>
-      ) : (
+      current.b2c.found ? null : (
         <StatusChip
           key="b2c"
-          name={text('b2cShort', { version: '' }).trim()}
+          name={text('b2cShort')}
           tooltip={text('stateTooltip', { name: text('b2c'), state: text('b2cMissing') })}
           icon="close"
           tone="failed"
@@ -205,62 +203,50 @@ function StatusLine({ current, failure, busy, attention, onAttention }: { curren
 }
 
 function FailedSection({ section, locale }: { section: PanelSection; locale: string }) {
-  return (
-    <Callout tone="danger" icon="error" title={text('sectionFailedTitle', { piece: section.title(locale) })}>
-      <Text>{text('sectionFailedBody')}</Text>
-    </Callout>
-  )
+  return <Notice tone="failed" title={text('sectionFailedTitle', { piece: section.title(locale) })} detail={text('sectionFailedBody')} />
 }
 
-function Environments({ current }: { current: CoreStatus }) {
-  const states = ROLES.map((role) => current.instances[role])
+/** Each environment: a mark, its name and its state; when it is not ready, why, in a few words. */
+function Environments({ current, busy }: { current: CoreStatus; busy: boolean }) {
+  const notReady = ROLES.some((role) => current.instances[role] !== 'ready')
   return (
-    <Group title={text('instances')}>
-      {ROLES.map((role) => (
-        <LabelledRow key={role} label={text(ROLE_KEYS[role])}>
-          <StateBadge tone={ROLE_STATES[current.instances[role]].tone}>{text(ROLE_STATES[current.instances[role]].key)}</StateBadge>
-        </LabelledRow>
-      ))}
-      {states.includes('incomplete') ? (
-        <Text size="sm" muted>
-          {text('incompleteHint')}
-        </Text>
-      ) : null}
-      {current.config === 'ok' && states.includes('absent') ? (
-        <Text size="sm" muted>
-          {text('absentHint')}
-        </Text>
-      ) : null}
+    <Group
+      title={text('instances')}
+      action={
+        notReady ? (
+          <Button size="xs" variant="ghost" icon="refresh" disabled={busy} onPress={() => void load()}>
+            {text('recheck')}
+          </Button>
+        ) : undefined
+      }
+    >
+      {ROLES.map((role) => {
+        const state = ROLE_STATES[current.instances[role]]
+        // Without a file, every environment is absent for the same reason, said once below.
+        const reason = state.reason && current.config === 'ok' ? text(state.reason) : undefined
+        return <ListRow key={role} tone={state.tone} title={text(ROLE_KEYS[role])} detail={reason} note={text(state.key)} noteTone={state.tone} />
+      })}
     </Group>
   )
 }
 
-function ConfigFile({ config, custom }: { config: ConfigState; custom: boolean | null }) {
-  const hint = custom === null ? 'configFromUnknownHint' : custom ? 'configFromSettingHint' : 'configFromWorkspaceHint'
+/** Where dw.json is read from, in a word, and its state; when it cannot be used, how to fix it. */
+function ConfigFile({ config, custom, busy }: { config: ConfigState; custom: boolean | null; busy: boolean }) {
+  const recheck = { label: text('recheck'), icon: 'refresh' as const, disabled: busy, onPress: () => void load() }
   return (
     <Group title={text('configFile')}>
       {custom === null ? null : <LabelledRow label={text('configReadFrom')}>{text(custom ? 'configFromSetting' : 'configFromWorkspace')}</LabelledRow>}
       <LabelledRow label={text('configState')}>
         <StateBadge tone={CONFIG_STATES[config].tone}>{text(CONFIG_STATES[config].key)}</StateBadge>
       </LabelledRow>
-      <Text size="sm" muted>
-        {`${text(hint)} ${text('neverShown')}`}
-      </Text>
-      {config === 'invalid' ? (
-        <Callout tone="danger" icon="error" title={text('configInvalidTitle')}>
-          <Text>{text('configInvalidBody')}</Text>
-        </Callout>
-      ) : null}
-      {config === 'missing' ? (
-        <Callout tone="warning" icon="info" title={text('configMissingTitle')}>
-          <Text>{text('configMissingBody')}</Text>
-        </Callout>
-      ) : null}
+      {config === 'invalid' ? <Notice tone="failed" title={text('configInvalidTitle')} detail={text('configInvalidFix')} action={recheck} /> : null}
+      {config === 'missing' ? <Notice tone="attention" title={text('configMissingTitle')} detail={text('configMissingFix')} action={recheck} /> : null}
     </Group>
   )
 }
 
-function B2cState({ value }: { value: CoreStatus['b2c'] }) {
+/** b2c found, with its version; or not found, why, and how to fix it. */
+function B2cState({ value, busy }: { value: CoreStatus['b2c']; busy: boolean }) {
   const state = value.found ? (value.version ? text('b2cFound', { version: value.version }) : text('b2cFoundNoVersion')) : text('b2cMissing')
   return (
     <Group title={text('b2c')}>
@@ -268,12 +254,12 @@ function B2cState({ value }: { value: CoreStatus['b2c'] }) {
         <StateBadge tone={value.found ? 'ok' : 'failed'}>{state}</StateBadge>
       </LabelledRow>
       {value.found ? null : (
-        <Callout tone="warning" icon="warning" title={text('b2cMissingTitle')}>
-          <Stack gap="xs">
-            <Text>{wordError(env.locale, value.reason ?? 'b2c_not_found')}</Text>
-            <Text>{text('b2cMissingBody')}</Text>
-          </Stack>
-        </Callout>
+        <Notice
+          tone="failed"
+          title={text('b2cMissingTitle')}
+          detail={`${wordError(env.locale, value.reason ?? 'b2c_not_found')} ${text('b2cMissingFix')}`}
+          action={{ label: text('recheck'), icon: 'refresh', disabled: busy, onPress: () => void load() }}
+        />
       )}
     </Group>
   )
@@ -310,10 +296,13 @@ function SetupView({ sections, failed, locale, busy }: { sections: readonly Pane
         ))}
       {current ? (
         <Stack gap="md">
-          <Environments current={current} />
-          <ConfigFile config={current.config} custom={custom} />
-          <B2cState value={current.b2c} />
+          <Environments current={current} busy={busy} />
+          <ConfigFile config={current.config} custom={custom} busy={busy} />
+          <B2cState value={current.b2c} busy={busy} />
           <Pieces sections={sections} failed={failed} locale={locale} />
+          <Text size="sm" muted>
+            {text('settingsHint')}
+          </Text>
         </Stack>
       ) : failure ? null : (
         <Skeleton lines={4} label={text('loading')} />
@@ -348,6 +337,86 @@ function drawNow(node: OrcaNode, depth = 0): OrcaNode {
   return { ...node, props: { ...node.props, children: drawNow(node.props.children as OrcaNode, depth + 1) } } as OrcaNode
 }
 
+/**
+ * Orca's own limits on one panel's tree, and how it counts toward them (`plugin-declarative-tree`
+ * and `plugin-declarative-limits` of Orca's shared code): each node costs
+ * `NODE_BYTES` and the length of `JSON.stringify` of its props as sent (escapes included; children,
+ * key and ref left out; a handler sent as `{"$callback":"<id>"}`), each text `TEXT_BYTES` and its
+ * length, and a text counts as a node too. Past either limit Orca refuses the whole panel, and
+ * every draw after it.
+ */
+export const ORCA_LIMITS = { bytes: 512 * 1024, nodes: 5000 } as const
+const NODE_BYTES = 32
+const TEXT_BYTES = 8
+/** A handler as Orca sends it: `{"$callback":"<id>"}`, its id a hash with, at most, a short suffix. */
+const CALLBACK_BYTES = 40
+
+/**
+ * What one view may take of Orca's limits: close to them, so an ordinary view is never refused,
+ * and under them by what the bar, the status line and a setup view can take.
+ */
+export const VIEW_BUDGET = { bytes: 448 * 1024, nodes: 4500 } as const
+
+/** A drawn element, as the shell sees it once its components were called (`drawNow`). */
+type Element = { readonly type: unknown; readonly props: Record<string, unknown>; readonly key?: unknown }
+
+function isElement(node: unknown): node is Element {
+  return typeof node === 'object' && node !== null && !Array.isArray(node) && 'type' in node && 'props' in node
+}
+
+/** The length of a node's props as Orca receives them. */
+function propsBytes(props: Record<string, unknown>): number {
+  const sent: Record<string, unknown> = {}
+  let callbacks = 0
+  for (const [name, value] of Object.entries(props)) {
+    if (name === 'children' || name === 'ref' || name === 'key' || value === undefined) continue
+    if (typeof value === 'function') callbacks += 1
+    else sent[name] = value
+  }
+  let length: number
+  try {
+    length = JSON.stringify(sent).length
+  } catch {
+    // Not JSON: Orca would refuse it anyway, so it counts as too large.
+    return Number.POSITIVE_INFINITY
+  }
+  return length + callbacks * CALLBACK_BYTES
+}
+
+/**
+ * The bytes and nodes a tree counts toward Orca's limits, by Orca's own rule. It stops once
+ * `stopAt` is passed, so a huge tree costs no more to measure than a small one.
+ */
+export function treeCost(node: unknown, stopAt: { bytes: number; nodes: number } = ORCA_LIMITS): { bytes: number; nodes: number } {
+  let bytes = 0
+  let nodes = 0
+  const stack: unknown[] = [node]
+  while (stack.length > 0) {
+    const item = stack.pop()
+    if (item === null || item === undefined || typeof item === 'boolean') continue
+    if (typeof item === 'string' || typeof item === 'number') {
+      nodes += 1
+      bytes += TEXT_BYTES + String(item).length
+    } else if (Array.isArray(item)) {
+      for (let i = item.length - 1; i >= 0; i--) stack.push(item[i])
+    } else if (isElement(item)) {
+      nodes += 1
+      bytes += NODE_BYTES + (typeof item.type === 'string' ? propsBytes(item.props) : String(item.type).length)
+      // An element holds its children in its props; a tree as sent (or as a test draws it) beside them.
+      if ('children' in item.props) stack.push(item.props.children)
+      else if ('children' in item) stack.push((item as { children?: unknown }).children)
+    }
+    if (bytes > stopAt.bytes || nodes > stopAt.nodes) break
+  }
+  return { bytes, nodes }
+}
+
+/** Whether a view's tree passes its share of Orca's limits (`VIEW_BUDGET`). */
+export function overBudget(node: unknown, budget: { bytes: number; nodes: number } = VIEW_BUDGET): boolean {
+  const cost = treeCost(node, budget)
+  return cost.bytes > budget.bytes || cost.nodes > budget.nodes
+}
+
 /** Records, after this draw, which view's render threw last; atoms cannot change while drawing. */
 function noteFailedRender(view: string | null): void {
   void Promise.resolve().then(() => {
@@ -374,6 +443,25 @@ function PieceView({ section, failed, locale }: { section: PanelSection; failed:
         message={text('viewFailedBody')}
         retryLabel={text('tryAgain')}
         onRetry={() => set(attempt, read(attempt) + 1)}
+      />
+    )
+  }
+  if (overBudget(body)) {
+    // Orca refuses a whole panel past its limits, and then every draw after it: a view that would
+    // come near them draws this instead, so the bar, the status line and the other views stay. What
+    // made it large is often kept (open folders, pages shown): resetting the view's own state lets
+    // it draw again.
+    noteFailedRender(section.id)
+    const reset = section.reset
+    return (
+      <ErrorState
+        title={text('viewTooLargeTitle', { piece: section.title(locale) })}
+        message={text(reset ? 'viewTooLargeResetBody' : 'viewTooLargeBody')}
+        retryLabel={text(reset ? 'resetView' : 'tryAgain')}
+        onRetry={() => {
+          reset?.()
+          set(attempt, read(attempt) + 1)
+        }}
       />
     )
   }

@@ -23,9 +23,12 @@ What is built is what `main` holds; this file is the plan for the rest.
    never follows the focused workspace. Each workspace has its own code version: activated when
    the workspace is picked, deleted when the workspace is removed.
 6. The error diff is the plugin's own: a signature per error and a list of seen signatures per
-   instance. Log content stays in the plugin's local storage.
-7. The `dw.*` API index is committed on `main` with descriptions, generated from Salesforce's
-   public Script API pages and refreshed weekly by a workflow that opens a pull request.
+   instance. Log content stays on the machine: in the plugin's storage and its own data folder.
+7. The `dw.*` API index is committed on `main` without descriptions: classes, inheritance,
+   constants, properties, methods with their parameters and types, deprecation, and a link to
+   each page. It is generated on the owner's machine through `b2c docs`; descriptions are read
+   at run time through `b2c docs read`. A weekly workflow only compares the published version
+   and opens an issue when it changed.
 8. The template piece is called "ISML".
 9. Git as `CLAUDE.md` says.
 
@@ -159,15 +162,11 @@ thrown away; an answered spike moves to the second table with what follows from 
 
 | Id | Question | Before | If no |
 | --- | --- | --- | --- |
-| S1 | Can a worker drive `b2c debug` (a DAP adapter) over stdio: initialize, attach, set a breakpoint, list threads? | 5 | Phase 5 stops; the transport the adapter does offer is proposed. |
 | S3 | Can the open document be matched to its file from its text alone, including identical copies in several cartridges and unsaved edits, and with the path `editor.save.before` gives? | 7 | The editor is opened through a plugin command that records the path, and a tab opened another way asks which file it is. |
 | S4 | Do `.js`, `.xml` and `.properties` open directly in a plugin editor, or only as an alternative view? | 7 | The editor is the default for `.isml` only; the other types are reached from the view toggle and their findings from the problems section. |
-| S5 | Can hosted runners download the public Script API pages without being limited, is their structure stable enough to parse, and do their terms allow committing short descriptions? | 6.1 | The generator runs locally on demand and the workflow only reminds; or descriptions are left out of the committed index and read through `b2c docs` at run time. |
-| S8 | Where can the seen list live so that the worker and a command line run outside Orca both read and write it, and how does a bot run call that command line? | 4 | The seen list moves to a file in the user's data folder that both open. |
 | S9 | Is an editing surface written here (text layer, highlight layer, gutter, pop-ups) good enough inside an editor frame: typing latency on a 3,000-line file, undo, selection, composition input? | 7 | Phase 7 stops and vendoring an open-source editor component is put to the owner, since it bends rule 1. |
 
-S1 runs against the sandbox. S3, S4 and S9 reuse the throwaway plugin the owner already
-approved. S5 needs a workflow run, so it waits for the owner like any workflow.
+S3, S4 and S9 reuse the throwaway plugin the owner already approved.
 
 ### Answered
 
@@ -176,6 +175,9 @@ approved. S5 needs a workflow run, so it waits for the owner like any workflow.
 | S2 | Can a worker start `orca file open --line`? | Yes, with two conditions. The worker's environment has no `APPDATA` and its working folder is Orca's install folder, so the call needs `APPDATA` set and the workspace named with `--worktree path:<root>`. The executable is beside Orca's own and on the worker's `PATH`. | `core/open-file.ts` does exactly that. The cursor position is not echoed in the answer: it is confirmed by eye in the first live check that uses it (phase 3). |
 | S6 | What does `b2c` print with `--json`, and does it authenticate from the environment alone? | Yes for all four roles, with no configuration file. With no credentials `b2c` does not fail: it opens a browser sign-in. Results are JSON on stdout only on success; `activate`, `delete` and `watch` print none; errors are JSON on stderr only sometimes; a failure can exit with any non-zero code. `code watch` streams one JSON event per line on stderr with `--jsonl`. A log entry is one error with its whole stack trace inside `message`, with no separate site or stack fields. `docs read` returns Markdown text and matches a wrong name to another class without failing. | The runner never starts an instance command without credentials and pins the authentication methods; it treats only exit 0 as success. Phase 2 reads `code watch` from stderr. Phase 3 parses site and stack out of the message and sorts entries itself. Phase 6.1 cannot take structure from `docs read`: it serves the long text of a hover, checked against the id asked. |
 | S7 | Can the state of the sandbox be read from what `dw.json` holds? | Yes, through `b2c sandbox list`, matching the entry whose host equals the configured one. `b2c sandbox get` cannot be trusted: where a deleted sandbox shares its identifier with the live one, it returns the deleted record. | Phase 2 reads the state from the list. Start and stop are fired without waiting on `b2c` and followed on the list; whether they work with these credentials is checked once, supervised, in phase 2's live run. If the list is refused for lack of permission, the state shows as unknown. |
+| S1 | Can a worker drive `b2c debug` over stdio? | Yes. It is a Debug Adapter Protocol adapter on stdin and stdout only, with nothing but protocol on stdout. Breakpoints take the absolute local path of a file inside a cartridge under the adapter's working folder. It uses the sandbox's user and access key. Killed without `disconnect`, it leaves a request halted on the instance for minutes. | Phase 5 frames the stream itself, always disconnects, runs a cleanup session after an unclean end, and passes its own debugger client id. |
+| S5 | Can hosted runners fetch the public Script API pages, and may short descriptions be committed? | No on both. The pages' CDN blocks hosted runners after about a hundred requests, and Salesforce's terms grant no right to reuse the text, only to link to it. The pages exist as Markdown, versioned in their index. | Rule 7 as it now reads: the index is built locally through `b2c docs`, holds facts of the interface and a link, and no description; the weekly workflow only reminds. |
+| S8 | Where can the seen list live so the plugin and a command line outside Orca share it, and how does a bot run that command line? | Not in the plugin's storage: it is one file per plugin, rewritten with no lock, so an outside writer loses updates and a half write wipes it. A bot run is an agent in its own folder, which can run a Node command from the main checkout. | The seen list moves to `seen.json` in the plugin's own data folder (`%APPDATA%\orca-sfcc-tools` on Windows), written by the worker only, under a lock and an atomic rename. The command line reads it and keeps its own cursor in `report.json`. It is given the `dw.json` path as an argument. |
 
 ## 6. Phases
 
@@ -336,22 +338,26 @@ and the automation are created on the owner's machine with the owner's approval.
 **Out.** Marking errors as seen from the bot. Reading anything but logs. Posting anywhere but
 the bot's own chat.
 
-**Files.** `bin/errors.ts`, `src/pieces/errors/{report,report.test}.ts`, a section of
-`README.md`.
+**Files.** `bin/errors.ts`, `src/pieces/errors/{report,data-folder,report.test}.ts`, a section
+of `README.md`. The seen list moves from the plugin's storage to `seen.json` in the plugin's data
+folder, migrated once.
 
-**Contract.** `node bin/errors.ts --role <role>… [--json]`; exit 0 with a report, non-zero when
-an instance could not be read (the report says which). It prints signatures, counts and
-normalized messages, never raw log entries.
+**Contract.** `node bin/errors.ts --role <role>… --config-file <dw.json> [--json]`; exit 0 with a
+report, non-zero when an instance could not be read (the report says which). It prints
+signatures, counts and normalized messages with values masked, never raw log entries. It reads
+`seen.json` and never writes it; its own "last report" cursor is `report.json`. The bot runs it
+from the main checkout with Node 22.18 or later.
 
 **Accepted when.**
 - Tests: the report over invented fixtures, for text and JSON, including an unreachable
   instance and an instance with nothing new.
 - A run by hand of the automation leaves one summary per environment in the bot's chat.
 
-**Spikes.** S8. **Depends on** phase 3.
+**Spikes.** S8, answered. **Depends on** phase 3.
 
-**Risks.** A module loaded both by Orca and by plain Node must import in a way both accept.
-What the bot is shown leaves the machine: see section 8, point 6.
+**Risks.** A module loaded both by Orca and by plain Node must import in a way both accept
+(explicit `.ts` extensions). What the bot is shown leaves the machine: the owner accepted
+signatures, counts and masked messages, production included.
 
 ### Phase 5. Debugger
 
@@ -388,7 +394,7 @@ One phase, five pull requests, because no reviewer can judge it as one.
 
 | Part | Delivers | Depends on |
 | --- | --- | --- |
-| 6.1 `dw.*` index | `scripts/generate-dw-index.ts` (public pages to `data/dw-api.json`: classes, inheritance, constants, properties, methods with parameters and return types, deprecation, a short description), the loader, and the weekly workflow that opens a pull request | 0, S5, S6 |
+| 6.1 `dw.*` index | `scripts/generate-dw-index.ts`, run on the owner's machine through `b2c docs` (to `data/dw-api.json`: classes, inheritance, constants, properties, methods with parameters and return types, deprecation, a link; no descriptions), the loader, descriptions read at run time with `b2c docs read`, and a weekly workflow that compares the published version and opens an issue when it changed | 0 |
 | 6.2 Syntax | An ISML parser and a tolerant JavaScript parser written here, with positions; bindings, `require` calls and exports of a script, also inside `${…}` and `<isscript>` | 0 |
 | 6.3 Checkout index | Cartridges and the cartridge path (settings, else the site archives of the checkout, else a git ref read without checking it out); module resolution (`*/`, `~/`, relative, `dw/`); templates; resource bundles; custom attributes and site preferences from the metadata; SFRA routes; kept current as files change | 6.2 |
 | 6.4 Queries | Types (one variable, one type: from the declaration, `@param`/`@type`, globals, or the previous call's return), completion, hover, go to definition, references, signature help, as pure functions of the index, a file and an offset | 6.1, 6.3 |
@@ -411,7 +417,7 @@ One phase, five pull requests, because no reviewer can judge it as one.
 Running or evaluating project code. Reading an instance.
 
 **Files.** `scripts/generate-dw-index.ts`, `data/dw-api.json`,
-`.github/workflows/refresh-dw-index.yml`, `src/pieces/engine/{dw,isml,js,xml,checkout,query,problems}/…`,
+`.github/workflows/check-script-api-version.yml`, `src/pieces/engine/{dw,isml,js,xml,checkout,query,problems}/…`,
 `section.tsx`, `manifest.json`, `protocol.ts`, `i18n.ts`, `fixtures/` (an invented checkout
 with two storefronts and three cartridges), tests.
 
@@ -422,9 +428,10 @@ files with no Node imports, so the editor can load them too. The save hook only 
 analysis and returns at once: it never delays or refuses a save.
 
 **Accepted when.**
-- 6.1: the generator turns invented pages into the expected index; the committed index loads
-  and answers a known class, method and constant; the workflow, once approved, opens a pull
-  request and nothing else.
+- 6.1: the generator turns invented `b2c docs` output into the expected index; the committed
+  index loads and answers a known class, method and constant and holds no description; a
+  description is read through `b2c docs read` and checked against the id asked; the workflow,
+  once approved, opens an issue when the version changed and nothing else.
 - 6.2: parser tests on valid and broken input; the parser never throws and always returns
   positions.
 - 6.3 and 6.4: on the invented checkout, a test for every bullet of "what the engine answers".
@@ -432,12 +439,12 @@ analysis and returns at once: it never delays or refuses a save.
 - On a real checkout, read-only: the index builds within a stated time and the problems
   section lists findings without a crash.
 
-**Spikes.** S5, S6, S2.
+**Spikes.** S5, S6 and S2, all answered.
 
 **Risks.** The JavaScript parser is the largest single piece written here. Guessing a type from
 a name must stay conservative or it produces false warnings. A large checkout makes the first
-index slow: it is cached by file time and built off the request path. The public pages can
-change shape: the generator fails loudly, and the weekly pull request is where that shows.
+index slow: it is cached by file time and built off the request path. The documentation can
+change shape: the generator fails loudly when it does.
 
 ### Phase 7. Editor
 
@@ -481,10 +488,7 @@ graph TD
   P0 --> P5[5 Debugger]
   P0 --> P61[6.1 dw index]
   P0 --> P62[6.2 Syntax]
-  S1 --> P5
-  S5 --> P61
   P3 --> P4[4 Bot]
-  S8 --> P4
   P62 --> P63[6.3 Checkout index] --> P64[6.4 Queries] --> P65[6.5 Problems]
   P61 --> P64
   P64 --> P71[7.1 Surface]
@@ -500,10 +504,9 @@ approves, live check, merge, report.
 
 | Wave | In parallel (at most four workers) | Waits for the owner |
 | --- | --- | --- |
-| 1 | 0 | approval of the plugin |
-| 2 | 1, 2, 3, S1 | activation on the sandbox |
-| 3 | 5, 6.1, 6.2, S8 (and S5 before 6.1) | the workflow of 6.1 and the run S5 needs |
-| 4 | 4, 6.3, then 6.4, with S3, S4 and S9 alongside | the bot and its automation |
+| Done | 0, 1, 2, 3, 5 | |
+| Next | 4, 6.1, 6.2 | the bot and its automation; the workflow of 6.1 |
+| Then | 6.3, then 6.4, with S3, S4 and S9 alongside | |
 | 5 | 6.5, 7.1 | |
 | 6 | 7.2, 7.3 | |
 
@@ -524,13 +527,12 @@ unless told otherwise.
    cannot use it and is coloured by the engine's lexers. Both are written here.
 4. **Parser and editor written here.** Rule 1 is followed for both. The parser is feasible at a
    cost. The editing surface is gated by S9; if it fails, the alternative needs a decision.
-5. **Descriptions in the committed index.** They are another party's documentation in a public
-   repository. S5 reads the terms; the plan keeps descriptions to one sentence with a link to
-   the page, and has a fallback that commits none.
+5. **Descriptions in the committed index.** Decided after S5: none are committed; they are read
+   at run time through `b2c docs read`.
 6. **What the bot sees.** A summary in a bot's chat sends its content to a model provider, and
    production logs can hold personal data, which rule 6 keeps local. The command line prints
-   signatures, counts and normalized messages with values masked, never raw entries. Whether
-   that is acceptable for production is the owner's call before phase 4.
+   signatures, counts and normalized messages with values masked, never raw entries. The owner
+   accepted it, production included.
 7. **The real run of phases 6 and 7** is on a real checkout, read-only, not on the sandbox,
    except for breakpoints in 7.3.
 8. **Deleting the version of a removed workspace** is deferred while that version is active.

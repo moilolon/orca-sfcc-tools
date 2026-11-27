@@ -24,6 +24,7 @@
 //     or info lines filled counts too. A file not seen before counts when it is already larger
 //     than its window and was written since the read's start.
 import { randomUUID } from 'node:crypto'
+import { relative } from 'node:path'
 import { B2cError, type InstancesState } from '../../core/b2c'
 import { isRole, ROLES, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
@@ -270,18 +271,22 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
    * The samples of the newest entry of each signature. Masked, then normalised (a host in the text
    * is masked whole before its digits go, and a URL loses its host), then masked again.
    */
-  async function maskedSamples(newest: Map<string, ParsedMessage>): Promise<Map<string, Sample>> {
-    const plan = [...newest].map(([signature, parsed]) => ({ signature, parsed, identity: identityOf(parsed) }))
-    // A sample as a list of texts, and back: message, logger, then each frame's file and function.
-    const flatten = (sample: Sample) => [sample.message, sample.logger ?? '', ...sample.frames.flatMap((frame) => [frame.file, frame.function ?? ''])]
+  async function maskedSamples(newest: Map<string, { parsed: ParsedMessage; level: string }>): Promise<Map<string, Sample>> {
+    const plan = [...newest].map(([signature, { parsed, level }]) => ({ signature, parsed, level, identity: identityOf(parsed) }))
+    // A sample as a list of texts, and back: message, logger, pipeline, then each frame's file and
+    // function. The level is one of ERROR_LEVELS, never a text of the log; the site is not kept.
+    const flatten = (sample: Sample) => [sample.message, sample.logger ?? '', sample.pipeline ?? '', ...sample.frames.flatMap((frame) => [frame.file, frame.function ?? ''])]
     const rebuild = (sample: Sample, texts: string[]): Sample => {
       let i = 0
       const next = () => texts[i++] ?? ''
       const message = next()
       const logger = next()
+      const pipeline = next()
       return {
         message,
         logger: sample.logger === null ? null : logger,
+        pipeline: sample.pipeline ? pipeline : null,
+        level: sample.level ?? null,
         frames: sample.frames.map((frame) => {
           const file = next()
           const name = next()
@@ -297,9 +302,11 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
         return rebuild(sample, masked.slice(offset, (offset += size)))
       })
     }
-    const raw: Sample[] = plan.map(({ parsed, identity }) => ({
+    const raw: Sample[] = plan.map(({ parsed, level, identity }) => ({
       message: parsed.text,
       logger: identity.logger,
+      pipeline: parsed.pipeline,
+      level: ERROR_LEVELS.includes(level.toUpperCase()) ? level.toUpperCase() : null,
       frames: identity.frames.map((frame) => ({ file: frame.file, function: frame.function, line: frame.line }))
     }))
     const normalised = (await maskEach(raw)).map((sample) => ({ ...sample, message: normalize(sample.message) }))
@@ -353,13 +360,13 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     // a file not read before has nothing counted since the read's start.
     const entries = all.filter((entry) => !cursor || entry.timestamp > (cursor.files[entry.file] ?? since))
     const occurrences: { signature: string; at: number }[] = []
-    const newest = new Map<string, ParsedMessage>()
+    const newest = new Map<string, { parsed: ParsedMessage; level: string }>()
     for (const entry of entries) {
       const parsed = parseMessage(entry.message)
       const signature = signatureOfIdentity(identityOf(parsed))
       occurrences.push({ signature, at: entry.timestamp })
       // Entries come oldest first: the last one of a signature is its newest.
-      newest.set(signature, parsed)
+      newest.set(signature, { parsed, level: entry.level })
     }
     const samples = await maskedSamples(newest)
     const recorded: Occurrence[] = occurrences.map(({ signature, at }) => ({ signature, at, sample: samples.get(signature) as Sample }))
@@ -431,7 +438,12 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     const out: ErrorRow[] = []
     for (const row of rows) {
       const rowFrames = await Promise.all(
-        row.sample.frames.map(async (frame) => ({ ...frame, openable: root !== null && (await frames.resolve(root, frame.file).catch(() => null)) !== null }))
+        row.sample.frames.map(async (frame) => {
+          const local = root === null ? null : await frames.resolve(root, frame.file).catch(() => null)
+          // Its path in the workspace, `/` between its parts, for a breakpoint; never the folder.
+          const path = root !== null && local !== null ? relative(root, local).split('\\').join('/') : null
+          return { ...frame, openable: local !== null, path: path && !path.startsWith('..') ? path : null }
+        })
       )
       out.push({
         signature: row.signature,
@@ -441,6 +453,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
         markedAt: row.markedAt ?? null,
         message: row.sample.message,
         logger: row.sample.logger,
+        pipeline: row.sample.pipeline ?? null,
+        level: row.sample.level ?? null,
         frames: rowFrames
       })
     }
