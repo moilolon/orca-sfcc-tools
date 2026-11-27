@@ -143,9 +143,10 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     }, coalesceMs)
   }
 
-  async function sandboxState(): Promise<RoleState> {
+  /** The sandbox's state in the dw.json of `configRoot` when named, else of the folder `configRoot()` names now. */
+  async function sandboxState(configRoot?: string): Promise<RoleState> {
     try {
-      return (await ctx.b2c.instances()).instances.sandbox
+      return (await ctx.b2c.instances(configRoot === undefined ? {} : { configRoot })).instances.sandbox
     } catch {
       return 'absent'
     }
@@ -425,8 +426,10 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   async function start(): Promise<'started' | 'already'> {
     const status = session.snapshot().status
     if (status === 'connecting' || status === 'attached' || status === 'halted') return 'already'
-    if ((await sandboxState()) !== 'ready') throw new DebuggerError('sandbox_not_ready')
+    // The workspace is chosen once: its folder gives the cartridges and, named as `configRoot`,
+    // the dw.json of every b2c call of the session, so a focus change meanwhile mixes nothing.
     const workspace = await localWorkspace()
+    if ((await sandboxState(workspace.path)) !== 'ready') throw new DebuggerError('sandbox_not_ready')
     sessionWorkspace = workspace
     const files = await breakpoints.list(workspace.id)
     void session.start(workspace.path, files)

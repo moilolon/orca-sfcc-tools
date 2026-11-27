@@ -132,6 +132,36 @@ test('says where the configuration file is read from in a word, and never its pa
   assert.ok(panel.find({ text: 'Leído' }))
 })
 
+test('says which workspace the plugin is on and why, in a few words, in both languages', async () => {
+  const on = (name: string, reason: 'uploading' | 'focused' | 'kept'): CoreStatus => ({ ...FOUND, workspace: { name, reason } })
+  const cases = [
+    ['en', 'uploading', 'Working on', 'Why', 'It uploads'],
+    ['en', 'focused', 'Working on', 'Why', 'It is focused'],
+    ['en', 'kept', 'Working on', 'Why', 'Last with dw.json'],
+    ['es', 'uploading', 'Trabajando en', 'Motivo', 'Es el que sube'],
+    ['es', 'focused', 'Trabajando en', 'Motivo', 'Tiene el foco'],
+    ['es', 'kept', 'Trabajando en', 'Motivo', 'Último con dw.json']
+  ] as const
+  for (const [locale, reason, label, why, words] of cases) {
+    panel = await mount(CORE, { host: hostAnswering(on('garden-shop-fix', reason)), locale })
+    assert.ok(panel.find({ text: label }), `${locale} ${reason}`)
+    assert.ok(panel.find({ text: 'garden-shop-fix' }))
+    assert.ok(panel.find({ text: why }))
+    assert.ok(panel.find({ text: words }), `${locale} ${reason}`)
+    assert.deepEqual(panel.errors, [])
+    panel.unmount()
+  }
+  // No workspace at all: said in a word, with no reason.
+  panel = await mount(CORE, { host: hostAnswering({ ...FOUND, workspace: null }), locale: 'en' })
+  assert.ok(panel.find({ text: 'None' }))
+  assert.equal(panel.find({ text: 'Why' }), null)
+  panel.unmount()
+  // A worker that does not say: neither row.
+  panel = await mount(CORE, { host: hostAnswering(FOUND), locale: 'en' })
+  assert.equal(panel.find({ text: 'Working on' }), null)
+  assert.equal(panel.find({ text: 'Why' }), null)
+})
+
 test('says when b2c is missing, and why, pointing at the setting; and that there is no dw.json', async () => {
   panel = await mount(CORE, { host: hostAnswering(MISSING), locale: 'en' })
   // b2c and the file are both not found.
@@ -777,7 +807,7 @@ test('every check scenario of the plugin draws the view it names', async () => {
 
 test('the panel’s checks hold core’s scenarios first, then only scenarios named after a piece', () => {
   const names = Object.keys(CHECKS)
-  const core = ['found', 'wrongPath', 'configured', 'missing', 'invalidConfig', 'customConfigFile', 'workerTimeout']
+  const core = ['found', 'wrongPath', 'configured', 'missing', 'invalidConfig', 'customConfigFile', 'keptWorkspace', 'uploadingWorkspace', 'workerTimeout']
   assert.deepEqual(names.slice(0, core.length), core)
   // However many the pieces have added from their folders, each one is a piece's and is drawn
   // over a stubbed setup.

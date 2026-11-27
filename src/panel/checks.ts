@@ -44,6 +44,19 @@ const CORE_SCENARIOS: PieceScenarios = {
     settings: { configFile: 'config/other-dw.json' },
     requests: { 'core.status': (): CoreStatus => READY_STATUS }
   },
+  /**
+   * A stubbed answer: the focus is on a workspace with no dw.json, so the plugin stays on the last
+   * one that had one, and says so.
+   */
+  keptWorkspace: {
+    requests: { 'core.status': (): CoreStatus => ({ ...READY_STATUS, workspace: { name: 'garden-shop-checkout-fix', reason: 'kept' } }) }
+  },
+  /** A stubbed answer: the uploading workspace, with a name too long for the row. */
+  uploadingWorkspace: {
+    requests: {
+      'core.status': (): CoreStatus => ({ ...READY_STATUS, workspace: { name: 'garden-shop-feature-a-very-long-branch-name-for-the-row', reason: 'uploading' } })
+    }
+  },
   /** The worker does not answer in time: the setup view's error state, with its retry. */
   workerTimeout: {
     requests: {

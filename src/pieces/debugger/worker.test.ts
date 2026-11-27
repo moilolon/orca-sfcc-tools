@@ -94,7 +94,15 @@ const sourceFs: SourceFileSystem = {
   }
 }
 
-async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Workspace | null, storage = {} as Record<string, boolean>, throughCore = false, orca = 'runs' as 'runs' | 'fails' | 'missing' } = {}) {
+async function mount({
+  sandbox = 'ready' as RoleState,
+  workspace = LOCAL as Workspace | null,
+  storage = {} as Record<string, boolean>,
+  throughCore = false,
+  orca = 'runs' as 'runs' | 'fails' | 'missing',
+  /** What `configRoot()` answers when it is not the debugged workspace's folder (the focus moved since). */
+  configRootNow = undefined as string | undefined
+} = {}) {
   const opening = fakeOrca(orca)
   const adapter = new FakeAdapter({
     frames: [{ id: 70000, name: 'show()', source: { name: 'Page.js', path: `${FAKE_ROOT}/${PAGE}` }, line: 11 }],
@@ -110,11 +118,15 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     uploading: async () => null,
     upload: async () => null,
     setUploading: async () => {},
-    configRoot: async () => workspace?.path ?? null
+    configRoot: async () => configRootNow ?? workspace?.path ?? null
   }
+  /** The folder each `instances` call named (`configRoot`), or undefined when it named none. */
+  const asked: (string | null | undefined)[] = []
   const b2c = {
     ...adapter.b2c,
-    instances: async () => ({ config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }),
+    instances: async (options: { configRoot?: string | null } = {}) => (
+      asked.push(options.configRoot), { config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }
+    ),
     isHost: async () => false
   } as unknown as B2c
   const options = { coalesceMs: 20, platform: 'linux', readDir, sourceFs, openFile: opening.openFile, readText: async (file: string) => DISK[file] ?? null, saveWaitMs: 300, savePollMs: 5, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
@@ -141,7 +153,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
       }
   const worker = await mountWorker(module, { host: mockHost({ capabilities: CAPABILITIES, storage, results: { 'editor.open': { opened: true } } }), commands: COMMANDS, hooks: ['editor.save.before'] })
   const states = () => worker.posts.filter((post) => post.event === 'debugger.state').map((post) => post.payload as DebuggerState)
-  return { worker, adapter, logs, states, opened: opening.calls }
+  return { worker, adapter, logs, states, opened: opening.calls, asked }
 }
 
 async function codeOf(promise: Promise<unknown>): Promise<string> {
@@ -227,6 +239,18 @@ test('a script’s lines: read only for a script of the cartridges, inside the w
   assert.equal(await codeOf(worker.request('debugger.source', { path: 'cartridges/app_example/.project' })), 'invalid_path')
   assert.equal(await codeOf(worker.request('debugger.source', { path: `${FAKE_ROOT}/${PAGE}` })), 'invalid_path')
   assert.equal(await codeOf(worker.request('debugger.source', { path: 'cartridges/app_example/cartridge/controllers/Home.js' })), 'outside_workspace')
+})
+
+test('a session’s b2c calls name the folder debugged: a focus moved since never hands it another dw.json', async () => {
+  // The workspace debugged was chosen; `configRoot()` now names another folder.
+  const { worker, adapter, states, asked } = await mount({ configRootNow: '/home/someone/work/other' })
+  asked.length = 0
+  await worker.request('debugger.start', {})
+  await until(() => states().some((state) => state.status === 'attached'), 'attached')
+  assert.equal(asked[0], FAKE_ROOT, 'the sandbox’s state is read from the folder debugged')
+  assert.equal(adapter.last.options.cwd, FAKE_ROOT)
+  assert.equal(adapter.last.options.configRoot, FAKE_ROOT, 'and b2c debug reads its dw.json')
+  await worker.request('debugger.stop', {})
 })
 
 test('a whole session: start answers at once, posts are coalesced, a halt shows its stack, values come on demand, stop disconnects', async () => {

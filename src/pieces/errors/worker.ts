@@ -33,7 +33,7 @@ import { B2cError, type InstancesState } from '../../core/b2c'
 import { isRole, ROLES, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
-import { isLocal } from '../../core/workspaces'
+import { activeWorkspace, isLocal } from '../../core/workspaces'
 import { createSeenFileStore, DataFileError, dataFiles, dataFolder, DATA_VERSION, updateDataFile } from './data-folder'
 import { FILE_WINDOW_BYTES, listArguments, maskedSamples, occurrencesOf, readArguments, windowFull } from './digest'
 import { createFrameResolver, type FrameResolver } from './frames'
@@ -232,12 +232,15 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   /**
-   * The workspace whose cartridges a frame is looked for in: the uploading one, else the focused
-   * one while no workspace uploads. Only a workspace on this machine. The one place that decides.
+   * The workspace a read's b2c calls name as their `configRoot`, and whose cartridges a frame is
+   * looked for in: the one the plugin works on
+   * (`activeWorkspace`: the uploading one, else the focused one with a configuration file, else
+   * the last one that had one), whose dw.json the logs were read with. Only a workspace on this
+   * machine. The one place that decides.
    */
   async function frameRoot(): Promise<string | null> {
     try {
-      const workspace = (await ctx.workspaces.uploading()) ?? (await ctx.workspaces.focused())
+      const workspace = (await activeWorkspace(ctx.workspaces))?.workspace
       return workspace && isLocal(workspace) ? workspace.path : null
     } catch {
       return null
@@ -298,8 +301,12 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     await ctx.store.set(statusKey(role), { ...(await readStatus(role)), error: code })
   }
 
-  async function read(role: Role, askedAt: number | undefined): Promise<void> {
-    const refusal = refusalOf(await ctx.b2c.instances(), role)
+  async function read(role: Role, askedAt: number | undefined, chosen?: string | null): Promise<void> {
+    // The workspace is chosen once (by the request that asked, when one did): every b2c call of
+    // this read names its folder (`configRoot`), so a focus change meanwhile never reads one call
+    // with another workspace's dw.json.
+    const configRoot = chosen !== undefined ? chosen : await frameRoot()
+    const refusal = refusalOf(await ctx.b2c.instances({ configRoot }), role)
     if (refusal) return refused(role, refusal)
     // Kept until the read ends: a worker restarted meanwhile runs it again.
     await ctx.store.set(askedKey(role), askedAt ?? now())
@@ -310,13 +317,13 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     // The files' sizes first: growth during the read then counts at the next one, never lost.
     let sizes: Map<string, { size: number; modified: number | null }> | null = null
     try {
-      sizes = fileSizesOf((await ctx.b2c.run(listArguments(filters), { role, timeoutMs: READ_TIMEOUT_MS })).json)
+      sizes = fileSizesOf((await ctx.b2c.run(listArguments(filters), { role, configRoot, timeoutMs: READ_TIMEOUT_MS })).json)
     } catch (error) {
       ctx.log(`listing the ${role} log files failed: ${error instanceof B2cError ? error.code : 'error'}`)
     }
     let json: unknown
     try {
-      json = (await ctx.b2c.run(readArguments(filters, since), { role, timeoutMs: READ_TIMEOUT_MS })).json
+      json = (await ctx.b2c.run(readArguments(filters, since), { role, configRoot, timeoutMs: READ_TIMEOUT_MS })).json
     } catch (error) {
       const code = error instanceof B2cError ? error.code : 'b2c_failed'
       ctx.log(`reading the ${role} log failed: ${code}`)
@@ -364,12 +371,12 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
    * Reads a role's log now, or joins the read already running. `askedAt` is when a read cut short
    * by a restart was first asked: it is kept, so such a read is run again only within `RESUME_MS`.
    */
-  function refresh(role: Role, askedAt?: number): Promise<void> {
+  function refresh(role: Role, askedAt?: number, configRoot?: string | null): Promise<void> {
     const running = reads.get(role)
     if (running) return running
     const reading = (async () => {
       try {
-        await read(role, askedAt)
+        await read(role, askedAt, configRoot)
       } catch (error) {
         // A seen list that cannot be read or locked fails the read: the view says why.
         const code = error instanceof B2cError || error instanceof DataFileError ? error.code : 'error'
@@ -392,7 +399,9 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     // and nothing older than its version.
     const reading = reads.has(role)
     const version = { worker, seq: versions.get(role) ?? 0 }
-    const [{ instances }, rows, status, settings, root] = await Promise.all([ctx.b2c.instances(), seen.list(role), readStatus(role), rawSettings(), frameRoot()])
+    // One workspace for the whole answer: the environment's state and the frames' files.
+    const root = await frameRoot()
+    const [{ instances }, rows, status, settings] = await Promise.all([ctx.b2c.instances({ configRoot: root }), seen.list(role), readStatus(role), rawSettings()])
     const out: ErrorRow[] = []
     for (const row of rows) {
       const rowFrames = await Promise.all(
@@ -470,14 +479,16 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     ctx.orca.panels.handle('errors.refresh', async (input) => {
       const role = roleOf(input)
       // A read that cannot run says why at once, and starts nothing.
-      const refusal = reads.has(role) ? null : refusalOf(await ctx.b2c.instances(), role)
+      // The workspace the read is for, chosen once: the check below and the read name its folder.
+      const configRoot = await frameRoot()
+      const refusal = reads.has(role) ? null : refusalOf(await ctx.b2c.instances({ configRoot }), role)
       if (refusal) {
         await refused(role, refusal)
         await changed(role)
         return list(role)
       }
       // Started, not awaited: the answer says it is reading, and `errors.changed` brings the rest.
-      void refresh(role)
+      void refresh(role, undefined, configRoot)
       return list(role)
     }),
     ctx.orca.panels.handle('errors.mark', async (input) => {

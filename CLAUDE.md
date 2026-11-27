@@ -24,8 +24,18 @@ Changing it needs the owner's yes.
       `b2c.ts` (the only module that starts `b2c`), `dw-config.ts` (the only module that
       reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
-      namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
-      with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish),
+      namespace per piece), `workspaces.ts` (the workspace list; the uploading workspace
+      with its code version: `uploading()`, `upload()`; and the workspace the plugin works on,
+      `active()` (read through `activeWorkspace()`) with its reason, whose folder `configRoot()`
+      names: the uploading one; else the focused one when it has a configuration file
+      (`b2c.hasConfig`, which reads nothing, bounded by `HAS_CONFIG_BOUND_MS`); else the last
+      local workspace focused with one, or released from uploading with one, kept by id in core's
+      storage (`keptWorkspace`), let go once a whole list lacks it, it is no longer local or its
+      file is gone (asked each time it is read); else the focused one. Each focus change is heard
+      (`workspace.changed`, core's one event, `focusMoved()`, taken in order and awaited by
+      `active()`), so the kept one is the last focused with a file even when nothing asked. A remote workspace is never asked about nor kept. The setup view says which
+      workspace and why (`CoreStatus.workspace`); the status line's tooltips do not, as a name has
+      no bound and a tooltip is held to `NOTICE_MAX_CHARS`), `i18n.ts` (texts, English and Spanish),
       `open-file.ts` (opens a file of a workspace at a line through `orca file open`; with
       `inEditor`, a file of a type the plugin's editor takes (`EDITOR_EXTENSIONS`) through
       `orca plugin open <plugin-key> --editor <file>`, after recording the file and its line in
@@ -73,8 +83,9 @@ Changing it needs the owner's yes.
       an answer made with another `dw.json` does not count for it), `status-bar.ts` (its two
       items' texts), `worker.ts` (requests, commands, `workspace.removed`; its state gives each
       workspace's branch and whether it is of a project in use, which only chooses what the
-      view lists first: the uploading workspace's project; else the focused one's when it has a
-      configuration file; else every project with one; else all); `testing.ts` holds the fakes
+      view lists first: the uploading workspace's project; else that of the workspace the plugin
+      works on (`activeWorkspace()`) when it has a configuration file; else every project with
+      one; else all); `testing.ts` holds the fakes
       its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
       beside the code) and `seen.ts` (over a store it is given) are pure; `digest.ts` holds what
@@ -103,7 +114,9 @@ Changing it needs the owner's yes.
       only its counters and a masked, bounded sample (the normalised first line, the logger, the
       pipeline or controller, the level and the top frames; never the site, which names the
       shop), never a raw entry; a notification says how many, never what. The workspace whose cartridges a frame is looked
-      for in is chosen by `frameRoot()` in its `worker.ts`. A read passes `--level ERROR` and
+      for in is chosen by `frameRoot()` in its `worker.ts` (the workspace the plugin works on, `activeWorkspace()`),
+      once per read: every b2c call of the read, and the check of the request that asked it,
+      names that folder as its `configRoot`. A read passes `--level ERROR` and
       `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
       reduced to its path, its locale segment to `<locale>`, and a host written without a scheme
       to `<host>`, in any letter case (never a file name, a `dw.*` name or a Java package);
@@ -153,7 +166,9 @@ Changing it needs the owner's yes.
       request matching), `session.ts` (one `b2c debug` session: its states, driven by the
       adapter's events, never by its responses), `breakpoints.ts` (the single store of
       breakpoints, per workspace, paths relative to it, lines of the file as saved; the editor
-      reads and writes it too), `workspace.ts` (which workspace is debugged and how a file is
+      reads and writes it too), `workspace.ts` (which workspace is debugged, by
+      `activeWorkspace()` like `configRoot()`, its folder named as the `configRoot` of every b2c
+      call of a session so credentials and cartridges come from one folder, and how a file is
       opened, each in one function), `files.ts` (the scripts of the workspace's cartridges, and
       the cartridges; `isScriptPath` decides from a path whether a breakpoint can go in it),
       `inspect.ts` (what the editor may ask the value of: a plain name, `this` or a chain of
@@ -292,9 +307,14 @@ Changing it needs the owner's yes.
       leading `-`, `..` or `@{`) and the path is relative with no leading `-` or `..`; `git.exe`
       only, no shell, in the workspace, with `GIT_OPTIONAL_LOCKS=0` and `GIT_NO_LAZY_FETCH=1`, a
       timeout and an output cap; stderr is never kept, a failure is a code (`GitFailure`). It
-      writes nothing. The worker (`worker.ts`) indexes the uploading workspace, else the
-      focused one, when local; `engine.index.status` answers at once and starts a build on its
-      own when the target changed. A folder that is gone (a removed worktree) is said so
+      writes nothing. The worker (`worker.ts`) indexes the workspace the plugin works on
+      (`activeWorkspace()`: the uploading one, else the focused one with a configuration file,
+      else the last one that had one), when local; `engine.index.status` answers at once and
+      starts a build on its own when the target changed. The indexes and problems of the last
+      `KEPT_INDEXES` (two) targets stay in memory, the least recently used dropped (its passes
+      stop); only the target is watched, and a kept one that becomes the target again is walked
+      by file time, reading only what changed (a generated checkout of 10,251 files holds about
+      18 MB). A folder that is gone (a removed worktree) is said so
       (`failed`, `folder_missing`), never built over, and looked for on every status request
       and every `FOLDER_RETRY_MS` (at most `FOLDER_RETRIES` times); once back it is watched and
       rebuilt. The watcher stops on its own once its folder is gone (`disk.ts`: on Windows, Node

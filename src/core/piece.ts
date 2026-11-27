@@ -32,12 +32,26 @@ export type Workspaces = {
    */
   setUploading(workspaceId: string | null, codeVersion?: string | null): Promise<void>
   /**
-   * Where to look for dw.json: the uploading workspace, else the focused one (so the panel can
-   * show which environments are configured before anything uploads), else null. Null too when
-   * that workspace is on another host: its path is not a folder of this machine.
+   * The workspace the plugin works on, and why: the uploading workspace; else the focused one
+   * when it has a configuration file; else the last local workspace focused with one (`kept`), so
+   * moving to a project that is not an SFCC one loses nothing; else the focused one. Optional only
+   * so a stand-in written before it still types: every real one has it, and `activeWorkspace()`
+   * of src/core/workspaces.ts falls back to the uploading one, else the focused one, without it.
+   */
+  active?(): Promise<ActiveWorkspace | null>
+  /**
+   * Where to look for dw.json: the folder of `active()`'s workspace, else null. Null too when that
+   * workspace is on another host: its path is not a folder of this machine.
    */
   configRoot(): Promise<string | null>
 }
+
+/**
+ * Why the plugin works on a workspace: it uploads; it is focused (with a configuration file, or
+ * with none and no other to keep); or it is the last one focused with a configuration file.
+ */
+export type ActiveReason = 'uploading' | 'focused' | 'kept'
+export type ActiveWorkspace = { workspace: Workspace; reason: ActiveReason }
 
 /** Every piece, in the order the panel shows them. Each one has a folder in src/pieces/. */
 export const PIECE_IDS = ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor'] as const

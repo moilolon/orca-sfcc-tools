@@ -41,7 +41,8 @@ export function createActivate(overrides: WorkerOverrides = {}) {
     disposeBoundMs = overrides.disposeBoundMs ?? DISPOSE_BOUND_MS
     const coreStore = createStore(orca.storage, 'core')
     const settings = createSettings(orca.settings)
-    const workspaces = createWorkspaces(orca.host, coreStore)
+    // `b2c` is made below and asked only once a call runs: whether a folder has a file reads none.
+    const workspaces = createWorkspaces(orca.host, coreStore, { hasConfig: (root) => b2c.hasConfig(root) })
     let locale = await coreStore.get<string>('locale', 'en')
     const log = (message: string) => orca.log(message)
     logLine = log
@@ -60,7 +61,10 @@ export function createActivate(overrides: WorkerOverrides = {}) {
         }
         return status()
       }),
-      settings.onDidChange((key) => orca.panels.post('core.changed', { key }))
+      settings.onDidChange((key) => orca.panels.post('core.changed', { key })),
+      // Each focus change, as it happens: a workspace with a file focused is the one kept, even
+      // when nothing asks which workspace the plugin is on before the focus moves again.
+      orca.events.on('workspace.changed', (event) => void workspaces.focusMoved(event?.context?.workspaceId))
     ]
     for (const disposable of handlers) owned.push({ owner: 'core', disposable })
 
@@ -77,7 +81,9 @@ export function createActivate(overrides: WorkerOverrides = {}) {
     async function status(): Promise<CoreStatus> {
       const found = await probe()
       const { config, instances } = await b2c.instances()
-      return { b2c: found, config, instances, pieces: [...PIECE_IDS] }
+      const active = await workspaces.active?.().catch(() => null)
+      const workspace = active ? { name: active.workspace.name, reason: active.reason } : null
+      return { b2c: found, config, instances, pieces: [...PIECE_IDS], workspace }
     }
 
     for (const piece of pieces) {

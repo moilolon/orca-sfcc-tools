@@ -1,6 +1,7 @@
 // The engine piece's worker half, listed in src/worker/pieces.ts. It keeps the checkout index
-// (phase 6.3) of one workspace: the uploading one, else the focused one, on this machine; and it
-// answers the queries (phase 6.4) on a file's text with it.
+// (phase 6.3) of one workspace, the one the plugin works on (`activeWorkspace`: the uploading one;
+// else the focused one with a configuration file; else the last one that had one), on this
+// machine; and it answers the queries (phase 6.4) on a file's text with it.
 //
 // The index is built off the request path: `engine.index.status` answers at once with what is
 // there and, when the workspace to index changed, starts a build without waiting for it. A
@@ -8,9 +9,10 @@
 // `DEBOUNCE_MS`, and at the latest `MAX_WAIT_MS` after the first one. A change under `.git/` that
 // may move a ref asks whether the `metadataRef` ref moved; so does a timer every `REF_CHECK_MS`,
 // for a worktree (whose refs live in the main checkout, outside the folder watched) or a
-// workspace below its repository's root. A few indexes are kept per workspace, so going back to
-// one reads only the files whose time changed. The two settings, `cartridgePath` and
-// `metadataRef`, rebuild the paths when changed. When the workspace's folder is gone (a worktree
+// workspace below its repository's root. The indexes and problems of the last `KEPT_INDEXES`
+// targets stay in memory, the least recently used dropped first: only the target's folder is
+// watched, and going back to another reads again only the files whose time changed. The two
+// settings, `cartridgePath` and `metadataRef`, rebuild the paths when changed. When the workspace's folder is gone (a worktree
 // removed), the index says so (`failed`, `folder_missing`) and the folder is looked for again on
 // every status request and every `FOLDER_RETRY_MS`, at most `FOLDER_RETRIES` times; once it is
 // back, it is watched again and the index rebuilt.
@@ -36,7 +38,7 @@
 import { readFile, stat } from 'node:fs/promises'
 import type { B2c } from '../../core/b2c'
 import type { Disposable, PieceContext, WorkerPiece, Workspace } from '../../core/piece'
-import { isLocal } from '../../core/workspaces'
+import { activeWorkspace, isLocal } from '../../core/workspaces'
 import { CheckoutIndex, type CheckoutSettings, type RefReader } from './checkout/checkout'
 import { diskFiles, watchCheckout, type Watcher } from './checkout/disk'
 import { normalizePath, skippedPath, type CheckoutFiles } from './checkout/files'
@@ -87,7 +89,12 @@ export const MAX_WAIT_MS = 3_000
 export const REF_CHECK_MS = 60_000
 /** How long after the worker starts the first build begins, so it never slows the start. */
 export const START_DELAY_MS = 2_000
-/** Indexes kept for workspaces no longer indexed, the most recent first. */
+/**
+ * The indexes kept in memory, the target's included, the most recently used first: the last two
+ * targets, so moving between two worktrees of a project rebuilds neither. The generated checkout
+ * of 10,251 files (`generatedCheckout(10_000)`) holds about 18 MB of heap with its problems, its
+ * files' texts aside (measured with `--expose-gc` when the rule was set).
+ */
 export const KEPT_INDEXES = 2
 /** How long a hover waits for the description of a `dw.*` class or member before answering without it. */
 export const DESCRIBE_WAIT_MS = 2_500
@@ -194,6 +201,8 @@ type Entry = {
   analysisMs: number | null
   /** Raised by every pass and every save taken in. */
   version: number
+  /** Dropped from the indexes kept: its passes stop. */
+  dropped: boolean
 }
 
 /**
@@ -328,7 +337,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         entry.passing = true
         try {
           dwApi ??= await apiOnce()
-          while (entry.pending && !disposed) {
+          while (entry.pending && !disposed && !entry.dropped) {
             const pass = entry.pending
             entry.pending = null
             // Only a file whose problems were known before can have new ones.
@@ -345,7 +354,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
                 notify(changedFiles.map((path) => ({ path, before: before.get(path) ?? [], after: entry.problems.problemsOf(path) })), 'edit')
               }
             } catch (error) {
-              if (disposed) return
+              if (disposed || entry.dropped) return
               entry.problemsError = 'analysis_failed'
               entry.version++
               ctx.log(`the problems pass failed: ${error instanceof Error ? error.name : 'error'}`)
@@ -402,7 +411,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
       }
 
       function newEntry(workspace: Workspace, index: CheckoutIndex, checkout: CheckoutFiles): Entry {
-        return {
+        const entry: Entry = {
           workspace,
           index,
           state: 'building',
@@ -412,15 +421,22 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           reconfigure: false,
           problems: new CheckoutProblems(index, checkout, () => dwApi, {
             now,
-            pause: () => (disposed ? Promise.reject(new Error('disposed')) : pause())
+            pause: () => (disposed || entry.dropped ? Promise.reject(new Error('disposed')) : pause())
           }),
           pending: null,
           passing: false,
           problemsError: null,
           analysedAt: null,
           analysisMs: null,
-          version: 0
+          version: 0,
+          dropped: false
         }
+        return entry
+      }
+
+      /** Keeps the last `KEPT_INDEXES` entries, the current one first; the others stop and go. */
+      function trimEntries(): void {
+        for (const entry of entries.splice(KEPT_INDEXES)) entry.dropped = true
       }
 
       function stopWatching(): void {
@@ -549,9 +565,12 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         return look.done
       }
 
-      /** The workspace to index: the uploading one, else the focused one, when its folder is here. */
+      /**
+       * The workspace to index: the one the plugin works on (the uploading one; else the focused
+       * one with a configuration file; else the last one that had one), when its folder is here.
+       */
       async function target(): Promise<Workspace | null> {
-        const workspace = (await ctx.workspaces.uploading()) ?? (await ctx.workspaces.focused())
+        const workspace = (await activeWorkspace(ctx.workspaces))?.workspace
         return workspace && isLocal(workspace) ? workspace : null
       }
 
@@ -583,7 +602,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           entry = newEntry(workspace, new CheckoutIndex(checkout, { ...(await settings()), git: git(workspace.path), dw: lookup }), checkout)
         }
         entries.unshift(entry)
-        entries.length = Math.min(entries.length, KEPT_INDEXES + 1)
+        trimEntries()
         current = entry
         posted = ''
         // Watched and built when its folder is there; said to be missing otherwise.
@@ -921,7 +940,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         ctx.settings.onDidChange((key) => {
           if (key !== SETTING_CARTRIDGE_PATH && key !== SETTING_METADATA_REF) return
           // Kept indexes would start with the old settings: drop them.
-          entries.splice(current ? 1 : 0)
+          for (const entry of entries.splice(current ? 1 : 0)) entry.dropped = true
           const entry = current
           // A folder that is gone is not read: the settings are applied once it is back.
           if (entry?.missing) entry.reconfigure = true
@@ -937,7 +956,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           stopWatching()
           stopLooking()
           current = null
-          entries.length = 0
+          for (const entry of entries.splice(0)) entry.dropped = true
           analyses.length = 0
           described.clear()
           failed.clear()

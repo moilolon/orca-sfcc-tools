@@ -21,7 +21,13 @@ What is built is what `main` holds; this file is the plan for the rest.
 4. One plugin holds everything.
 5. With several worktrees and one sandbox, the workspace that uploads is picked by hand and
    never follows the focused workspace. Each workspace has its own code version: activated when
-   the workspace is picked, deleted when the workspace is removed.
+   the workspace is picked, deleted when the workspace is removed. The workspace the plugin works
+   on (whose `dw.json` is read and whose checkout is indexed) is the uploading one; else the
+   focused one when it has a `dw.json`; else the last local workspace focused with one (each
+   focus change is heard), kept across worker restarts and let go when it is removed, no longer
+   local or without its `dw.json`; else the focused one. Moving to a project that is not an SFCC
+   one loses neither the environments nor the index. An operation over several `b2c` calls (a
+   debug session, a log read) chooses the workspace once and names its folder in each call.
 6. The error diff is the plugin's own: a signature per error and a list of seen signatures per
    instance. Log content stays on the machine: in the plugin's storage and its own data folder.
 7. The `dw.*` API index is committed on `main` without descriptions: classes, inheritance,
@@ -99,7 +105,7 @@ the script again.
 | `instances.ts` | Four roles: `sandbox`, `development`, `staging`, `production`. The sandbox uses the plain keys of `dw.json` (`hostname`, `client-id`, …); each other role uses the same keys with a suffix, a setting per role (`-dev`, `-stg` and `-prd` by default). A guard in the runner is a list of whole commands per role: on the sandbox, `code list`, `deploy`, `watch`, `activate` and `delete`, `logs get`, `list` and `tail`, `sandbox list`, `start` and `stop`, and `debug`; on the other roles the three `logs` commands and nothing else. The guard is tested against every command `b2c` has. |
 | `settings.ts` | Typed reads of the plugin's settings and change notifications. |
 | `store.ts` | Typed access to the plugin's own storage, one namespace per piece. |
-| `workspaces.ts` | The workspace list, and the workspace that uploads (read by `sandbox`, `debugger` and `engine`). |
+| `workspaces.ts` | The workspace list, the workspace that uploads (read by `sandbox`, `debugger` and `engine`), and the workspace the plugin works on and why (`active()`, rule 5 of section 1: uploading, focused with a `dw.json`, or kept from before), whose folder `configRoot()` names. |
 | `i18n.ts` | `t(key, vars)` over per-piece tables; Spanish must have every English key (enforced by types). Worker error codes are worded by the panel. |
 | `open-file.ts` | Opens a file of a workspace at a line, through `orca file open` with the workspace named explicitly. Lands with phase 3, the first to use it. |
 
@@ -396,7 +402,7 @@ One phase, five pull requests, because no reviewer can judge it as one.
 | --- | --- | --- |
 | 6.1 `dw.*` index | `scripts/generate-dw-index.ts`, run on the owner's machine through `b2c docs` (to `data/dw-api.json`: classes, inheritance, constants, properties, methods with parameters and return types, deprecation, a link; no descriptions), the loader, descriptions read at run time with `b2c docs read`, and a weekly workflow that compares the published version and opens an issue when it changed | 0 |
 | 6.2 Syntax | An ISML parser and a tolerant JavaScript parser written here, with positions; bindings, `require` calls and exports of a script, also inside `${…}` and `<isscript>` | 0 |
-| 6.3 Checkout index | Cartridges and the cartridge path (settings, else the site archives of the checkout, else a git ref read without checking it out); module resolution (`*/`, `~/`, relative, `dw/`); templates; resource bundles; custom attributes and site preferences from the metadata; SFRA routes; kept current as files change | 6.2 |
+| 6.3 Checkout index | Cartridges and the cartridge path (settings, else the site archives of the checkout, else a git ref read without checking it out); module resolution (`*/`, `~/`, relative, `dw/`); templates; resource bundles; custom attributes and site preferences from the metadata; SFRA routes; kept current as files change; of the workspace the plugin works on (rule 5), with the indexes of the last two such workspaces kept, so going back to one reads only what changed | 6.2 |
 | 6.4 Queries | Types (one variable, one type: from the declaration, `@param`/`@type`, globals, or the previous call's return), completion, hover, go to definition, references, signature help, as pure functions of the index, a file and an offset | 6.1, 6.3 |
 | 6.5 Problems | The warnings, a problems section in the panel, and a notice after a save or an agent's edit | 6.4, S2 |
 

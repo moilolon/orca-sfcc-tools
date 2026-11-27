@@ -13,7 +13,7 @@ import type { PieceContext } from '../../core/piece'
 import { createSettings } from '../../core/settings'
 import { createStore } from '../../core/store'
 import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, type SpawnCall } from '../../core/test-support'
-import { createWorkspaces } from '../../core/workspaces'
+import { createWorkspaces, isLocal } from '../../core/workspaces'
 import { createActivate, deactivate } from '../../worker/worker'
 import { DATA_FOLDER_ENV, SEEN_FILE } from './data-folder'
 import { cartError, LOGS_GET, paymentError } from './fixtures/logs'
@@ -134,7 +134,9 @@ async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, dep
         api = orca
         const settings = createSettings(orca.settings)
         const workspaces = createWorkspaces(orca.host, createStore(orca.storage, 'core'))
-        const b2c = createB2c({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill(), settings, configRoot: () => workspaces.configRoot() })
+        // As the worker builds it: only a listed local workspace's folder may be named.
+        const knownRoots = async () => (await workspaces.list()).filter(isLocal).map((workspace) => workspace.path)
+        const b2c = createB2c({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill(), settings, configRoot: () => workspaces.configRoot(), knownRoots })
         const ctx: PieceContext = { orca, b2c: wrap(b2c), settings, store: createStore(orca.storage, 'errors'), workspaces, t: translator(() => 'en'), log: (message) => orca.log(message) }
         disposable = await piece.activate(ctx)
       },
@@ -149,6 +151,29 @@ async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, dep
     return api
   }
   return { worker, orca, calls: spawn.calls, logsCalls, listCalls, timers, live: () => timers.filter((timer) => !timer.cleared && !timer.fired) }
+}
+
+
+/**
+ * Two local workspaces, both with a dw.json; `focus` moves Orca's focus between them, as a person
+ * would while a read runs.
+ */
+function hostOfTwo(first: string, second: string) {
+  const host = mockHost({
+    capabilities: CAPABILITIES,
+    results: {
+      'workspace.list': {
+        workspaces: [
+          { id: 'w1', kind: 'folder', name: 'shop', path: first, branch: null, hostId: 'local' },
+          { id: 'w2', kind: 'folder', name: 'other', path: second, branch: null, hostId: 'local' }
+        ],
+        truncated: false
+      },
+      'workspace.readContext': { workspaceId: 'w1', branch: '', displayName: 'shop', terminals: [] }
+    }
+  })
+  const focus = (id: string) => host.respond('workspace.readContext', { workspaceId: id, branch: '', displayName: id, terminals: [] })
+  return { host, focus }
 }
 
 /** The params of every call of `method` that reached the host. */
@@ -1027,5 +1052,40 @@ test('a mark right after the start waits for the copy: the old marks are never l
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a read names its workspace’s folder in every b2c call: a focus moved meanwhile never mixes two dw.json files', async () => {
+  const shop = makeWorkspace()
+  const other = makeWorkspace({ ...INVENTED_DW, hostname: 'other-01.example.com' })
+  try {
+    const { host, focus } = hostOfTwo(shop, other)
+    /** The folder each call named, in order, with what it was. */
+    const named: [string, unknown][] = []
+    const { worker } = await mountPiece(host, b2cAnswering(), {}, (b2c) => ({
+      ...b2c,
+      instances: async (options = {}) => {
+        named.push(['instances', options.configRoot])
+        // The person moves to the other workspace as soon as the read has checked its environment.
+        focus('w2')
+        return b2c.instances(options)
+      },
+      run: async (args, options = {}) => (named.push([args.slice(0, 2).join(' '), options.configRoot]), b2c.run(args, options))
+    }))
+    named.length = 0
+    focus('w1')
+    await worker.request('errors.refresh', { role: 'sandbox' })
+    await readEnded(worker, 'sandbox')
+    const read = named.filter(([what]) => what.startsWith('logs'))
+    assert.deepEqual(read.map(([what]) => what), ['logs list', 'logs get'])
+    // The read's own calls: the check of the request that asked, the read's check, then the two
+    // `logs` calls. The view's answers made after the move name the workspace it moved to.
+    const own = [...named.slice(0, 2), ...read]
+    assert.deepEqual(own.map(([what]) => what), ['instances', 'instances', 'logs list', 'logs get'])
+    for (const [what, root] of own) assert.equal(root, shop, `${what} names the folder chosen when the read was asked`)
+    assert.ok(named.slice(2).some(([what, root]) => what === 'instances' && root === other), 'the focus did move meanwhile')
+  } finally {
+    rmSync(shop, { recursive: true, force: true })
+    rmSync(other, { recursive: true, force: true })
   }
 })
