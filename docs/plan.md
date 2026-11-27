@@ -506,9 +506,7 @@ approves, live check, merge, report.
 
 | Wave | In parallel (at most four workers) | Waits for the owner |
 | --- | --- | --- |
-| Done | 0, 1, 2, 3, 5 | |
-| Next | 4, 6.1, 6.2 | the bot and its automation; the workflow of 6.1 |
-| Done | 4, 6.1, 6.2, 6.3, 6.4 | |
+| Done | 0, 1, 2, 3, 4, 5, 6.1, 6.2, 6.3, 6.4 | |
 | Next | 6.5, 7.1 | the editor hook of 6.5 |
 | Then | 7.2, 7.3 | the owner typing in the live run |
 
