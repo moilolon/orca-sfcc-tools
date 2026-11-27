@@ -187,9 +187,8 @@ export function harness(source: string, options: HarnessOptions): Harness {
   identity.set(options.identity ?? { state: 'unknown' })
   const times: Partial<Record<FeatureName, number[]>> = {}
   const revealed: Pos[] = []
-  const told = new Set<string>()
   const real = options.realTime === true
-  const ctx: FeatureContext = {
+  const ctx: Omit<FeatureContext, 'tellOnce'> = {
     model,
     document,
     requests: options.requests,
@@ -203,12 +202,7 @@ export function harness(source: string, options: HarnessOptions): Harness {
     now: real ? () => performance.now() : () => clock.now,
     setTimer: real ? (run, ms) => setTimeout(run, ms) : clock.set,
     clearTimer: real ? (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) : clock.clear,
-    measured: (feature, ms) => (times[feature] ??= []).push(ms),
-    tellOnce: (key, said) => {
-      if (told.has(key)) return
-      told.add(key)
-      ui.hint({ anchor: model.selection.head, text: said })
-    }
+    measured: (feature, ms) => (times[feature] ??= []).push(ms)
   }
   const features = new Features(ctx, { isMac: options.isMac ?? false })
   model.onUpdate((event) => {

@@ -40,10 +40,21 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--orca-b
 .ed-gutter-lines { position: absolute; left: 0; right: 0; top: 0; will-change: transform; }
 .ed-gutter-line { position: relative; height: var(--ed-line); padding-right: 12px; text-align: right; font-size: 0.92em; }
 .ed-gutter-line.ed-current { color: var(--orca-foreground, #1f2328); }
-.ed-mark { position: absolute; left: 4px; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; cursor: pointer; }
-.ed-mark-breakpoint { background: var(--ed-mark-breakpoint); }
-.ed-mark-breakpoint-off { border: 1.5px solid var(--ed-mark-breakpoint); box-sizing: border-box; }
-.ed-mark-stopped { background: var(--ed-stopped); border-radius: 2px; }
+.ed-mark { position: absolute; left: 4px; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; box-sizing: border-box; }
+.ed-gutter-marks .ed-mark { cursor: pointer; }
+.ed-gutter-marks .ed-gutter-line:hover .ed-mark:not(.ed-mark-bp):not(.ed-mark-bp-unverified):not(.ed-mark-bp-idle):not(.ed-mark-bp-pending) { border: 1.5px solid var(--ed-mark-breakpoint); opacity: 0.35; }
+/* A breakpoint: a disc when the session verified it, a ring when it did not, a ring with a dot with no session, a dashed ring until the file is saved. */
+.ed-mark-bp { background: var(--ed-mark-breakpoint); }
+.ed-mark-bp-unverified { border: 1.5px solid var(--ed-mark-breakpoint); }
+.ed-mark-bp-idle { border: 1.5px solid var(--ed-mark-breakpoint); background: radial-gradient(circle, var(--ed-mark-breakpoint) 0 1.8px, transparent 2.3px); }
+.ed-mark-bp-pending { border: 1.5px dashed var(--ed-mark-breakpoint); }
+/* Where a thread is halted: a solid arrow on the line it stopped at, a chevron on a caller's. */
+.ed-mark-stopped::after { content: ''; position: absolute; left: 1px; top: -1px; width: 0; height: 0; border-left: 9px solid var(--ed-stopped); border-top: 6px solid transparent; border-bottom: 6px solid transparent; }
+.ed-mark-caller::after { content: ''; position: absolute; left: 0; top: 2px; width: 5px; height: 5px; border-top: 2px solid var(--ed-stopped); border-right: 2px solid var(--ed-stopped); transform: rotate(45deg); }
+.ed-highlight { position: absolute; left: 0; right: 0; top: 0; height: 0; pointer-events: none; }
+.ed-highlight-line { position: absolute; left: -6px; right: 0; top: 0; height: var(--ed-line); background: color-mix(in srgb, var(--ed-stopped) 24%, transparent); box-shadow: inset 2px 0 0 var(--ed-stopped); }
+.ed-highlight-caller { background: color-mix(in srgb, var(--ed-stopped) 11%, transparent); }
+.ed-highlight-label { position: absolute; top: 0; padding: 0 6px; white-space: nowrap; font: 11px/var(--ed-line) var(--orca-font-sans, system-ui, sans-serif); color: var(--orca-muted-foreground, #59636e); }
 .ed-text { position: absolute; top: 0; bottom: 0; left: calc(var(--ed-gutter) + 6px); right: 0; cursor: text; white-space: pre; tab-size: 4; }
 .ed-lines { position: absolute; left: 0; top: 0; will-change: transform; }
 .ed-line { height: var(--ed-line); }

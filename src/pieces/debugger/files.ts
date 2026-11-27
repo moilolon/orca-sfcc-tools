@@ -73,3 +73,19 @@ export function byCartridge(files: readonly string[], cartridges: readonly strin
   return cartridges.filter((path) => groups.has(path)).map((path) => ({ path, files: groups.get(path) ?? [] }))
 }
 
+
+/**
+ * Whether a path (relative to the workspace, `/` between its parts) is a script a breakpoint can go
+ * in: a `.js` or `.ds` file inside one of `cartridges` (as `scriptFiles` found them), within the
+ * walk's depth and never under a folder the walk skips. Decided from the path, so a script saved
+ * after the last walk counts too.
+ */
+export function isScriptPath(path: string, cartridges: readonly string[]): boolean {
+  if (!SCRIPT.test(path)) return false
+  const parts = path.split('/')
+  if (parts.some((part) => part === '' || part === '.' || part === '..') || parts.length - 1 > MAX_DEPTH) return false
+  const root = [...cartridges].sort((a, b) => b.length - a.length).find((cartridge) => cartridge === '' || path.startsWith(`${cartridge}/`))
+  if (root === undefined) return false
+  const inside = root === '' ? parts.slice(0, -1) : parts.slice(root.split('/').length, -1)
+  return !inside.some((part) => SKIPPED.has(part))
+}

@@ -9,6 +9,7 @@ import { featureKey, SHORTCUTS } from './keys'
 import { PROBLEMS_DELAY_MS } from './problems'
 import { SIGNATURE_DELAY_MS, splitLabel } from './signature'
 import { FakeEngine, harness, located, READY, settle } from './testing'
+import type { DebugValue } from './ui'
 
 const TEMPLATE = 'cartridges/app_garden_base/cartridge/templates/default/checks/editor.isml'
 const SCRIPT = 'cartridges/app_garden_base/cartridge/scripts/checks/editor.js'
@@ -556,6 +557,90 @@ test('signature help opens after ( and , with the active parameter marked, follo
   assert.equal(h.ui.now().signature, null)
   assert.deepEqual(splitLabel({ label: 'f(a, b)', parameters: [{ label: 'a', type: null }, { label: 'b', type: null }] }, 1), { before: 'f(a, ', active: 'b', after: ')' })
   assert.deepEqual(splitLabel({ label: 'f()', parameters: [] }, 0), { before: 'f()', active: '', after: '' })
+})
+
+// ---------------------------------------------------------------------------------------------
+// With the debugger (7.3): one pointer pop-up, and Escape
+
+test('one pointer pop-up: while halted the value comes first and the language hover under it, in the same box; otherwise the language hover alone', async () => {
+  const engine = new FakeEngine()
+  const h = harness('ProductMgr.getProduct(id);', { requests: engine.requests, identity: located(SCRIPT), language: 'javascript' })
+  let release: (value: DebugValue | null) => void = () => {}
+  const asked: number[] = []
+  h.features.setValueSource((offset) => {
+    asked.push(offset)
+    return new Promise((resolve) => (release = resolve))
+  })
+  let draws = 0
+  const hover = h.ui.hover.bind(h.ui)
+  h.ui.hover = (view) => {
+    draws++
+    hover(view)
+  }
+  h.features.pointerRest(14, h.clock.now)
+  assert.deepEqual(asked, [14])
+  // The language hover first: drawn alone while the value is asked.
+  engine.last('hover').resolve({ ...READY, hover: member })
+  await settle()
+  assert.equal(h.ui.now().hover?.sections[0].text, 'static getProduct(productID: String): Product')
+  assert.equal(h.ui.now().hover?.label, null)
+  // The value comes: the same box, the value first, the language hover under it.
+  release({ from: 11, to: 21, label: 'Value while stopped', sections: [{ tone: 'code', text: 'getProduct = function' }] })
+  await settle()
+  const sections = h.ui.now().hover?.sections.map((each) => each.text)
+  assert.deepEqual(sections, ['getProduct = function', 'static getProduct(productID: String): Product', 'dw.catalog.ProductMgr', 'Returns the product with the given id.'])
+  assert.equal(h.ui.now().hover?.label, 'Value while stopped')
+  assert.ok(draws >= 2 && h.ui.now().list === null && h.ui.now().signature === null, 'one pop-up, drawn again, never a second')
+  // The debugger's state changed: the value may be gone, so the box closes.
+  h.features.debugChanged()
+  assert.equal(h.ui.now().hover, null)
+  // Not halted (no value): the language hover alone; a name with neither closes.
+  h.features.pointerRest(14, h.clock.now)
+  release(null)
+  engine.last('hover').resolve({ ...READY, hover: member })
+  await settle()
+  assert.equal(h.ui.now().hover?.sections[0].text, 'static getProduct(productID: String): Product')
+  h.features.pointerRest(2, h.clock.now)
+  release(null)
+  engine.last('hover').resolve({ ...READY, hover: null })
+  await settle()
+  assert.equal(h.ui.now().hover, null)
+  // A value with no language hover: the value alone.
+  h.features.pointerRest(23, h.clock.now)
+  engine.last('hover').resolve({ ...READY, hover: null })
+  await settle()
+  release({ from: 22, to: 24, label: 'Value while stopped', sections: [{ tone: 'code', text: 'id = "1"' }] })
+  await settle()
+  assert.deepEqual(h.ui.now().hover?.sections.map((each) => each.text), ['id = "1"'])
+})
+
+test('Escape closes the pop-up opened last, one per press, and is taken only then; with none open it goes on to the editor', async () => {
+  const engine = new FakeEngine()
+  const h = harness('product‸', { requests: engine.requests, identity: located(SCRIPT), language: 'javascript' })
+  assert.equal(h.key('Escape'), false, 'nothing open: the editor’s, as before')
+  h.type('.')
+  const at = h.offset()
+  engine.last('complete').resolve(completion([item('getID')], at, at))
+  await settle()
+  // A hover by key over the open list: the last opened.
+  h.key('i', { ctrl: true })
+  engine.last('hover').resolve({ ...READY, hover: { ...member, range: { start: 0, end: 7 } } })
+  await settle()
+  assert.ok(h.ui.now().list && h.ui.now().hover)
+  assert.equal(h.key('Escape'), true)
+  assert.equal(h.ui.now().hover, null)
+  assert.ok(h.ui.now().list, 'the list stays for the next press')
+  assert.equal(h.key('Escape'), true)
+  assert.equal(h.ui.now().list, null)
+  assert.equal(h.key('Escape'), false)
+  // A hint is a pop-up too.
+  h.key(' ', { ctrl: true, shift: true })
+  engine.last('signature').resolve({ ...READY, signature: null })
+  await settle()
+  assert.ok(h.ui.lastHint)
+  assert.equal(h.key('Escape'), true)
+  assert.equal(h.ui.lastHint, null)
+  assert.equal(h.key('Escape'), false)
 })
 
 // ---------------------------------------------------------------------------------------------

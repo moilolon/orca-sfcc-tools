@@ -1,7 +1,9 @@
 // The language features in the editor frame: the frame's events turned into calls of features.ts,
 // and what the features decide drawn in the surface's pop-up layer (a list, a hover, the signature,
-// a hint) and its underline layer. Keys and clicks are taken in the capture phase on the surface's
-// root, before the surface's own handlers, and only when a feature wants them. Every text is set
+// a hint) and its underline layer. Clicks are taken in the capture phase on the surface's root, and
+// keys through the surface's key handlers (`addKeyHandler`, as 7.3's F9), before the surface's own
+// commands and only when a feature wants them. The pointer pop-up is one box: while a thread is
+// halted, the debugger's value first (`setValueSource`), the language hover under it. Every text is set
 // with `textContent`: nothing the engine answers is read as HTML. Nothing is logged or stored.
 import type { OrcaFrameApi } from 'orca/frame'
 import type { Language } from '../highlight/language'
@@ -15,7 +17,7 @@ import { Features } from './features'
 import { HOVER_DELAY_MS } from './hover'
 import type { KeyPress } from './keys'
 import { frameRequests, type EngineRequests } from './requests'
-import type { FeatureUi, HintView, HoverView, ListView, Section, SignatureView } from './ui'
+import type { FeatureUi, HintView, HoverView, ListView, Section, SignatureView, ValueAt } from './ui'
 import { word } from './words'
 
 /** How long a hint stays when no key comes. */
@@ -201,6 +203,9 @@ export class PopupLayer implements FeatureUi {
     }
     element.replaceChildren(...children)
     element.hidden = false
+    element.setAttribute('role', 'tooltip')
+    if (view.label) element.setAttribute('aria-label', view.label)
+    else element.removeAttribute('aria-label')
     this.place('hover', view.anchor, false)
   }
 
@@ -256,6 +261,8 @@ export type FeaturesOptions = {
 
 export type FeaturesHandle = {
   features: Features
+  /** The debugger's value under a place while halted (7.3), shown first in the pointer pop-up. */
+  setValueSource(valueAt: ValueAt | null): void
   /** The answers' times drawn per feature (ms from the key to the draw), the newest last. */
   latency(): Partial<Record<FeatureName, number[]>>
   dispose(): void
@@ -272,9 +279,8 @@ export function startFeatures(options: FeaturesOptions): FeaturesHandle {
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
   const ui = new PopupLayer(view, api)
   const queryDocument = new QueryDocument(model)
-  const told = new Set<string>()
   const times: Partial<Record<FeatureName, number[]>> = {}
-  const ctx: FeatureContext = {
+  const ctx: Omit<FeatureContext, 'tellOnce'> = {
     model,
     document: queryDocument,
     requests: options.requests ?? frameRequests(api.plugin),
@@ -292,11 +298,6 @@ export function startFeatures(options: FeaturesOptions): FeaturesHandle {
       const list = (times[feature] ??= [])
       list.push(Math.round(ms * 10) / 10)
       if (list.length > KEPT_TIMES) list.shift()
-    },
-    tellOnce: (key, text) => {
-      if (told.has(key)) return
-      told.add(key)
-      ui.hint({ anchor: model.selection.head, text })
     }
   }
   const features = new Features(ctx, { isMac })
@@ -314,18 +315,19 @@ export function startFeatures(options: FeaturesOptions): FeaturesHandle {
     listeners.push([target, type, listener as EventListener, capture])
   }
   const offsetAt = (event: MouseEvent): number | null => {
-    const at = view.hitTest(event.clientX, event.clientY)
+    const at = view.posAtPoint(event.clientX, event.clientY)
     return at ? queryDocument.offsetOf(at) : null
   }
 
-  // Keys first to the features, in the capture phase: a key a feature takes never reaches the surface.
-  on<KeyboardEvent>(root, 'keydown', (event) => {
-    if (event.target !== view.input || event.isComposing || event.keyCode === 229) return
-    if (features.keyDown(press(event), performance.now())) {
-      event.preventDefault()
-      event.stopPropagation()
-    }
-  }, true)
+  // Keys first to the features, through the surface's key handlers (none during an IME
+  // composition): a key a feature takes never reaches the surface's own commands. An Escape that
+  // closed a pop-up stops there, so it never leaves the editor; with none open it goes on as before.
+  let disposed = false
+  view.addKeyHandler((event) => {
+    if (disposed || !features.keyDown(press(event), performance.now())) return false
+    if (event.key === 'Escape') event.stopPropagation()
+    return true
+  })
   // What a key typed, once the surface has put it in the text.
   on<InputEvent>(view.input, 'input', (event) => {
     if (!model.composition && event.inputType === 'insertText' && event.data) features.typed(event.data, performance.now())
@@ -335,10 +337,7 @@ export function startFeatures(options: FeaturesOptions): FeaturesHandle {
     if (event.textChanged) features.changed(performance.now())
     else features.caretMoved(performance.now())
   })
-  const unsubscribe = identity.subscribe(() => {
-    told.clear()
-    features.identityChanged()
-  })
+  const unsubscribe = identity.subscribe(() => features.identityChanged())
 
   // The pointer: a hover once it rests on a name; Mod+click goes to the definition.
   let rest: ReturnType<typeof setTimeout> | null = null
@@ -377,7 +376,9 @@ export function startFeatures(options: FeaturesOptions): FeaturesHandle {
   return {
     features,
     latency: () => times,
+    setValueSource: (valueAt) => features.setValueSource(valueAt),
     dispose() {
+      disposed = true
       if (rest !== null) clearTimeout(rest)
       for (const [target, type, listener, capture] of listeners) target.removeEventListener(type, listener, capture)
       unsubscribe()

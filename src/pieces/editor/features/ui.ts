@@ -27,8 +27,18 @@ export type ListView = {
   description: Section[] | null
 }
 
-/** A hover over a range: what the engine says of it, and the problems there. */
-export type HoverView = { anchor: Pos; sections: Section[]; link: string | null }
+/**
+ * The one pointer pop-up over a range: while a thread is halted, the debugger's value of the name
+ * first; then what the engine says of it, and the problems there. `label` names it for a screen
+ * reader when it holds a value.
+ */
+export type HoverView = { anchor: Pos; sections: Section[]; link: string | null; label: string | null }
+
+/** A debugger value at a place while a thread is halted (7.3): its range in the text, a label and its lines. */
+export type DebugValue = { from: number; to: number; label: string; sections: Section[] }
+
+/** The value of the name at an offset while halted; null when not halted or nothing has one. */
+export type ValueAt = (offset: number) => Promise<DebugValue | null>
 
 /** Signature help over the line: the active signature split around its active parameter. */
 export type SignatureView = { anchor: Pos; before: string; active: string; after: string; note: string | null; sections: Section[] }

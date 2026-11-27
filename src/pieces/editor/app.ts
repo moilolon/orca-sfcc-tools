@@ -7,6 +7,7 @@
 // tell. The language features of 7.2 (features/) start once the surface is drawn.
 import { t } from '../../core/i18n'
 import { startFeatures } from './features/dom'
+import { attachDebug } from './debug/attach'
 import { guessLanguage, languageOfPath, LEXERS } from './highlight/language'
 import { IdentityStore } from './identity'
 import { LocateClient } from './locate-client'
@@ -107,7 +108,7 @@ async function main(kind: EditorKind): Promise<void> {
   const view = new SurfaceView(surface, model, { lexer: LEXERS[language], label: word('editorLabel') })
   const identity = new IdentityStore()
   // Completion, hover, warnings, go to definition, signature help and references (7.2).
-  startFeatures({ api, view, model, identity, language: () => language })
+  const features = startFeatures({ api, view, model, identity, language: () => language })
 
   // Every edit goes to Orca (the session coalesces them); a composition in progress does not.
   model.onUpdate((event) => {
@@ -167,12 +168,19 @@ async function main(kind: EditorKind): Promise<void> {
     const located = await client.locate(model.text())
     if (located.line) view.revealLine(located.line, located.column)
   }
+  // 7.3: breakpoints in the margin, the stopped line and values while halted (debug/).
+  const debug = attachDebug({ api, view, model, identity, sync, notify: (text) => showNotice(notice, { text, dismissible: true }) })
+  // One pointer pop-up: while halted, the value first and the language hover under it.
+  features.setValueSource(debug.valueAt)
+  debug.onState(() => features.features.debugChanged())
   // A save names this editor's file only when this editor was the one flushed for it.
   api.on('editor.flush', () => {
     client.flushed(model.text())
+    debug.flushed()
   })
   api.plugin.on('editor.saved', (payload) => {
-    if (payload && typeof payload.path === 'string' && typeof payload.hash === 'string') void client.saved(payload, () => model.text())
+    if (payload && typeof payload.path === 'string' && typeof payload.hash === 'string')
+      void client.saved(payload, () => model.text()).then((whose) => whose === 'own' && debug.saved())
   })
   view.focus()
   await locate()

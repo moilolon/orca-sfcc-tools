@@ -22,10 +22,17 @@ export type Typography = { fontFamily?: string; fontSize?: number; fontWeight?: 
 /** A range to underline (7.2's warnings): its tone picks the colour. */
 export type Underline = { from: Pos; to: Pos; tone: 'error' | 'warning' | 'info' }
 
-/** A mark in the gutter's mark column (7.3's breakpoints). */
-export type LineMark = 'breakpoint' | 'breakpoint-off' | 'stopped'
+/**
+ * A mark in the gutter's mark column (7.3's breakpoints): each kind draws as `ed-mark-<kind>`, and
+ * the title says in words what the shape shows.
+ */
+export type LineMark = { kinds: readonly string[]; title: string }
+
+/** A whole line drawn behind the text (7.3's stopped line), with a label after its end. */
+export type LineHighlight = { line: number; kind: string; label: string }
 
 const escapeHtml = (text: string) => text.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'))
+const escapeAttribute = (text: string) => escapeHtml(text).replace(/"/g, '&quot;')
 const isAscii = (text: string) => !/[^\x00-\x7f]/.test(text)
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, parent?: HTMLElement): HTMLElementTagNameMap[K] {
@@ -90,8 +97,12 @@ export class SurfaceView implements Geometry {
   private underlines: Underline[] = []
   private marks = new Map<number, LineMark>()
   private readonly caretListeners: ((head: Pos) => void)[] = []
-  /** Called when the mark column of a line is clicked (7.3 sets a breakpoint there). */
+  /** Called when the mark column of a line is clicked (7.3 sets a breakpoint there); null takes no click. */
   onMarkClick: ((line: number) => void) | null = null
+  private highlight: LineHighlight | null = null
+  private highlightKey = ''
+  private readonly highlightLayer: HTMLDivElement
+  private readonly keyHandlers: ((event: KeyboardEvent) => boolean)[] = []
   /** How long the last draw took, for the measurements of a live check. */
   lastRenderMs = 0
 
@@ -107,6 +118,7 @@ export class SurfaceView implements Geometry {
     this.gutter = element('div', 'ed-gutter', this.inner)
     this.gutterLines = element('div', 'ed-gutter-lines', this.gutter)
     this.textLayer = element('div', 'ed-text', this.inner)
+    this.highlightLayer = element('div', 'ed-highlight', this.textLayer)
     this.selectionLayer = element('div', 'ed-selection', this.textLayer)
     this.lineLayer = element('div', 'ed-lines', this.textLayer)
     this.underlineLayer = element('div', 'ed-underlines', this.textLayer)
@@ -151,26 +163,44 @@ export class SurfaceView implements Geometry {
     this.queue()
   }
 
+  /** Whether the mark column takes a click (7.3: only in a script a breakpoint can go in). */
+  setMarksClickable(clickable: boolean): void {
+    this.gutter.classList.toggle('ed-gutter-marks', clickable)
+  }
+
+  /** The line drawn behind the text, or none (7.3's stopped line). */
+  setLineHighlight(highlight: LineHighlight | null): void {
+    this.highlight = highlight
+    // Never a key drawHighlight makes: the next draw puts it, or takes it away.
+    this.highlightKey = '\u0000'
+    this.queue()
+  }
+
+  /** A key before the editor's own handling: a handler that returns true took it (7.3's F9). */
+  addKeyHandler(handler: (event: KeyboardEvent) => boolean): void {
+    this.keyHandlers.push(handler)
+  }
+
+  /** The position of the text under a point of the window, or null outside the text or past a line's end. */
+  posAtPoint(clientX: number, clientY: number): Pos | null {
+    const box = this.textLayer.getBoundingClientRect()
+    const line = Math.floor((clientY - box.top) / this.lineHeight)
+    if (clientX < box.left || line < 0 || line >= this.model.buffer.lineCount) return null
+    const x = clientX - box.left
+    if (x > this.x(line, this.model.buffer.line(line).length)) return null
+    return { line, col: this.colAt(line, x) }
+  }
+
+  /** A position's box in the editor's own coordinates (for a pop-up). */
+  boxAt(p: Pos): { x: number; y: number; height: number } {
+    const text = this.textLayer.getBoundingClientRect()
+    const root = this.root.getBoundingClientRect()
+    return { x: text.left - root.left + this.x(p.line, p.col), y: text.top - root.top + p.line * this.lineHeight, height: this.lineHeight }
+  }
+
   /** The caret's box in the editor's own coordinates (for a pop-up). */
   caretBox(): { x: number; y: number; height: number } {
     return this.boxAt(this.model.selection.head)
-  }
-
-  /** A place's box in the editor's own coordinates (a pop-up over a name, a list under it). */
-  boxAt(at: Pos): { x: number; y: number; height: number } {
-    const text = this.textLayer.getBoundingClientRect()
-    const root = this.root.getBoundingClientRect()
-    return { x: text.left - root.left + this.x(at.line, at.col), y: text.top - root.top + at.line * this.lineHeight, height: this.lineHeight }
-  }
-
-  /** The place under a point of the window; null off the text (the gutter, past a line's end, below the last line). */
-  hitTest(clientX: number, clientY: number): Pos | null {
-    const box = this.textLayer.getBoundingClientRect()
-    const x = clientX - box.left
-    const line = Math.floor((clientY - box.top) / this.lineHeight)
-    if (x < 0 || line < 0 || line >= this.model.buffer.lineCount) return null
-    if (x > this.x(line, this.model.buffer.line(line).length)) return null
-    return { line, col: this.colAt(line, x) }
   }
 
   // ---- language, typography, theme ----
@@ -314,6 +344,7 @@ export class SurfaceView implements Geometry {
     }
     this.textDirty = false
     this.drawGutter()
+    this.drawHighlight()
     this.drawSelection()
     this.lastRenderMs = performance.now() - started
   }
@@ -376,10 +407,27 @@ export class SurfaceView implements Geometry {
     let html = ''
     for (let i = first; i <= last; i++) {
       const mark = this.marks.get(i)
-      html += `<div class="ed-gutter-line${i === head ? ' ed-current' : ''}" data-line="${i}"><span class="ed-mark${mark ? ` ed-mark-${mark}` : ''}"></span>${i + 1}</div>`
+      const kinds = mark ? mark.kinds.map((kind) => ` ed-mark-${kind}`).join('') : ''
+      const title = mark ? ` title="${escapeAttribute(mark.title)}" aria-label="${escapeAttribute(mark.title)}"` : ''
+      html += `<div class="ed-gutter-line${i === head ? ' ed-current' : ''}" data-line="${i}"><span class="ed-mark${kinds}"${title}></span>${i + 1}</div>`
     }
     this.gutterLines.style.transform = `translateY(${first * this.lineHeight}px)`
     this.gutterLines.innerHTML = html
+  }
+
+  /** The highlighted line, with its label after the line's text; drawn again only when it moved. */
+  private drawHighlight(): void {
+    const highlight = this.highlight
+    const line = highlight && highlight.line < this.model.buffer.lineCount ? highlight.line : -1
+    const x = line >= 0 ? this.x(line, this.model.buffer.line(line).length) + this.charWidth * 3 : 0
+    const key = highlight && line >= 0 ? `${line}:${highlight.kind}:${highlight.label}:${x}:${this.lineHeight}` : ''
+    if (key === this.highlightKey) return
+    this.highlightKey = key
+    if (!highlight || line < 0) {
+      this.highlightLayer.innerHTML = ''
+      return
+    }
+    this.highlightLayer.innerHTML = `<div class="ed-highlight-line ed-highlight-${escapeAttribute(highlight.kind)}" style="transform:translateY(${line * this.lineHeight}px)"><span class="ed-highlight-label" style="left:${x}px">${escapeHtml(highlight.label)}</span></div>`
   }
 
   private drawSelection(): void {
@@ -511,6 +559,10 @@ export class SurfaceView implements Geometry {
 
   private onKeyDown(event: KeyboardEvent): void {
     if (event.isComposing || event.keyCode === 229) return
+    if (this.keyHandlers.some((handler) => handler(event))) {
+      event.preventDefault()
+      return
+    }
     const handled = this.command(event)
     if (handled) {
       event.preventDefault()
