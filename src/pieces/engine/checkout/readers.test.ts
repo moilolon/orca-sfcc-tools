@@ -245,7 +245,7 @@ test('scan: the members of modules a file reads, through a name, a require, a pa
       ['*/cartridge/scripts/prices', 'price', 'price', 4],
       ['*/cartridge/scripts/prices', 'label', 'name', 4],
       ['~/cartridge/scripts/x', 'run', 'run', 5],
-      ['module.superModule', 'extra', 'extra', 6],
+      // `base.extra = …` replaces a member: an assignment, not a read.
       ['module.superModule', 'first', 'first', 6]
     ]
   )

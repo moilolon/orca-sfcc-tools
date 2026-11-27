@@ -31,6 +31,7 @@ const ACCOUNT_TEXT = [
   'exports.Helper = show;',
   'exports.Version = 2;',
   "exports.Wrapped = guard.ensure(['get'], 'notAFunction');",
+  'exports.Total = computeTotal();',
   ''
 ].join('\n')
 
@@ -66,9 +67,8 @@ test('routes: exports.Name of a controller without server is a route, with the f
       ['export', 'Show', lineOf('exports.Show'), lineOf('function show'), 'Show'],
       ['export', 'Start', lineOf('exports.Start'), lineOf('function start'), 'Start'],
       ['export', 'Login', lineOf('exports.Login'), lineOf('exports.Login'), 'Login'],
-      ['export', 'Helper', lineOf('exports.Helper'), lineOf('function show'), 'Helper'],
-      // A wrapper given no function: a route, its handler unknown. A number is no route.
-      ['export', 'Wrapped', lineOf('exports.Wrapped'), null, 'Wrapped']
+      ['export', 'Helper', lineOf('exports.Helper'), lineOf('function show'), 'Helper']
+      // A number, a wrapper given no function and a call of nothing are values, not routes.
     ]
   )
   // The handler's place is its name.
@@ -83,7 +83,7 @@ test('routes: exports.Name of a controller without server is a route, with the f
 
 test('routes: with a storefront path, an exports.Name route serves the request; completion and definition find it', async () => {
   const ctx = await context(true)
-  assert.deepEqual(ctx.index.routeIds('LegacyShop'), ['Account-Helper', 'Account-Login', 'Account-Show', 'Account-Start', 'Account-Wrapped', 'Cart-Show'])
+  assert.deepEqual(ctx.index.routeIds('LegacyShop'), ['Account-Helper', 'Account-Login', 'Account-Show', 'Account-Start', 'Cart-Show'])
   const asked = at('cartridges/app_new_garden/cartridge/scripts/x.js', "URLUtils.url('Account-Sh‸ow');")
   const route = hover(ctx, asked.analysis, asked.offset) as Extract<Hover, { kind: 'route' }>
   assert.equal(route.kind, 'route')
@@ -91,7 +91,7 @@ test('routes: with a storefront path, an exports.Name route serves the request; 
   assert.deepEqual([shop.storefront, shop.controller, shop.problems], ['LegacyShop', ACCOUNT, []])
   assert.deepEqual(shop.serves && [shop.serves.method, shop.serves.line, shop.serves.handler?.line], ['export', lineOf('exports.Show'), lineOf('function show')])
   const listed = at('cartridges/app_new_garden/cartridge/scripts/x.js', "URLUtils.url('Account-‸');")
-  assert.deepEqual(complete(ctx, listed.analysis, listed.offset).items.map((item) => item.label), ['Account-Helper', 'Account-Login', 'Account-Show', 'Account-Start', 'Account-Wrapped'])
+  assert.deepEqual(complete(ctx, listed.analysis, listed.offset).items.map((item) => item.label), ['Account-Helper', 'Account-Login', 'Account-Show', 'Account-Start'])
   const found = definition(ctx, asked.analysis, asked.offset)
   assert.deepEqual(found?.targets, [{ path: ACCOUNT, start: ACCOUNT_TEXT.indexOf('Show ='), end: ACCOUNT_TEXT.indexOf('Show =') + 4, line: lineOf('exports.Show'), storefronts: ['LegacyShop'] }])
 })
@@ -106,7 +106,6 @@ test('routes: without a storefront path, exports.Name routes are offered and hov
       ['Account-Login', 'app_legacy_garden'],
       ['Account-Show', 'app_legacy_garden'],
       ['Account-Start', 'app_legacy_garden'],
-      ['Account-Wrapped', 'app_legacy_garden'],
       ['Cart-Show', 'app_new_garden']
     ]
   )

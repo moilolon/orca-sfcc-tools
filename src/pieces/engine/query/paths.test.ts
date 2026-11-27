@@ -79,3 +79,39 @@ test('paths: references of one brand’s override do not list another brand’s 
     ]
   )
 })
+
+test('paths: a member a brand re-exports from its base (tax: base.tax) is the base function, for references and signature help', async () => {
+  const project = (name: string) => `<projectDescription><name>${name}</name></projectDescription>`
+  const base = 'cartridges/app_base_garden/cartridge/scripts/helper.js'
+  const brand = 'cartridges/app_a_garden/cartridge/scripts/helper.js'
+  const shared = 'cartridges/app_core_garden/cartridge/scripts/cart.js'
+  const files = new MemoryFiles({
+    'cartridges/app_base_garden/.project': project('app_base_garden'),
+    [base]: 'function tax(p, rate) {}\nfunction price(p) {}\nmodule.exports = { tax: tax, price: price };\n',
+    'cartridges/app_a_garden/.project': project('app_a_garden'),
+    [brand]: 'var base = module.superModule;\nfunction price(p) {}\nmodule.exports = { price: price, tax: base.tax };\n',
+    'cartridges/app_b_garden/.project': project('app_b_garden'),
+    'cartridges/app_b_garden/cartridge/scripts/other.js': 'module.exports = {};\n',
+    'cartridges/app_core_garden/.project': project('app_core_garden'),
+    [shared]: "var helper = require('*/cartridge/scripts/helper');\nhelper.tax(p, 1);\n",
+    'sites/site_template/sites/ShopA/site.xml': '<site site-id="ShopA"><custom-cartridges>app_a_garden:app_core_garden:app_base_garden</custom-cartridges></site>',
+    'sites/site_template/sites/ShopB/site.xml': '<site site-id="ShopB"><custom-cartridges>app_b_garden:app_core_garden:app_base_garden</custom-cartridges></site>'
+  })
+  const index = new CheckoutIndex(files, { dw: dwLookup })
+  await index.build()
+  const ctx = { index, dw: committedDw() }
+  const exported = index.fileFacts(brand)
+  assert.deepEqual(exported?.kind === 'script' ? exported.exports.members.map((member) => [member.name, member.alias ?? null]) : null, [
+    ['price', null],
+    ['tax', { module: 'module.superModule', member: 'tax' }]
+  ])
+  const asked = at(base, 'function ta‸x(p, rate) {}\nfunction price(p) {}\nmodule.exports = { tax: tax, price: price };\n')
+  const uses = references(ctx, asked.analysis, asked.offset)?.references.filter((each) => each.kind === 'use')
+  // The brand's export line reads `base.tax` itself; the shared call reaches it on both storefronts.
+  assert.deepEqual(uses?.map((each) => [each.path, each.storefronts]), [
+    [brand, ['ShopA']],
+    [shared, ['ShopA', 'ShopB']]
+  ])
+  const call = at(shared, "var helper = require('*/cartridge/scripts/helper');\nhelper.tax(‸p, 1);\n")
+  assert.deepEqual(signatureHelp(ctx, call.analysis, call.offset)?.signatures.map((each) => [each.label, each.path, each.storefronts]), [['tax(p, rate)', base, ['ShopA', 'ShopB']]])
+})

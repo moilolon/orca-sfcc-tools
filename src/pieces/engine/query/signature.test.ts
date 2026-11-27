@@ -33,6 +33,14 @@ test('signature 7. a dw method of a known type: its overloads, the one that fits
   // Unclosed, with white space after the comma.
   const open = (await helpAt("var ProductMgr = require('dw/catalog/ProductMgr');\nProductMgr.getProduct(id).getImage('small',  ‸")).found
   assert.equal(open?.activeParameter, 1)
+  // A comma inside a comment between arguments is no separator.
+  assert.equal((await helpAt("var ProductMgr = require('dw/catalog/ProductMgr');\nProductMgr.getProduct(1 /* a, b */‸);")).found?.activeParameter, 0)
+  assert.equal((await helpAt("var ProductMgr = require('dw/catalog/ProductMgr');\nProductMgr.getProduct(id).getImage('small', // a, b\n  ‸);")).found?.activeParameter, 1)
+  // A literal argument's type chooses among overloads of the same length.
+  const url = (await helpAt("var URLUtils = require('dw/web/URLUtils');\nURLUtils.url('Product-Show', 'pid', ‸);")).found
+  assert.ok(url && url.signatures[url.activeSignature].parameters[0].type === 'String', url ? url.signatures[url.activeSignature].label : 'none')
+  const sid = (await helpAt("var URLUtils = require('dw/web/URLUtils');\nURLUtils.url(true, 'Product-Show', ‸);")).found
+  assert.ok(sid && sid.signatures[sid.activeSignature].parameters[0].type === 'Boolean', sid ? sid.signatures[sid.activeSignature].label : 'none')
   // A global function, a constructor of a dw class.
   assert.deepEqual(labels((await helpAt('if (empty(‸)) {}')).found), ['static empty(obj: Object): Boolean'])
   const list = (await helpAt("var ArrayList = require('dw/util/ArrayList');\nvar list = new ArrayList(‸);")).found

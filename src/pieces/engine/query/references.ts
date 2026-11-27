@@ -7,7 +7,7 @@
 import type * as AST from '../js/ast'
 import { walk, type Range } from '../js/ast'
 import { lineAt, lineStarts } from '../checkout/files'
-import { memberUsesOf, type MemberUse } from '../checkout/scan'
+import { memberReader, memberUsesOf, type MemberUse } from '../checkout/scan'
 import { pathAt, rootAt, type Analysis } from './analysis'
 import { moduleMember, type QueryContext } from './modules'
 import { Types } from './types'
@@ -115,7 +115,8 @@ export function references(ctx: QueryContext, analysis: Analysis, offset: number
 /** The member reads of the file asked on, from its text. */
 function currentUses(analysis: Analysis): MemberUse[] {
   const reads: AST.MemberExpression[] = []
-  for (const root of analysis.roots) walk(root.node, (node) => void (node.type === 'MemberExpression' && reads.push(node)))
+  const readMember = memberReader(reads)
+  for (const root of analysis.roots) walk(root.node, readMember)
   return memberUsesOf(analysis.text, analysis.facts, reads)
 }
 

@@ -99,6 +99,8 @@ export type ExportedMember = Place & {
   definition: Place | null
   /** The JSDoc of the member, else of the declaration it names, without its delimiters; cut at `MAX_DOC_CHARACTERS`. */
   doc: string | null
+  /** A member of another module exported as it is (`tax: base.tax`, `price: helper.price`): that module and member. */
+  alias?: { module: string; member: string }
 }
 
 /** What `module.exports` is, as the last assignment to it writes it. */
@@ -215,6 +217,19 @@ export const MAX_MEMBER_USES = 5_000
  * require('x')` wherever it is used, and `base.price` with `base` bound to `module.superModule`
  * (kept under `SUPER_MODULE`). The references of 6.4 are found through these.
  */
+/**
+ * A visitor that gathers the member reads of a walk into `reads`, leaving out a member assigned to
+ * (`base.price = function …` replaces the function, it does not read it). The walk visits an
+ * assignment before its target.
+ */
+export function memberReader(reads: AST.MemberExpression[]): (node: Node) => void {
+  const written = new Set<Node>()
+  return (node) => {
+    if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression') written.add(node.left)
+    else if (node.type === 'MemberExpression' && !written.has(node)) reads.push(node)
+  }
+}
+
 export function memberUsesOf(text: string, facts: ScriptFacts, reads: readonly AST.MemberExpression[]): MemberUse[] {
   const starts = lineStarts(text)
   const bound = new Map<number, string>()
@@ -267,10 +282,11 @@ export function scanScript(text: string, options: { controller?: boolean } = {})
   const calls: AST.CallExpression[] = []
   const functions = new Map<number, FunctionNode>()
   const reads: AST.MemberExpression[] = []
+  const readMember = memberReader(reads)
   collectCalls(parsed.program, templates, resources, (node) => {
     if (options.controller && node.type === 'CallExpression') calls.push(node)
     if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression' || node.type === 'FunctionDeclaration') functions.set(node.start, node)
-    if (node.type === 'MemberExpression') reads.push(node)
+    readMember(node)
   })
   return {
     kind: 'script',
@@ -373,12 +389,14 @@ function controllerFacts(text: string, facts: ScriptFacts, calls: AST.CallExpres
         handler = declaredFunction(value.declaration)
         if (!handler) continue
       } else if (value.kind === 'call') {
-        // A wrapper (`guard.ensure([…], show)`): the function it is given, when one is.
+        // A wrapper (`guard.ensure([…], show)`): the function it is given. A call given no function
+        // (`exports.Total = compute()`) is a value, not a route.
         const call = callsByStart.get(value.start)
         for (const argument of [...(call?.arguments ?? [])].reverse()) {
           handler = argument.type === 'SpreadElement' ? null : functionPlace(argument)
           if (handler) break
         }
+        if (!handler) continue
       } else continue
       exportsRoutes = true
       operations.push({ method: 'export', name: member.name, nameStart: member.start, nameEnd: member.end, start: member.start, end: value.end, line: lineAt(starts, member.start), middleware: 0, ...(handler ? { handler } : {}) })
@@ -412,7 +430,8 @@ export function scanTemplate(text: string): TemplateFileFacts {
   })
   const script = templateScript(text, parsed.document)
   const reads: AST.MemberExpression[] = []
-  for (const fragment of script.fragments) collectCalls(fragment.node, templates, resources, (node) => void (node.type === 'MemberExpression' && reads.push(node)))
+  const readMember = memberReader(reads)
+  for (const fragment of script.fragments) collectCalls(fragment.node, templates, resources, readMember)
   templates.sort((a, b) => a.start - b.start)
   resources.sort((a, b) => a.start - b.start)
   const starts = lineStarts(text)
@@ -474,11 +493,31 @@ function exportsOf(text: string, facts: ScriptFacts, functions: ReadonlyMap<numb
     const init = declaration(value.declaration)?.init
     return init && (init.type === 'FunctionDeclaration' || init.type === 'FunctionExpression' || init.type === 'ArrowFunctionExpression') ? init : null
   }
+  // The modules names are bound to: `require('x')`, and `module.superModule`.
+  const bound = new Map<number, string>()
+  for (const call of facts.requires) {
+    if (call.module !== null && call.member === null && call.binding?.kind === 'name' && call.binding.declaration !== null) bound.set(call.binding.declaration, call.module)
+  }
+  for (const id of facts.exports.superModule.bindings) bound.set(id, SUPER_MODULE)
+  const referenceAt = new Map<number, Reference>()
+  for (const reference of facts.references) referenceAt.set(reference.start, reference)
+  /** `base.tax`, `helper.price`, `module.superModule.tax`: the module and member a value reads as it is. */
+  const aliasOf = (value: ValueFacts): ExportedMember['alias'] => {
+    if (value.kind !== 'other') return undefined
+    const match = /^([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)$/.exec(text.slice(value.start, value.end))
+    const direct = /^module\s*\.\s*superModule\s*\.\s*([A-Za-z_$][\w$]*)$/.exec(text.slice(value.start, value.end))
+    if (direct) return { module: SUPER_MODULE, member: direct[1] }
+    if (!match) return undefined
+    const id = referenceAt.get(value.start)?.declaration
+    const module = id === null || id === undefined ? undefined : bound.get(id)
+    return module === undefined ? undefined : { module, member: match[2] }
+  }
   const byName = new Map<string, ExportedMember>()
   for (const member of facts.exports.members) {
     if (!byName.has(member.name) && byName.size >= MAX_EXPORTED_MEMBERS) continue
     const fn = functionOf(member.value)
     const named = member.value.kind === 'identifier' ? declaration(member.value.declaration) : null
+    const alias = aliasOf(member.value)
     byName.delete(member.name)
     byName.set(member.name, {
       name: member.name,
@@ -486,7 +525,8 @@ function exportsOf(text: string, facts: ScriptFacts, functions: ReadonlyMap<numb
       kind: fn ? 'function' : 'value',
       params: fn ? fn.params.map(paramName) : null,
       definition: named ? place(named) : null,
-      doc: docText(member.doc?.text ?? named?.doc?.text)
+      doc: docText(member.doc?.text ?? named?.doc?.text),
+      ...(alias ? { alias } : {})
     })
   }
   const out = noExports()

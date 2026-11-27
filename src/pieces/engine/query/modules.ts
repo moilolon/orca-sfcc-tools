@@ -66,7 +66,18 @@ export function fileMembers(ctx: QueryContext, path: string, storefront: string 
   const exports = exportsOf(ctx, path)
   if (!exports || depth > MAX_MODULE_DEPTH || seen.has(path)) return []
   seen.add(path)
-  const out: MemberDefinition[] = exports.members.map((member) => ({ storefront, path, member }))
+  // A member that re-exports another module's (`tax: base.tax`) is that member, where it is defined.
+  const own = (member: ExportedMember): MemberDefinition => {
+    if (!member.alias) return { storefront, path, member }
+    const alias = member.alias
+    for (const copy of moduleCopies(ctx, path, alias.module)) {
+      if (storefront !== null && copy.storefront !== null && copy.storefront !== storefront) continue
+      const target = fileMembers(ctx, copy.path, storefront ?? copy.storefront, depth + 1, new Set(seen)).find((each) => each.member.name === alias.member)
+      if (target) return { ...target, member: { ...target.member, name: member.name } }
+    }
+    return { storefront, path, member }
+  }
+  const out: MemberDefinition[] = exports.members.map(own)
   const names = new Set(out.map((each) => each.member.name))
   const add = (more: MemberDefinition[]) => {
     for (const each of more) {

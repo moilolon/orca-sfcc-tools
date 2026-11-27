@@ -76,15 +76,29 @@ export function signatureHelp(ctx: QueryContext, analysis: Analysis, offset: num
   let active = 0
   for (let i = 0; i < args.length; i++) {
     if (args[i].end > offset) break
-    const between = text.slice(args[i].end, i + 1 < args.length ? Math.min(args[i + 1].start, offset) : offset)
+    // Between two arguments there is only white space, comments and the comma.
+    const between = text.slice(args[i].end, i + 1 < args.length ? Math.min(args[i + 1].start, offset) : offset).replace(/\/\*[\s\S]*?(\*\/|$)|\/\/[^\r\n]*/g, '')
     if (between.includes(',')) active = i + 1
   }
   const close = closedCall ? call.end - 1 : Math.max(call.end, offset)
   const signatures = signaturesOf(ctx, analysis, call).slice(0, MAX_SIGNATURES)
   if (signatures.length === 0) return null
   // The first signature that takes the arguments written and the one at the offset.
-  const fits = signatures.findIndex((each) => each.parameters.length > active && each.parameters.length >= args.length)
-  const rest = signatures.findIndex((each) => each.parameters.some((param) => param.label.startsWith('...')))
+  // A literal argument says its type: a signature whose parameter there takes another is not the one.
+  const literalType = (node: AST.Node | undefined): string | null =>
+    node?.type === 'Literal' ? (node.kind === 'string' ? 'String' : node.kind === 'number' ? 'Number' : node.kind === 'boolean' ? 'Boolean' : null) : node?.type === 'TemplateLiteral' ? 'String' : null
+  const agrees = (each: Signature) =>
+    args.every((argument, i) => {
+      const written = literalType(argument)
+      const param = each.parameters[Math.min(i, each.parameters.length - 1)]
+      if (!written || !param?.type || param.type === 'Object') return true
+      return param.type === written
+    })
+  const takes = (each: Signature) => each.parameters.length > active && each.parameters.length >= args.length
+  const variadic = (each: Signature) => each.parameters.some((param) => param.label.startsWith('...'))
+  let fits = signatures.findIndex((each) => (takes(each) || variadic(each)) && agrees(each))
+  if (fits === -1) fits = signatures.findIndex(takes)
+  const rest = signatures.findIndex(variadic)
   return { range: { start: open + 1, end: close }, signatures, activeSignature: fits !== -1 ? fits : rest !== -1 ? rest : 0, activeParameter: active }
 }
 
