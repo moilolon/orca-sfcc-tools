@@ -34,13 +34,13 @@ import { isRole, ROLES, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
 import { isLocal } from '../../core/workspaces'
-import { createSeenFileStore, dataFiles, dataFolder, DATA_VERSION, readDataFile, updateDataFile } from './data-folder'
+import { createSeenFileStore, DataFileError, dataFiles, dataFolder, DATA_VERSION, updateDataFile } from './data-folder'
 import { FILE_WINDOW_BYTES, listArguments, maskedSamples, occurrencesOf, readArguments, windowFull } from './digest'
 import { createFrameResolver, type FrameResolver } from './frames'
 import { messages, ROLE_KEYS } from './i18n'
 import type { ErrorRow, OpenFrameResult, RoleErrors } from './protocol'
 import { ERROR_LEVELS, filtersOf, parseLogEntries } from './reader'
-import { createSeenList, listKey, type Occurrence, type Sample, type SeenJson } from './seen'
+import { createSeenList, listKey, type Occurrence, type Sample, type SeenJson, type SeenStore } from './seen'
 
 export { FILE_WINDOW_BYTES, FULL_WINDOW_BYTES, listArguments, MAX_ENTRIES, readArguments } from './digest'
 /** How far before the cursor a read starts, so an entry another server wrote late is still read. */
@@ -167,7 +167,54 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   const openFile = deps.openFile ?? createOpenFile({ log: ctx.log })
   const frames = deps.frames ?? createFrameResolver()
   const seenPath = dataFiles(deps.dataFolder ?? dataFolder()).seen
-  const seen = createSeenList(createSeenFileStore(seenPath))
+
+  /** The seen lists an older version kept in storage, while they are not moved yet; null once they are. */
+  async function storedLists(): Promise<Record<string, SeenJson> | null> {
+    if ((await ctx.store.get<SeenJson>(MIGRATED_KEY, false)) === true) return null
+    const found: Record<string, SeenJson> = {}
+    for (const role of ROLES) {
+      const value = await ctx.store.get<SeenJson>(listKey(role), null)
+      if (value && typeof value === 'object' && !Array.isArray(value)) found[role] = value
+    }
+    return found
+  }
+
+  /**
+   * Copies the seen lists an older version kept in the plugin's storage into `seen.json`, once:
+   * only while that file does not exist, under its lock, and storage is left as it is. Marked done
+   * in storage (`seenMoved`), so a later start never copies them again, even once the file is gone.
+   */
+  async function migrate(): Promise<boolean> {
+    const found = await storedLists()
+    if (found === null) return false
+    // Nothing to copy, or already copied by another copy of the plugin: the file is not touched.
+    let copied = false
+    if (Object.keys(found).length > 0) {
+      await updateDataFile<SeenJson>(seenPath, (current) => {
+        if (current !== null) return undefined
+        copied = true
+        return { version: DATA_VERSION, roles: found }
+      })
+      if (copied) ctx.log('the seen lists were copied to the data folder')
+    }
+    await ctx.store.set(MIGRATED_KEY, true)
+    return copied
+  }
+
+  // The copy runs first: every read and write of the seen list waits for it. Should it fail, a
+  // write that finds no seen.json still starts from the lists in storage (`seed`), so the first
+  // mark or read after an upgrade never leaves the old marks behind.
+  const migration = migrate().catch((error) => {
+    ctx.log(`the seen lists were not copied: ${error instanceof Error ? error.message : 'error'}`)
+    return false
+  })
+  const file = createSeenFileStore(seenPath, { seed: { roles: storedLists, seeded: () => ctx.store.set(MIGRATED_KEY, true) } })
+  const store: SeenStore = {
+    get: async (key, fallback) => (await migration, file.get(key, fallback)),
+    set: async (key, value) => (await migration, file.set(key, value)),
+    update: async (key, change) => (await migration, file.update(key, change))
+  }
+  const seen = createSeenList(store)
   const reads = new Map<Role, Promise<void>>()
   let stopped = false
   // Each answer says which state it shows: this worker, and a number raised on every change of a
@@ -324,7 +371,10 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
       try {
         await read(role, askedAt)
       } catch (error) {
-        ctx.log(`reading the ${role} log failed: ${error instanceof B2cError ? error.code : 'error'}`)
+        // A seen list that cannot be read or locked fails the read: the view says why.
+        const code = error instanceof B2cError || error instanceof DataFileError ? error.code : 'error'
+        ctx.log(`reading the ${role} log failed: ${code}`)
+        await ctx.store.set(statusKey(role), { ...(await readStatus(role)), error: code }).catch(() => undefined)
       } finally {
         reads.delete(role)
         // A read the worker's stop may have cut short stays asked, for the next worker.
@@ -471,36 +521,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
   const resumed: unknown[] = []
 
-  /**
-   * Copies the seen lists an older version kept in the plugin's storage into `seen.json`, once:
-   * only while that file does not exist, under its lock, and storage is left as it is. Marked done
-   * in storage (`seenMoved`), so a later start never copies them again, even once the file is gone.
-   */
-  async function migrate(): Promise<boolean> {
-    if ((await ctx.store.get<SeenJson>(MIGRATED_KEY, false)) === true) return false
-    const found: Record<string, SeenJson> = {}
-    for (const role of ROLES) {
-      const value = await ctx.store.get<SeenJson>(listKey(role), null)
-      if (value && typeof value === 'object' && !Array.isArray(value)) found[role] = value
-    }
-    // Nothing to copy, or already copied by another copy of the plugin: the file is not touched.
-    let copied = false
-    if (Object.keys(found).length > 0 && (await readDataFile(seenPath)) === null) {
-      await updateDataFile<SeenJson>(seenPath, (current) => {
-        if (current !== null) return undefined
-        copied = true
-        return { version: DATA_VERSION, roles: found }
-      })
-      if (copied) ctx.log('the seen lists were copied to the data folder')
-    }
-    await ctx.store.set(MIGRATED_KEY, true)
-    return copied
-  }
-
   void updateStatusBar()
-  void migrate()
-    .then((copied) => (copied ? Promise.all(ROLES.map((role) => changed(role))) : undefined))
-    .catch((error) => ctx.log(`the seen lists were not copied: ${error instanceof Error ? error.message : 'error'}`))
+  void migration.then((copied) => (copied ? Promise.all(ROLES.map((role) => changed(role))) : undefined)).catch(() => undefined)
   void schedule(START_DELAY_MS)
   void resumeCutReads().catch(() => undefined)
 

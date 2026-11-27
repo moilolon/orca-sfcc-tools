@@ -7,19 +7,24 @@
 // A file here is a JSON object `{ version: 1, roles: { <role>: … } }`, read by anyone and written
 // only through `updateDataFile`:
 //   1. the lock `<file>.lock` is taken with an exclusive create (`wx`, O_EXCL), retried with
-//      jitter for up to `LOCK_TIMEOUT_MS`; a lock older than `STALE_LOCK_MS` is left by a process
-//      that died holding it, and is removed;
+//      jitter for up to `LOCK_TIMEOUT_MS`. A lock older than `STALE_LOCK_MS` was left by a process
+//      that died holding it, and is taken over atomically: under a second lock,
+//      `<file>.lock.break` (also `wx`), the lock is checked again to be the same stale one,
+//      renamed to a name of this writer's own, checked once more and only then removed; whoever
+//      did not get the second lock retries. So a writer that saw a lock stale a moment ago can
+//      never remove the fresh lock another writer took over it meanwhile;
 //   2. the file is read again under the lock;
 //   3. the new text is written to `<file>.<pid>.<random>.tmp` (owner-only), flushed to disk, then
 //      renamed over the file, so a reader sees the old file or the new one, never half of one, and
 //      a writer cut off halfway leaves only its temporary file behind;
-//   4. the lock is removed, only if it is still this writer's.
+//   4. the lock is removed, only if it is still this writer's. Temporary files a writer killed
+//      between its write and its rename left behind are swept, once they are old.
 // On Windows a rename over a file another process has open, and a read of a file being renamed,
 // can fail for a moment (EPERM, EBUSY, EACCES): both are retried.
 //
 // Imports explicit `.ts` files only: the command line loads it under plain Node.
 import { randomBytes } from 'node:crypto'
-import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
+import { link, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, posix, win32 } from 'node:path'
 
@@ -36,16 +41,34 @@ export const LOCK_TIMEOUT_MS = 10_000
 export const STALE_LOCK_MS = 30_000
 
 /**
+ * Whether this process runs under a test runner: Node's (`node --test` and `orca plugin test`
+ * set `NODE_TEST_CONTEXT` in each test process) or vitest.
+ */
+export function underTestRunner(env: Record<string, string | undefined> = process.env): boolean {
+  return env.NODE_TEST_CONTEXT !== undefined || env.VITEST !== undefined
+}
+
+/**
  * The data folder, from the home folder only: the worker runs with a trimmed environment (no
  * `APPDATA`, maybe no `XDG_DATA_HOME`), and the worker and the command line must agree on it.
  * Windows `%APPDATA%\orca-sfcc-tools` as it is by default (`~\AppData\Roaming`), macOS
  * `~/Library/Application Support/orca-sfcc-tools`, Linux `~/.local/share/orca-sfcc-tools` (the
  * default `$XDG_DATA_HOME`). `ORCA_SFCC_TOOLS_DATA`, when set to an absolute folder, replaces it.
+ *
+ * Under a test runner the person's own folder is refused (`data_folder_in_test`) unless the
+ * override is set: no test may read or write the real seen list, even by accident. `testing`
+ * says whether that holds; by default, whether this process runs under one.
  */
-export function dataFolder({ platform = process.platform, home = homedir(), env = process.env }: { platform?: string; home?: string; env?: Record<string, string | undefined> } = {}): string {
+export function dataFolder({
+  platform = process.platform,
+  home = homedir(),
+  env = process.env,
+  testing = underTestRunner()
+}: { platform?: string; home?: string; env?: Record<string, string | undefined>; testing?: boolean } = {}): string {
   const path = platform === 'win32' ? win32 : posix
   const override = env[DATA_FOLDER_ENV]
   if (override && path.isAbsolute(override)) return override
+  if (testing) throw new DataFileError('data_folder_in_test')
   if (platform === 'win32') return win32.join(home, 'AppData', 'Roaming', APP_FOLDER)
   if (platform === 'darwin') return posix.join(home, 'Library', 'Application Support', APP_FOLDER)
   return posix.join(home, '.local', 'share', APP_FOLDER)
@@ -56,7 +79,7 @@ export type DataFile<T> = { version: typeof DATA_VERSION; roles: Record<string, 
 
 /** Why a data file could not be used. Its message is the code and nothing else: never a path. */
 export class DataFileError extends Error {
-  readonly code: 'data_file_invalid' | 'data_file_version' | 'lock_timeout' | 'data_file_failed'
+  readonly code: 'data_file_invalid' | 'data_file_version' | 'lock_timeout' | 'data_file_failed' | 'data_folder_in_test'
   constructor(code: DataFileError['code']) {
     super(code)
     this.name = 'DataFileError'
@@ -75,6 +98,10 @@ export type DataIo = {
   unlink(path: string): Promise<void>
   modifiedAt(path: string): Promise<number>
   mkdir(path: string): Promise<void>
+  /** Gives `from` a second name `to`, failing (EEXIST) when that name is taken: never replaces a file. */
+  linkExclusive(from: string, to: string): Promise<void>
+  /** The names in a folder. */
+  list(path: string): Promise<string[]>
 }
 
 export const NODE_IO: DataIo = {
@@ -99,7 +126,9 @@ export const NODE_IO: DataIo = {
   rename: (from, to) => rename(from, to),
   unlink: (path) => unlink(path),
   modifiedAt: async (path) => (await stat(path)).mtimeMs,
-  mkdir: async (path) => void (await mkdir(path, { recursive: true }))
+  mkdir: async (path) => void (await mkdir(path, { recursive: true })),
+  linkExclusive: (from, to) => link(from, to),
+  list: (path) => readdir(path)
 }
 
 export type DataFileOptions = { io?: DataIo; now?: () => number; lockTimeoutMs?: number; staleLockMs?: number }
@@ -150,6 +179,53 @@ export async function readDataFile<T>(path: string, { io = NODE_IO }: DataFileOp
   return parse<T>(text)
 }
 
+/** The lock's token and when it last changed, or null when there is none. */
+async function lockState(lockPath: string, io: DataIo): Promise<{ token: string; modified: number } | null> {
+  try {
+    const modified = await io.modifiedAt(lockPath)
+    const token = await io.readText(lockPath)
+    return { token, modified }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Removes the lock `seen` names, if it is still that same stale lock: under the breaker lock, so
+ * two writers never take over at once, and by renaming it to a name of this writer's own first,
+ * so what is removed is exactly what was checked. A lock moved by mistake is put back.
+ */
+async function takeOver(lockPath: string, seen: { token: string }, io: DataIo, now: () => number, staleMs: number, token: string): Promise<void> {
+  const breaker = `${lockPath}.break`
+  try {
+    await io.createExclusive(breaker, token)
+  } catch (error) {
+    // Another writer is taking it over, or died doing so long ago.
+    if (codeOf(error) !== 'EEXIST') return
+    const modified = await io.modifiedAt(breaker).catch(() => null)
+    if (modified !== null && now() - modified > staleMs) await io.unlink(breaker).catch(() => undefined)
+    return
+  }
+  try {
+    const current = await lockState(lockPath, io)
+    // Released, or taken by a live writer since it was seen: nothing to take over.
+    if (!current || current.token !== seen.token || now() - current.modified <= staleMs) return
+    const moved = `${lockPath}.${token}.stale`
+    try {
+      await io.rename(lockPath, moved)
+    } catch {
+      return
+    }
+    const taken = await io.readText(moved).catch(() => null)
+    // Not the lock that was checked: give it back, unless its place is taken again.
+    if (taken !== seen.token) await io.linkExclusive(moved, lockPath).catch(() => undefined)
+    await io.unlink(moved).catch(() => undefined)
+  } finally {
+    const held = await io.readText(breaker).catch(() => null)
+    if (held === token) await io.unlink(breaker).catch(() => undefined)
+  }
+}
+
 /** Takes the lock of `path`; answers its token, which releasing checks. */
 async function lock(path: string, io: DataIo, now: () => number, timeoutMs: number, staleMs: number): Promise<string> {
   const lockPath = `${path}.lock`
@@ -168,14 +244,27 @@ async function lock(path: string, io: DataIo, now: () => number, timeoutMs: numb
       if (codeOf(error) !== 'EEXIST' && !TRANSIENT.has(codeOf(error) as string)) throw new DataFileError('data_file_failed')
     }
     // Held. A lock that has not changed for `staleMs` belongs to a process that died holding it.
-    const modified = await io.modifiedAt(lockPath).catch(() => null)
-    if (modified !== null && now() - modified > staleMs) {
-      await io.unlink(lockPath).catch(() => undefined)
-      continue
-    }
+    const held = await lockState(lockPath, io)
+    if (held !== null && now() - held.modified > staleMs) await takeOver(lockPath, held, io, now, staleMs, token)
     if (now() >= deadline) throw new DataFileError('lock_timeout')
     // Short and jittered, so a waiting writer is not starved by one that keeps writing.
     await pause(1 + Math.random() * Math.min(20, 2 + attempt))
+  }
+}
+
+/**
+ * Removes the temporary files of `path` that a writer killed between its write and its rename
+ * left behind, once older than `staleMs`. Runs under the lock; never fails the write.
+ */
+async function sweepTemps(path: string, io: DataIo, now: () => number, staleMs: number): Promise<void> {
+  const folder = dirname(path)
+  const prefix = `${path.slice(folder.length + 1)}.`
+  const names = await io.list(folder).catch(() => [] as string[])
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue
+    const temp = join(folder, name)
+    const modified = await io.modifiedAt(temp).catch(() => null)
+    if (modified !== null && now() - modified > staleMs) await io.unlink(temp).catch(() => undefined)
   }
 }
 
@@ -209,6 +298,7 @@ export async function updateDataFile<T>(
       await io.unlink(temp).catch(() => undefined)
       throw error instanceof DataFileError ? error : new DataFileError('data_file_failed')
     }
+    await sweepTemps(path, io, now, staleLockMs)
     return next
   } finally {
     await unlock(path, token, io)
@@ -232,31 +322,45 @@ function roleOfKey(key: string): string {
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json }
 
 /**
+ * What a write finds in place of a `seen.json` that does not exist yet: the lists an older version
+ * kept elsewhere (the worker's storage), or null. Asked before each write, outside the lock;
+ * `seeded` is told when a write did create the file from them.
+ */
+export type SeenSeed = { roles(): Promise<Record<string, Json> | null>; seeded?(): Promise<void> }
+
+/**
  * The seen list's store over `seen.json`: each role's table is one value of `roles`. A read of a
  * file that is missing gives the fallback; one that is not a seen list of this version throws and
- * is never overwritten. Every change goes through `updateDataFile`, under the lock.
+ * is never overwritten. Every change goes through `updateDataFile`, under the lock. A write that
+ * finds no file starts from `seed`, so lists kept elsewhere are never lost to the first write.
  */
-export function createSeenFileStore(path: string, options: DataFileOptions = {}) {
+export function createSeenFileStore(path: string, options: DataFileOptions & { seed?: SeenSeed } = {}) {
+  async function write(role: string, change: (current: Json | null) => Json | undefined): Promise<void> {
+    const seed = options.seed ? await options.seed.roles() : null
+    let seeded = false
+    await updateDataFile<Json>(
+      path,
+      (found) => {
+        let current = found
+        if (current === null && seed && Object.keys(seed).length > 0) {
+          current = { version: DATA_VERSION, roles: { ...seed } }
+          seeded = true
+        }
+        const next = change(current?.roles[role] ?? null)
+        if (next === undefined) return seeded && current ? current : undefined
+        return { version: DATA_VERSION, roles: { ...(current?.roles ?? {}), [role]: next } }
+      },
+      options
+    )
+    if (seeded) await options.seed?.seeded?.()
+  }
   return {
     async get<T extends Json>(key: string, fallback: T): Promise<T> {
       const file = await readDataFile<Json>(path, options)
       const value = file?.roles[roleOfKey(key)]
       return value === undefined || value === null ? fallback : (value as T)
     },
-    async set(key: string, value: Json): Promise<void> {
-      const role = roleOfKey(key)
-      await updateDataFile<Json>(path, (current) => ({ version: DATA_VERSION, roles: { ...(current?.roles ?? {}), [role]: value } }), options)
-    },
-    async update(key: string, change: (current: Json | null) => Json | undefined): Promise<void> {
-      const role = roleOfKey(key)
-      await updateDataFile<Json>(
-        path,
-        (current) => {
-          const next = change(current?.roles[role] ?? null)
-          return next === undefined ? undefined : { version: DATA_VERSION, roles: { ...(current?.roles ?? {}), [role]: next } }
-        },
-        options
-      )
-    }
+    set: (key: string, value: Json) => write(roleOfKey(key), () => value),
+    update: (key: string, change: (current: Json | null) => Json | undefined) => write(roleOfKey(key), change)
   }
 }

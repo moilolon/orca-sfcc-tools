@@ -4,12 +4,13 @@
 // is a temporary one.
 import { assert, test } from 'orca/testing'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   createSeenFileStore,
+  underTestRunner,
   DATA_FOLDER_ENV,
   DataFileError,
   dataFiles,
@@ -21,6 +22,8 @@ import {
   type DataFile
 } from './data-folder'
 import { createSeenList, type Sample } from './seen'
+// Gives this test process its throwaway data folder, as every worker test gets one.
+import '../../core/test-support'
 
 function folder(): string {
   return mkdtempSync(join(tmpdir(), 'sfcc-tools-data-test-'))
@@ -38,13 +41,15 @@ function bump(path: string, key: string) {
 }
 
 test('the data folder is the system’s own folder for application data, from the home folder only', () => {
-  assert.equal(dataFolder({ platform: 'win32', home: 'C:\\Users\\someone', env: {} }), 'C:\\Users\\someone\\AppData\\Roaming\\orca-sfcc-tools')
-  assert.equal(dataFolder({ platform: 'darwin', home: '/Users/someone', env: {} }), '/Users/someone/Library/Application Support/orca-sfcc-tools')
-  assert.equal(dataFolder({ platform: 'linux', home: '/home/someone', env: {} }), '/home/someone/.local/share/orca-sfcc-tools')
+  // Outside a test runner (`testing: false`); the invented home folders are never touched.
+  const outside = { testing: false }
+  assert.equal(dataFolder({ ...outside, platform: 'win32', home: 'C:\\Users\\someone', env: {} }), 'C:\\Users\\someone\\AppData\\Roaming\\orca-sfcc-tools')
+  assert.equal(dataFolder({ ...outside, platform: 'darwin', home: '/Users/someone', env: {} }), '/Users/someone/Library/Application Support/orca-sfcc-tools')
+  assert.equal(dataFolder({ ...outside, platform: 'linux', home: '/home/someone', env: {} }), '/home/someone/.local/share/orca-sfcc-tools')
   // The worker has no APPDATA: the command line, which has, must find the same folder.
-  assert.equal(dataFolder({ platform: 'win32', home: 'C:\\Users\\someone', env: { APPDATA: 'D:\\Elsewhere' } }), 'C:\\Users\\someone\\AppData\\Roaming\\orca-sfcc-tools')
-  assert.equal(dataFolder({ platform: 'linux', home: '/home/someone', env: { [DATA_FOLDER_ENV]: '/tmp/data' } }), '/tmp/data')
-  assert.equal(dataFolder({ platform: 'linux', home: '/home/someone', env: { [DATA_FOLDER_ENV]: 'relative' } }), '/home/someone/.local/share/orca-sfcc-tools', 'only an absolute override')
+  assert.equal(dataFolder({ ...outside, platform: 'win32', home: 'C:\\Users\\someone', env: { APPDATA: 'D:\\Elsewhere' } }), 'C:\\Users\\someone\\AppData\\Roaming\\orca-sfcc-tools')
+  assert.equal(dataFolder({ ...outside, platform: 'linux', home: '/home/someone', env: { [DATA_FOLDER_ENV]: '/tmp/data' } }), '/tmp/data')
+  assert.equal(dataFolder({ ...outside, platform: 'linux', home: '/home/someone', env: { [DATA_FOLDER_ENV]: 'relative' } }), '/home/someone/.local/share/orca-sfcc-tools', 'only an absolute override')
   assert.deepEqual(dataFiles('/data'), { seen: join('/data', 'seen.json'), report: join('/data', 'report.json') })
 })
 
@@ -257,4 +262,119 @@ test('data-folder.ts loads under plain Node: it imports only Node and explicit .
   const source = readFileSync(fileURLToPath(new URL('./data-folder.ts', import.meta.url)), 'utf8')
   const imports = [...source.matchAll(/from\s*['"]([^'"]+)['"]/g)].map((match) => match[1])
   for (const spec of imports) assert.ok(spec.startsWith('node:') || spec.endsWith('.ts'), spec)
+})
+
+test('under the test runner the real data folder is refused unless the override is set', () => {
+  // This file runs under the test runner, and its process has the override test-support sets.
+  assert.equal(underTestRunner(), true)
+  assert.ok(process.env[DATA_FOLDER_ENV], 'every test process has its own throwaway folder')
+  assert.notEqual(dataFolder(), dataFolder({ testing: false, env: {} }), 'never the real folder')
+  for (const env of [{}, { [DATA_FOLDER_ENV]: '' }, { [DATA_FOLDER_ENV]: 'relative' }]) {
+    assert.throws(
+      () => dataFolder({ env }),
+      (error: unknown) => error instanceof DataFileError && error.code === 'data_folder_in_test' && error.message === 'data_folder_in_test'
+    )
+  }
+  assert.equal(underTestRunner({}), false, 'Orca\'s worker and the command line are not under one')
+  assert.equal(underTestRunner({ NODE_TEST_CONTEXT: 'child-v8' }), true)
+  assert.equal(underTestRunner({ VITEST: 'true' }), true)
+})
+
+test('a stale lock is taken over atomically: a writer that saw it stale never removes the fresh lock another took', async () => {
+  const root = folder()
+  try {
+    const path = join(root, 'seen.json')
+    const lockPath = `${path}.lock`
+    writeFileSync(lockPath, 'dead-writer')
+    const old = (Date.now() - STALE_LOCK_MS - 5_000) / 1000
+    utimesSync(lockPath, old, old)
+    let inside = 0
+    let most = 0
+    let release!: () => void
+    const aInside = new Promise<void>((resolve) => (release = resolve))
+    let bTried!: () => void
+    const bHasTried = new Promise<void>((resolve) => (bTried = resolve))
+    const timeout = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+    // A holds the lock until B has had its go at the stale lock it saw.
+    const ioA = {
+      ...NODE_IO,
+      async writeTemp(temp: string, text: string) {
+        inside++
+        most = Math.max(most, inside)
+        release()
+        await Promise.race([bHasTried, timeout(2_000)])
+        await NODE_IO.writeTemp(temp, text)
+        inside--
+      }
+    }
+    // B sees the dead lock as stale, then is held up until A has taken it over.
+    let bStats = 0
+    const ioB = {
+      ...NODE_IO,
+      async modifiedAt(target: string) {
+        const modified = await NODE_IO.modifiedAt(target)
+        if (target === lockPath && ++bStats === 1) await aInside
+        else if (target === lockPath && bStats === 2) bTried()
+        return modified
+      },
+      async writeTemp(temp: string, text: string) {
+        inside++
+        most = Math.max(most, inside)
+        await NODE_IO.writeTemp(temp, text)
+        inside--
+      }
+    }
+    const increment = (io: typeof NODE_IO) =>
+      updateDataFile<number>(path, (current) => ({ version: 1, roles: { count: (current?.roles.count ?? 0) + 1 } }), { io })
+    const b = increment(ioB)
+    await timeout(20)
+    const a = increment(ioA)
+    await Promise.all([a, b])
+    assert.equal(most, 1, 'never two writers inside at once')
+    assert.deepEqual(await readDataFile(path), { version: 1, roles: { count: 2 } })
+    assert.deepEqual(readdirSync(root), ['seen.json'], 'no lock, breaker or moved lock is left')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a write that finds no seen.json starts from the seed, and says it did; one that finds the file does not', async () => {
+  const root = folder()
+  try {
+    const { seen: path } = dataFiles(root)
+    const old = { aaaa: { firstSeen: 1, lastSeen: 2, count: 1, markedAt: 2, sample: { message: 'old', logger: null, frames: [] } } }
+    let seeded = 0
+    const seed = { roles: async () => ({ sandbox: old }), seeded: async () => void seeded++ }
+    const seen = createSeenList(createSeenFileStore(path, { seed }))
+    await seen.record('sandbox', [{ signature: 'bbbb', at: 5, sample: SAMPLE }])
+    assert.deepEqual((await seen.list('sandbox')).map((row) => [row.signature, row.markedAt ?? null]), [['bbbb', null], ['aaaa', 2]])
+    assert.equal(seeded, 1)
+    await seen.record('sandbox', [{ signature: 'cccc', at: 6, sample: SAMPLE }])
+    assert.equal(seeded, 1, 'the file is there: the seed is not used again')
+    // Marking nothing writes nothing, so it creates no file either.
+    const other = dataFiles(folder()).seen
+    await createSeenList(createSeenFileStore(other)).mark('sandbox', ['zzzz'], 1)
+    assert.equal(existsSync(other), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a temporary file a writer killed before its rename left behind is swept once old', async () => {
+  const root = folder()
+  try {
+    const path = join(root, 'seen.json')
+    const left = `${path}.4242.abcdef.tmp`
+    const fresh = `${path}.4243.abcdef.tmp`
+    writeFileSync(left, '{"version":1,"roles":{"sandbox":"ha')
+    writeFileSync(fresh, '{')
+    const old = (Date.now() - STALE_LOCK_MS - 5_000) / 1000
+    utimesSync(left, old, old)
+    writeFileSync(join(root, 'report.json.4242.abcdef.tmp'), 'not mine')
+    utimesSync(join(root, 'report.json.4242.abcdef.tmp'), old, old)
+    await updateDataFile<number>(path, () => ({ version: 1, roles: { sandbox: 1 } }))
+    assert.deepEqual(readdirSync(root).sort(), ['report.json.4242.abcdef.tmp', 'seen.json', 'seen.json.4243.abcdef.tmp'], 'only its own old ones; one that may still be written stays')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

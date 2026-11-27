@@ -156,9 +156,13 @@ async function readNow(worker: TestWorker, { role }: { role: Role }): Promise<Ro
   return readEnded(worker, role)
 }
 
-/** Lets the worker run until `done` holds; fails after a while. */
+/**
+ * Lets the worker run until `done` holds; fails after 2,000 turns of the event loop and at least
+ * five seconds, since the seen list waits on the disk too.
+ */
 async function until(done: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 2_000 && !done(); i++) await new Promise((resolve) => setImmediate(resolve))
+  const end = Date.now() + 5_000
+  for (let i = 0; (i < 2_000 || Date.now() < end) && !done(); i++) await new Promise((resolve) => setImmediate(resolve))
   assert.ok(done(), what)
   await settle()
 }
@@ -556,8 +560,9 @@ test('the status bar counts the sandbox’s new errors, hidden at zero', async (
   const root = makeWorkspace()
   try {
     const { worker } = await mountPiece(hostFor(root), b2cAnswering())
-    await settle()
     const updates = () => paramsOf(worker.host, 'statusBar.update') as { id: string; text: string; visible: boolean }[]
+    // The first count waits for the seen list's one-time copy.
+    await waitFor(() => updates().length > 0, 'the first count')
     assert.deepEqual(updates().at(-1), { id: STATUS_ITEM, text: '0', tooltip: 'New errors on the sandbox: 0', visible: false })
     const list = await readNow(worker, { role: 'sandbox' })
     // The count is read from the data folder once the read ended: it follows a moment after.
@@ -667,14 +672,14 @@ test('the timer reads the sandbox every interval and never overlaps two reads', 
     pending.shift()?.child.finish(0, JSON.stringify(LOGS_GET))
     const list = await readEnded(worker, 'sandbox')
     assert.equal(list.rows.length, 5)
-    await until(() => live().length === 1, 'the next tick is scheduled once the read ended')
+    await waitFor(() => live().length === 1, 'the next tick is scheduled once the read ended')
     assert.equal(live()[0].ms, 5 * 60_000)
 
     live()[0].run()
     await until(() => logsCalls().length === 2, 'the second tick reads')
     assert.deepEqual(logsCalls().map((call) => call.options.env.SFCC_SERVER), [INVENTED_DW.hostname, INVENTED_DW.hostname])
     pending.shift()?.child.finish(0, JSON.stringify({ entries: [] }))
-    await until(() => live().length === 1, 'and schedules the third')
+    await waitFor(() => live().length === 1, 'and schedules the third')
     await worker.deactivate()
     assert.equal(live().length, 0, 'disposing clears the timer')
   } finally {
@@ -974,6 +979,30 @@ test('with nothing in storage to copy, starting writes nothing to the data folde
     const { worker } = await mountPiece(host, b2cAnswering())
     await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
     assert.deepEqual(readdirSync(dataFolderOf(host)), [])
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a mark right after the start waits for the copy: the old marks are never lost to it', async () => {
+  const root = makeWorkspace()
+  try {
+    const old = { firstSeen: 1, lastSeen: 2, count: 3, markedAt: 2, sample: { message: 'Old error', logger: null, frames: [] } }
+    const fresh = { firstSeen: 5, lastSeen: 6, count: 1, sample: { message: 'Old new error', logger: null, frames: [] } }
+    const host = hostFor(root, {}, { 'errors.seen.sandbox': { aaaa: old, bbbb: fresh } } as unknown as Record<string, never>)
+    const { worker } = await mountPiece(host, b2cAnswering())
+    // At once, before the copy could have ended: the view was open while the worker restarted.
+    const [marked, unknown] = await Promise.all([
+      worker.request('errors.mark', { role: 'sandbox', signatures: ['bbbb'] }),
+      worker.request('errors.mark', { role: 'staging', signatures: ['nothing'] })
+    ])
+    assert.deepEqual(marked.rows.map((row) => [row.signature, row.markedAt === null]), [['bbbb', false], ['aaaa', false]], 'both marked, newest first')
+    assert.equal(unknown.rows.length, 0)
+    const file = seenFileOf(host)
+    assert.equal(file?.roles.sandbox.aaaa !== undefined, true, 'the old mark is in seen.json')
+    assert.deepEqual(Object.keys(file?.roles ?? {}), ['sandbox'], 'marking nothing wrote nothing')
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })

@@ -79,13 +79,20 @@ Changing it needs the owner's yes.
       no lock): it is `seen.json` in the plugin's data folder (`data-folder.ts`: `%APPDATA%`, that
       is `~\AppData\Roaming`, `~/Library/Application Support` or `~/.local/share`, then
       `orca-sfcc-tools`, from the home folder only, since the worker has no `APPDATA`;
-      `ORCA_SFCC_TOOLS_DATA` overrides it for tests, and every test that starts the piece sets it
-      or the piece's `dataFolder`), `{ version: 1, roles: { <role>: table } }`, shared by every
-      copy of the plugin, written by the worker only, under an exclusive lock file (stale after
-      30 s) and an atomic rename, read by anyone. A file that does not parse is refused, never
-      read as empty or overwritten. On its first start the piece copies the `errors.seen.<role>`
-      keys of storage into it, once (`seenMoved` in storage), only when the file does not exist,
-      and leaves storage alone. The cursors and the state of each read stay in storage. A read
+      `ORCA_SFCC_TOOLS_DATA` overrides it: `src/core/test-support.ts` sets it to a throwaway
+      folder in every test process that loads it, and **under a test runner the real folder is
+      refused** (`data_folder_in_test`) unless the override is set, so no test can touch the
+      owner's list; a test that does not load test-support sets it or the piece's `dataFolder`),
+      `{ version: 1, roles: { <role>: table } }`, shared by every copy of the plugin, written by
+      the worker only, under an exclusive lock file and an atomic rename, read by anyone. A lock
+      older than 30 s is taken over atomically (under a second `wx` lock, `.lock.break`, checked
+      again, renamed to a name of the writer's own, then removed), and old temporary files a
+      killed writer left are swept. A file that does not parse is refused, never read as empty or
+      overwritten. On its first start the piece copies the `errors.seen.<role>` keys of storage
+      into it, once (`seenMoved` in storage), only when the file does not exist, and leaves
+      storage alone; every read and write of the seen list waits for that copy, and a write that
+      still finds no file starts from those keys, so no mark is lost to it. Marking nothing writes
+      nothing. The cursors and the state of each read stay in storage. A read
       stores per signature
       only its counters and a masked, bounded sample (the normalised first line, the logger, the
       pipeline or controller, the level and the top frames; never the site, which names the
@@ -122,9 +129,12 @@ Changing it needs the owner's yes.
       default suffixes, so `dw-config.ts` stays the only reader and values reach `b2c` only in
       the child's environment; the path is never printed. It reads `seen.json` and never writes
       it (recording there would count the panel's entries twice); its own cursor is
-      `report.json` beside it (`{ version: 1, roles: { <role>: { lastReportAt, reported } } }`,
-      locked and atomic too), moved only after a report was printed whole and only for a role
-      read. It prints per role what is new since the last report and what is still unmarked:
+      `report.json` beside it (`{ version: 1, roles: { <role>: { lastReportAt, reported,
+      counted } } }`, locked and atomic too), moved only after a report was printed whole and
+      only for a role read. `lastReportAt` is the newest entry's own time (GMT), never the
+      machine's clock; a report reads from five minutes before it (an entry another server
+      flushed late is still read) and skips what `counted` (signature and time of the entries in
+      that overlap) says the last report already counted. It prints per role what is new since the last report and what is still unmarked:
       short signature, count, first and last time, the masked normalised message, the logger and
       the top frame's file and function (the pipeline without one); never a raw entry, the rest
       of a stack, the site or a host. Exit 0 with a report, 1 when a role, the seen list or the

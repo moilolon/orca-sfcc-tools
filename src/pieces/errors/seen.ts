@@ -180,11 +180,16 @@ export function createSeenList(store: SeenStore): SeenList {
     mark: (role, signatures, at) =>
       serial(role, () =>
         change(role, (table) => {
+          let changed = false
           for (const signature of signatures) {
             const known = table[signature]
-            if (known && known.markedAt === undefined) known.markedAt = at
+            if (known && known.markedAt === undefined) {
+              known.markedAt = at
+              changed = true
+            }
           }
-          return true
+          // Marking nothing writes nothing.
+          return changed
         })
       ),
     forget: (role, signature) =>
