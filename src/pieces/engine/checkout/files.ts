@@ -20,7 +20,7 @@ export interface CheckoutFiles {
 /** Folders never read: tools' own state and installed packages. Any folder whose name starts with a dot is skipped too. */
 export const SKIPPED_FOLDERS: ReadonlySet<string> = new Set(['node_modules', 'bower_components'])
 
-/** How deep the walk goes below the root, and how many files it keeps: a bound, never a guess at a layout. */
+/** How deep the walk goes below the root, and how many files it keeps: bounds, not assumptions about a layout. */
 export const MAX_WALK_DEPTH = 24
 export const MAX_FILES = 250_000
 
