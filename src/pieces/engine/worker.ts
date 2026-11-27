@@ -3,10 +3,13 @@
 //
 // The index is built off the request path: `engine.index.status` answers at once with what is
 // there and, when the workspace to index changed, starts a build without waiting for it. A
-// watcher of the workspace's folder hands each changed path to the index, gathered for
-// `DEBOUNCE_MS`; a change under `.git/` that may move a ref reads the `metadataRef` ref again. A
-// few indexes are kept per workspace, so going back to one reads only the files whose time
-// changed. The two settings, `cartridgePath` and `metadataRef`, rebuild the paths when changed.
+// watcher of the workspace's folder hands the changed paths to the index once no change came for
+// `DEBOUNCE_MS`, and at the latest `MAX_WAIT_MS` after the first one. A change under `.git/` that
+// may move a ref asks whether the `metadataRef` ref moved; so does a timer every `REF_CHECK_MS`,
+// for a worktree (whose refs live in the main checkout, outside the folder watched) or a
+// workspace below its repository's root. A few indexes are kept per workspace, so going back to
+// one reads only the files whose time changed. The two settings, `cartridgePath` and
+// `metadataRef`, rebuild the paths when changed.
 import { readFile } from 'node:fs/promises'
 import type { Disposable, PieceContext, WorkerPiece, Workspace } from '../../core/piece'
 import { isLocal } from '../../core/workspaces'
@@ -21,8 +24,12 @@ import type { EngineIndexStatus } from './protocol'
 export const SETTING_CARTRIDGE_PATH = 'cartridgePath'
 export const SETTING_METADATA_REF = 'metadataRef'
 
-/** How long changed paths are gathered before the index takes them in. */
+/** How long the watcher must be quiet before the changed paths are taken in; each change restarts it. */
 export const DEBOUNCE_MS = 300
+/** The longest changed paths wait while changes keep coming (a long branch switch). */
+export const MAX_WAIT_MS = 3_000
+/** How often the `metadataRef` ref is asked whether it moved (one `rev-parse`; read again only if it did). */
+export const REF_CHECK_MS = 60_000
 /** How long after the worker starts the first build begins, so it never slows the start. */
 export const START_DELAY_MS = 2_000
 /** Indexes kept for workspaces no longer indexed, the most recent first. */
@@ -36,6 +43,7 @@ export type EngineDeps = {
   dw?: () => Promise<((module: string) => string | null) | null>
   setTimer?: (run: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
+  now?: () => number
 }
 
 /** The committed `dw.*` index, loaded once: a `dw/…` module path to the id of its class or package (`require('dw/system')`). */
@@ -70,6 +78,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
   const dwLoader = deps.dw ?? loadDw
   const setTimer = deps.setTimer ?? ((run, ms) => setTimeout(run, ms))
   const clearTimer = deps.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
+  const now = deps.now ?? (() => Date.now())
 
   return {
     id: 'engine',
@@ -82,6 +91,9 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
       let pending = new Set<string>()
       let refChanged = false
       let flushTimer: unknown = null
+      /** When the first change of the batch being gathered came. */
+      let firstChangeAt: number | null = null
+      let refTimer: unknown = null
       let dw: Promise<((module: string) => string | null) | null> | null = null
       let retargeting: Promise<void> | null = null
 
@@ -117,12 +129,14 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         watcher = null
         if (flushTimer !== null) clearTimer(flushTimer)
         flushTimer = null
+        firstChangeAt = null
         pending = new Set()
         refChanged = false
       }
 
       function flush(): void {
         flushTimer = null
+        firstChangeAt = null
         const entry = current
         if (!entry || disposed) return
         const paths = [...pending]
@@ -137,7 +151,22 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         if (/^\.git\/(HEAD|packed-refs|refs\/)/.test(path)) refChanged = true
         else if (skippedPath(path)) return
         else pending.add(path)
-        if (flushTimer === null) flushTimer = setTimer(flush, DEBOUNCE_MS)
+        // A debounce: each change restarts the wait, bounded by `MAX_WAIT_MS` from the first one.
+        const at = now()
+        firstChangeAt ??= at
+        if (flushTimer !== null) clearTimer(flushTimer)
+        flushTimer = setTimer(flush, Math.max(0, Math.min(DEBOUNCE_MS, firstChangeAt + MAX_WAIT_MS - at)))
+      }
+
+      /** Asks, every `REF_CHECK_MS`, whether the ref moved: a worktree's refs are not in the folder watched. */
+      function scheduleRefCheck(): void {
+        refTimer = setTimer(() => {
+          refTimer = null
+          if (disposed) return
+          const entry = current
+          if (entry && entry.built) run(entry, () => entry.index.refreshRef(), false)
+          scheduleRefCheck()
+        }, REF_CHECK_MS)
       }
 
       function startWatching(entry: Entry): void {
@@ -209,6 +238,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
       }
 
       const startTimer = setTimer(() => void retargetOnce().catch(() => undefined), START_DELAY_MS)
+      scheduleRefCheck()
       const disposables: Disposable[] = [
         ctx.orca.panels.handle('engine.index.status', async () => {
           try {
@@ -231,6 +261,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         dispose() {
           disposed = true
           clearTimer(startTimer)
+          if (refTimer !== null) clearTimer(refTimer)
           stopWatching()
           current = null
           entries.length = 0

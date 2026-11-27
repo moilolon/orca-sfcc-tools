@@ -14,7 +14,7 @@ import type { CheckoutFiles } from './checkout/files'
 import { MemoryFiles } from './checkout/memory'
 import { fixtureFiles, FakeRef } from './checkout/testing'
 import type { EngineIndexStatus } from './protocol'
-import { createEnginePiece, DEBOUNCE_MS, loadDw, START_DELAY_MS, type EngineDeps } from './worker'
+import { createEnginePiece, DEBOUNCE_MS, loadDw, MAX_WAIT_MS, REF_CHECK_MS, START_DELAY_MS, type EngineDeps } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const SHOP = { id: 'w-shop', kind: 'worktree', name: 'Shop', path: 'C:/work/shop', branch: 'main', hostId: 'local' }
@@ -214,4 +214,45 @@ test('the committed dw.* index answers a class and a package, as require(“dw/�
   assert.equal(lookup('dw/catalog/ProductMgr'), 'dw.catalog.ProductMgr')
   assert.equal(lookup('dw/system'), 'dw.system')
   assert.equal(lookup('dw/nothing/Here'), null)
+})
+
+test('the watcher’s changes are debounced: each change restarts the wait, and MAX_WAIT_MS bounds it', async () => {
+  let clock = 0
+  const files = fixtureFiles()
+  const { ready, watched, timers } = await mount(hostFor('w-shop'), { 'C:/work/shop': files }, { now: () => clock })
+  await ready()
+  const live = () => timers.filter((timer) => !timer.cleared && timer.ms !== REF_CHECK_MS && timer.ms !== START_DELAY_MS)
+  const watcher = watched[0]
+  watcher.onChange('cartridges/app_garden_base/cartridge/scripts/a.js')
+  assert.deepEqual(live().map((timer) => timer.ms), [DEBOUNCE_MS])
+  clock = 200
+  watcher.onChange('cartridges/app_garden_base/cartridge/scripts/b.js')
+  // The first wait was cancelled, a new full one started.
+  assert.deepEqual(live().map((timer) => timer.ms), [DEBOUNCE_MS])
+  // Changes keep coming: the wait shrinks so the batch is taken in MAX_WAIT_MS after its first change.
+  clock = MAX_WAIT_MS - 100
+  watcher.onChange('cartridges/app_garden_base/cartridge/scripts/c.js')
+  assert.deepEqual(live().map((timer) => timer.ms), [100])
+  clock = MAX_WAIT_MS + 50
+  watcher.onChange('cartridges/app_garden_base/cartridge/scripts/d.js')
+  assert.deepEqual(live().map((timer) => timer.ms), [0])
+})
+
+test('a timer asks every REF_CHECK_MS whether the ref moved: a worktree’s refs are not in the folder watched', async () => {
+  const files = fixtureFiles()
+  files.delete('sites')
+  const commit = 'a'.repeat(40)
+  const ref = new FakeRef({ 'origin/main': commit }, { [commit]: { 'sites/x/sites/Shop/site.xml': '<site site-id="Shop"><custom-cartridges>app_garden_base</custom-cartridges></site>' } })
+  const { ready, fire } = await mount(hostFor('w-shop', { metadataRef: 'origin/main' }), { 'C:/work/shop': files }, { git: () => ref })
+  assert.deepEqual((await ready()).index?.storefronts.map((s) => s.cartridges), [['app_garden_base']])
+  const before = ref.calls.length
+  fire(REF_CHECK_MS)
+  await settle()
+  assert.deepEqual(ref.calls.slice(before), ['commit origin/main'])
+  const moved = 'b'.repeat(40)
+  ref.commits['origin/main'] = moved
+  ref.trees[moved] = { 'sites/x/sites/Shop/site.xml': '<site site-id="Shop"><custom-cartridges>app_garden_core:app_garden_base</custom-cartridges></site>' }
+  fire(REF_CHECK_MS)
+  await settle()
+  assert.deepEqual((await ready()).index?.storefronts.map((s) => s.cartridges), [['app_garden_core', 'app_garden_base']])
 })
