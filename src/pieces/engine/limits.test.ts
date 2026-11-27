@@ -1,8 +1,11 @@
 // Inputs that once broke the syntax layer, from the review of phase 6.2: a tree as deep as its
 // input, nesting past the parsers' bounds, and runs of unclosed constructs that cost quadratic
-// time. Each must finish, keep what follows, and take time linear in its size.
+// time. Each must finish, keep what follows, and take time linear in its size: by the work the
+// parsers count, and by the clock.
 import { assert, test } from 'orca/testing'
 import { parseScript, parseTemplate, scriptFacts, templateScript, walk } from './index'
+import { timed, settledTime, settledTimes } from './fixtures/timing'
+import { countWork, workCounted } from './work'
 
 test('a 20,000-link else-if chain: facts walk it without recursion, and see every name', () => {
   let text = 'if (a) {}'
@@ -37,36 +40,44 @@ test('a 100,000-link chain past the bound reports too_deep once', () => {
   assert.ok(problems.length < 20, `${problems.length} problems`)
 })
 
-/** One run, in milliseconds. */
-function time1(run: () => void): number {
-  const started = performance.now()
-  run()
-  return performance.now() - started
+// Linear time, proved twice. Without a clock: the parsers count the characters their scans read
+// and the steps of the facts (./work.ts), so a shape's count at four times the size is about four
+// times its count, and a text's count is a small multiple of its length, the same on any machine
+// however busy. With a clock: the processor time of this thread (./fixtures/timing.ts), on one run
+// first, then on blocks of runs only while a check does not pass.
+
+/** The work counted while `run` runs once, and the thread's time it took. */
+function measured(run: () => void): { work: number; ms: number } {
+  const before = workCounted()
+  const { ms } = timed(run)
+  return { work: workCounted() - before, ms }
 }
 
-/** The best of `runs` runs, in milliseconds. */
-function time(run: () => void, runs = 3): number {
-  let best = Infinity
-  for (let i = 0; i < runs; i++) {
-    const started = performance.now()
-    run()
-    best = Math.min(best, performance.now() - started)
-  }
-  return best
-}
+/**
+ * The most work a parse may count per character of its text. Most shapes here count under 6, the
+ * costliest about 45 (end tags that each look through 300 open elements, the nesting limit); a
+ * run of constructs that each read on to the end of the text counts thousands.
+ */
+const WORK_PER_CHARACTER = 100
 
 test('runs of unclosed constructs take linear time', () => {
   // Each of these took seconds to minutes when every construct searched to the end of the text;
   // linear, each takes tens of milliseconds. The bound leaves room for a busy machine.
   const BOUND = 2000
-  const template = (label: string, text: string, withScript = false) => {
-    const took = time(() => {
+  const check = (label: string, text: string, run: () => void) => {
+    // The first run is cold: a time that passes then passes warm too.
+    const { work, ms } = measured(run)
+    // The count first: a quadratic regression fails here in one run, before any timing is retried.
+    assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
+    const took = settledTime(ms, run, (best) => best < BOUND)
+    console.log(`${label}: ${took.toFixed(0)} ms, ${(work / text.length).toFixed(1)} steps a character`)
+    assert.ok(took < BOUND, `${label}: ${took.toFixed(0)} ms`)
+  }
+  const template = (label: string, text: string, withScript = false) =>
+    check(label, text, () => {
       const parsed = parseTemplate(text)
       if (withScript) templateScript(text, parsed.document)
     })
-    console.log(`${label}: ${took.toFixed(0)} ms`)
-    assert.ok(took < BOUND, `${label}: ${took.toFixed(0)} ms`)
-  }
   template('50,000 unclosed <!--', '<!--'.repeat(50000))
   template('30,000 unclosed <iscomment>', '<iscomment>x\n'.repeat(30000))
   template('20,000 unclosed <isscript>', '<isscript>var a = 1\n'.repeat(20000), true)
@@ -75,11 +86,7 @@ test('runs of unclosed constructs take linear time', () => {
   template('20,000 unclosed ${', '<p>${a\n'.repeat(20000), true)
   template('16,000 loops', '<isloop items="${list}" var="v">${v.name}</isloop>\n'.repeat(16000), true)
   template('16,000 <isset> of one name', '<isset name="v" value="${v}" scope="page"/>${v}\n'.repeat(16000), true)
-  const script = (label: string, text: string) => {
-    const took = time(() => scriptFacts(parseScript(text).program))
-    console.log(`${label}: ${took.toFixed(0)} ms`)
-    assert.ok(took < BOUND, `${label}: ${took.toFixed(0)} ms`)
-  }
+  const script = (label: string, text: string) => check(label, text, () => scriptFacts(parseScript(text).program))
   script('20,000 unclosed comments in strings', "a('/*');\n".repeat(20000))
   script('20,000 var of one name', 'var v = v + 1;\n'.repeat(20000))
 })
@@ -88,19 +95,24 @@ test('runs of unclosed constructs take linear time', () => {
 const build = (size: number, unit: string, prefix = '', suffix = '') => prefix + unit.repeat(Math.max(1, Math.ceil((size - prefix.length - suffix.length) / unit.length))) + suffix
 
 test('a 1 MB line of values with an unclosed ${ parses in well under a second', () => {
-  const text = build(1_000_000, 'b="${(x" ', '<a ', '>')
-  const took = time(() => templateScript(text, parseTemplate(text).document), 5)
-  console.log(`1 MB line of b="\${(x": ${took.toFixed(0)} ms`)
-  assert.ok(took < 1000, `${took.toFixed(0)} ms`)
-  const tags = build(1_000_000, '<a b="${(x">')
-  const tagsTook = time(() => templateScript(tags, parseTemplate(tags).document), 5)
-  console.log(`1 MB line of <a b="\${(x">: ${tagsTook.toFixed(0)} ms`)
-  assert.ok(tagsTook < 1000, `${tagsTook.toFixed(0)} ms`)
+  const lines: [string, string][] = [
+    ['b="${(x"', build(1_000_000, 'b="${(x" ', '<a ', '>')],
+    ['<a b="${(x">', build(1_000_000, '<a b="${(x">')]
+  ]
+  for (const [label, text] of lines) {
+    const run = () => templateScript(text, parseTemplate(text).document)
+    const { work, ms } = measured(run)
+    assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
+    const took = settledTime(ms, run, (best) => best < 1000)
+    console.log(`1 MB line of ${label}: ${took.toFixed(0)} ms, ${(work / text.length).toFixed(1)} steps a character`)
+    assert.ok(took < 1000, `${label}: ${took.toFixed(0)} ms`)
+  }
 })
 
 test('no input shape grows worse than linear', () => {
-  // Each shape at 128 KB and at four times that. Linear work grows about 4 times, quadratic 16:
-  // the bound (8 times, plus room for a busy machine and its garbage collector) tells them apart.
+  // Each shape at 128 KB and at four times that. Linear work grows about 4 times, quadratic 16.
+  // The count tells them apart exactly (5 leaves room for what a parse does once, and a lookup's
+  // binary search); the time, with room for a busy machine and its garbage collector, by 8.
   const templates: [string, string, string?, string?][] = [
     ['values with an unclosed ${ on one line', 'b="${(x" ', '<a ', '>'],
     ['tags with an unclosed ${ in a value', '<a b="${(x">'],
@@ -136,16 +148,19 @@ test('no input shape grows worse than linear', () => {
   const check = (label: string, run: (text: string) => void, make: (size: number) => string) => {
     const small = make(SIZE)
     const large = make(SIZE * 4)
-    // Interleaved, best of five each: a pause of the machine (other test files run alongside,
-    // and the garbage collector) then spoils one sample, not the comparison.
-    let tSmall = Infinity
-    let tLarge = Infinity
-    for (let i = 0; i < 5; i++) {
-      tSmall = Math.min(tSmall, time1(() => run(small)))
-      tLarge = Math.min(tLarge, time1(() => run(large)))
-    }
-    console.log(`${label}: ${tSmall.toFixed(1)} ms, ×4: ${tLarge.toFixed(1)} ms`)
-    assert.ok(tLarge < tSmall * 8 + 50, `${label}: ${tSmall.toFixed(1)} ms then ${tLarge.toFixed(1)} ms`)
+    // Counted cold, timed warm: a cold small run would read slow and flatter the ratio.
+    // The count first, the small size before the large one: under a quadratic regression a large
+    // run alone takes a minute, and the small one already counts far past the bound.
+    const workSmall = measured(() => run(small)).work
+    assert.ok(workSmall > 0 && workSmall <= WORK_PER_CHARACTER * small.length, `${label}: ${workSmall} steps for ${small.length} characters`)
+    const workLarge = measured(() => run(large)).work
+    assert.ok(workLarge < workSmall * 5, `${label}: ${workSmall} steps, then ${workLarge}`)
+    assert.ok(workLarge <= WORK_PER_CHARACTER * large.length, `${label}: ${workLarge} steps for ${large.length} characters`)
+    const holds = (tSmall: number, tLarge: number) => tLarge < tSmall * 8 + 50
+    const first: [number, number] = [timed(() => run(small)).ms, timed(() => run(large)).ms]
+    const [tSmall, tLarge] = settledTimes(first, [() => run(small), () => run(large)], holds)
+    console.log(`${label}: ${tSmall.toFixed(1)} ms, ×4: ${tLarge.toFixed(1)} ms; work ×${(workLarge / workSmall).toFixed(2)}`)
+    assert.ok(holds(tSmall, tLarge), `${label}: ${tSmall.toFixed(1)} ms, then ${tLarge.toFixed(1)} ms`)
   }
   for (const [label, unit, prefix, suffix] of templates) {
     check(label, (text) => templateScript(text, parseTemplate(text).document), (size) => build(size, unit, prefix, suffix))
@@ -153,6 +168,22 @@ test('no input shape grows worse than linear', () => {
   for (const [label, unit, prefix] of scripts) {
     check(label, (text) => scriptFacts(parseScript(text).program), (size) => build(size, unit, prefix))
   }
+})
+
+test('the count tells quadratic work from linear', () => {
+  // The bug the checks above guard against, counted as the parsers count: each of n constructs
+  // reads on to the end of the text, as an unclosed `<!--` did before searches were remembered.
+  const quadratic = (text: string) => {
+    for (let at = 0; at < text.length; at += 4) countWork(text.length - at)
+  }
+  const small = '<!--'.repeat(2000)
+  const large = '<!--'.repeat(8000)
+  const workOf = (run: () => void) => measured(run).work
+  const ratio = workOf(() => quadratic(large)) / workOf(() => quadratic(small))
+  assert.ok(ratio > 15, `×${ratio.toFixed(1)}`)
+  assert.ok(workOf(() => quadratic(large)) > WORK_PER_CHARACTER * large.length)
+  // The parser's own count of that shape: linear.
+  assert.ok(workOf(() => parseTemplate(large)) < workOf(() => parseTemplate(small)) * 5)
 })
 
 test('a run of sibling loops still gives each fragment its own loop', () => {

@@ -1,6 +1,6 @@
 // The errors piece's worker over a mock host, a fake b2c and an invented dw.json: what a read asks
 // b2c, what it keeps, what it tells the person, and the sandbox's timer.
-import { assert, mockHost, mountWorker, test, type MockHost, type TestWorker } from 'orca/testing'
+import { afterEach, assert, mockHost, mountWorker, test, type MockHost, type TestWorker } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -74,11 +74,32 @@ function b2cAnswering(answer: () => unknown = () => LOGS_GET, files: () => unkno
   }
 }
 
+/**
+ * Every worker a test started and has not stopped. Each is stopped after its test, passed or
+ * failed: a test that fails halfway would otherwise leave it running, and its timers would hold
+ * the test process open for good.
+ */
+const running = new Set<TestWorker>()
+
+function tracked(worker: TestWorker): TestWorker {
+  running.add(worker)
+  const stop = worker.deactivate.bind(worker)
+  worker.deactivate = async () => {
+    running.delete(worker)
+    await stop()
+  }
+  return worker
+}
+
+afterEach(async () => {
+  for (const worker of [...running]) await worker.deactivate().catch(() => undefined)
+})
+
 /** The whole worker, as Orca starts it, over `host`. */
 async function mountPlugin(host: MockHost, script: (call: SpawnCall) => void = b2cAnswering()) {
   const spawn = fakeSpawner(script)
   process.env[DATA_FOLDER_ENV] = dataFolderOf(host)
-  const worker = await mountWorker({ default: createActivate({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill() }), deactivate }, { host })
+  const worker = tracked(await mountWorker({ default: createActivate({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill() }), deactivate }, { host }))
   return { worker, calls: spawn.calls }
 }
 
@@ -107,7 +128,7 @@ async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, dep
   })
   let disposable: { dispose(): void } | void = undefined
   let api: OrcaWorkerApi | null = null
-  const worker = await mountWorker(
+  const worker = tracked(await mountWorker(
     {
       default: async (orca: OrcaWorkerApi) => {
         api = orca
@@ -120,7 +141,7 @@ async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, dep
       deactivate: () => disposable?.dispose()
     },
     { host }
-  )
+  ))
   const logsCalls = () => spawn.calls.filter((call) => call.args[0] === 'logs' && call.args[1] === 'get')
   const listCalls = () => spawn.calls.filter((call) => call.args[0] === 'logs' && call.args[1] === 'list')
   const orca = (): OrcaWorkerApi => {

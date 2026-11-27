@@ -36,7 +36,7 @@ test('types 1. the initialiser: new, require of a dw class or package, a Mgr cal
   assert.deepEqual(await typeAt("var catalog = require('dw/catalog');\ncatalog.ProductMgr‸"), { kind: 'class', id: 'dw.catalog.ProductMgr' })
   assert.deepEqual(await typeAt("var ProductMgr = require('dw/catalog/ProductMgr');\nvar product = ProductMgr.getProduct('p1');\nproduct‸"), instance('dw.catalog.Product'))
   assert.deepEqual(await typeAt("var product = dw.catalog.ProductMgr.getProduct('p1');\nproduct‸"), instance('dw.catalog.Product'))
-  // A static property read off the class: the index marks none static, its getter is.
+  // A static property read off the class: the index marks it static, as its getter is.
   assert.deepEqual(await typeAt("var Site = require('dw/system/Site');\nvar site = Site.current;\nsite‸"), instance('dw.system.Site'))
   assert.deepEqual(await typeAt("var Site = require('dw/system/Site');\nSite.getCurrent().preferences‸"), instance('dw.system.SitePreferences'))
   // Literals.

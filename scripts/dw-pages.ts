@@ -21,9 +21,18 @@
 // A type is a link to a class page (`[String](…/TopLevel.String.md)`, `[String\[\]](…)` for an
 // array, `[String...](…)` for a rest parameter) or a bare word (`void`). A member is deprecated
 // when its line is struck through or its section says `**Deprecated:**`.
+//
+// A page writes `static` on a method's line only, never on a property's or a constant's. A
+// property is static when the page says its getter is (`current` with `static getCurrent()`: a
+// `get` or `is` method of its name with no parameters, every one of them static), or when it is
+// a constant the page lists as a property (`Status.ERROR`: an upper-case name with no getter).
+// A constant of the constant summary is always read off the class, and the index says nothing
+// more of it. A `static` written on a property's line is read too.
 import {
   anchorOf,
   callableKey,
+  gettersOf,
+  isConstantName,
   simpleName,
   type DwCallableData,
   type DwClassData,
@@ -338,7 +347,18 @@ export function parseClassPage(page: string, raw: string): DwClassData {
       else entry.methods = callables
     }
   })
+  markStaticProperties(entry)
   return entry
+}
+
+/** Sets `static` on the properties the page says are read off the class (see the top of the file). */
+function markStaticProperties(entry: DwClassData): void {
+  const methods = entry.methods ?? []
+  for (const property of entry.properties ?? []) {
+    if (property.static) continue
+    const getters = gettersOf(property.name, methods)
+    if (getters.length > 0 ? getters.every((getter) => getter.static === true) : isConstantName(property.name)) property.static = true
+  }
 }
 
 /** The documentation's version, from the title of its index entry (`B2C Commerce Script API 26.10`). */

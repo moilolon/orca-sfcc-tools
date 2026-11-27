@@ -511,38 +511,15 @@ export class Types {
 }
 
 /**
- * Whether a property is a constant the committed index lists as a property (`Status.ERROR`): an
- * upper-case name with no getter. `Product.ID` has `getID()`, so it is an instance's.
- */
-export function isListedConstant(all: readonly DwMember[], member: DwMember): boolean {
-  if (member.kind !== 'property' || !/^[A-Z][A-Z0-9_]*$/.test(member.name)) return false
-  return !all.some((each) => each.kind === 'method' && (each.name === `get${member.name}` || each.name === `is${member.name}`))
-}
-
-/**
- * Whether a member is read off the class. The committed index marks no property static (its
- * pages do not say it in a form the generator reads), so a property counts as static when its
- * getter is: `Site.current` with `static getCurrent()`.
- */
-export function isStaticMember(all: readonly DwMember[], member: DwMember): boolean {
-  if (member.static || member.kind === 'constant') return true
-  if (member.kind !== 'property') return false
-  const capital = member.name.charAt(0).toUpperCase() + member.name.slice(1)
-  return all.some((each) => each.kind === 'method' && each.static && (each.params ?? []).length === 0 && (each.name === `get${capital}` || each.name === `is${capital}`))
-}
-
-/**
  * The members a value reaches: a class's static ones and its constants (`Object`'s own static
  * functions aside: `ProductMgr.assign` is not one), an instance's others and the constants.
  */
 export function membersFor(dw: DwIndex, cls: DwClass, ofClass: boolean): DwMember[] {
-  const all = dw.members(cls)
-  return all.filter((member) => {
+  return dw.members(cls).filter((member) => {
     if (member.kind === 'constructor') return false
-    if (member.kind === 'constant' || isListedConstant(all, member)) return true
-    const isStatic = isStaticMember(all, member)
-    if (!ofClass) return !isStatic
-    return isStatic && (member.owner === cls.id || member.owner !== 'TopLevel.Object')
+    if (member.constant) return true
+    if (!ofClass) return !member.static
+    return member.static && (member.owner === cls.id || member.owner !== 'TopLevel.Object')
   })
 }
 

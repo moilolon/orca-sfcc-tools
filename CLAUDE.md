@@ -188,7 +188,8 @@ Changing it needs the owner's yes.
       positions, where a template-level name is seen only after it is declared. Fixtures are
       invented and read with LF (`fixtures/read.ts`); `line-endings.test.ts` runs each with LF,
       CRLF and CR, and `limits.test.ts` holds the inputs that once broke a bound or took
-      quadratic time. `fixtures/generate.ts` makes the large script and the seeded mutations.
+      quadratic time, checked by the work the parsers count (`work.ts`: characters scanned,
+      facts' steps; no clock) and by the best of several timed runs. `fixtures/generate.ts` makes the large script and the seeded mutations.
     - `src/pieces/engine/checkout/` (phase 6.3): the checkout index, which 6.4 and 6.5 read.
       `checkout.ts` (`CheckoutIndex`) and the readers it uses (`xml.ts`, `properties.ts`,
       `sites.ts`, `metadata.ts`, `scan.ts`) are pure like the syntax layer (a test checks it):
@@ -252,7 +253,11 @@ Changing it needs the owner's yes.
       timeout and an output cap; stderr is never kept, a failure is a code (`GitFailure`). It
       writes nothing. The worker (`worker.ts`) indexes the uploading workspace, else the
       focused one, when local; `engine.index.status` answers at once and starts a build on its
-      own when the target changed. A watcher's changes are debounced: taken in once no change
+      own when the target changed. A folder that is gone (a removed worktree) is said so
+      (`failed`, `folder_missing`), never built over, and looked for on every status request
+      and every `FOLDER_RETRY_MS` (at most `FOLDER_RETRIES` times); once back it is watched and
+      rebuilt. The watcher stops on its own once its folder is gone (`disk.ts`: on Windows, Node
+      reports a removed folder thousands of times a second and never fails). A watcher's changes are debounced: taken in once no change
       came for `DEBOUNCE_MS`, at the latest `MAX_WAIT_MS` after the first. A change of
       `.git/HEAD`, `packed-refs` or `refs/`, and a timer every `REF_CHECK_MS` (a worktree's refs
       are outside the folder watched), ask whether the ref moved (`refreshRef`: one `rev-parse`,
@@ -277,9 +282,9 @@ Changing it needs the owner's yes.
       its parameter included: `analysis.bindings`): two types, an unknown value, a JSDoc tag that
       disagrees, any write but a plain `=`, or a name inside a pattern, make it unknown. A
       parameter is typed by its `@param` only (the caller passes anything); a name inside `with`
-      is unknown. The committed index marks no
-      property static, so a property is static when its getter is (`Site.current`). Statics are
-      read off the class (`Object`'s own aside), the rest off an instance. `modules.ts`: the
+      is unknown. The index marks a property static when its page's getter is (`Site.current`),
+      and a constant listed as a property (`Status.ERROR`) static and constant (`DwMember`'s
+      `static` and `constant`); the queries read those flags. Statics are read off the class (`Object`'s own aside), the rest off an instance. `modules.ts`: the
       copies a `require` reaches and the members each exports, its re-exports and
       `module.superModule` followed (`MAX_MODULE_DEPTH`), and a member exported as another
       module's (`tax: base.tax`, `alias` in `scan.ts`; never through a name written again) read

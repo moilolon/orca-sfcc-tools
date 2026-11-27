@@ -33,12 +33,16 @@
         {"name":"STAGE_WILTED","type":"TopLevel.Number","value":-1,"deprecated":true}
       ],
       "properties": [
+        {"name":"DEPTH","type":"TopLevel.Number","static":true},
+        {"name":"ID","type":"TopLevel.String","readOnly":true},
         {"name":"count","type":"TopLevel.Number","static":true,"readOnly":true},
         {"name":"leaves","type":"dw.util.Collection","readOnly":true},
         {"name":"name","type":"TopLevel.String"},
         {"name":"oldName","type":"TopLevel.String","readOnly":true,"deprecated":true}
       ],
       "methods": [
+        {"name":"getCount","params":[],"returns":"TopLevel.Number","static":true},
+        {"name":"getID","params":[],"returns":"TopLevel.String"},
         {"name":"getName","params":[],"returns":"TopLevel.String"},
         {"name":"getOldName","params":[],"returns":"TopLevel.String","deprecated":true},
         {"name":"tag","params":[{"name":"labels","type":"TopLevel.String[]"}],"returns":"void"},

@@ -57,6 +57,8 @@ async function mount(host: MockHost, roots: Record<string, CheckoutFiles>, extra
       return { dispose: () => undefined }
     },
     git: () => new FakeRef({}, {}),
+    // The invented folders are not on this disk: they are there for the worker.
+    exists: async () => true,
     api: async () => committedDw(),
     setTimer: (run, ms) => {
       const timer = { run, ms, cleared: false }

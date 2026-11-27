@@ -30,12 +30,16 @@ test('a base class: constants with and without a value, properties, methods and 
       { name: 'STAGE_WILTED', type: N, value: -1, deprecated: true }
     ],
     properties: [
+      { name: 'DEPTH', type: N, static: true },
+      { name: 'ID', type: S, readOnly: true },
       { name: 'count', type: N, static: true, readOnly: true },
       { name: 'leaves', type: 'dw.util.Collection', readOnly: true },
       { name: 'name', type: S },
       { name: 'oldName', type: S, readOnly: true, deprecated: true }
     ],
     methods: [
+      { name: 'getCount', params: [], returns: N, static: true },
+      { name: 'getID', params: [], returns: S },
       { name: 'getName', params: [], returns: S },
       { name: 'getOldName', params: [], returns: S, deprecated: true },
       { name: 'tag', params: [{ name: 'labels', type: 'TopLevel.String[]' }], returns: 'void' },
@@ -72,6 +76,25 @@ test('a deprecated class with no constructor, static methods and a type the docu
       { name: 'harvest', params: [{ name: 'plant', type: 'dw.garden.Plant' }, { name: 'options', type: 'TopLevel.Object', rest: true }], returns: 'BasketWO', static: true }
     ]
   })
+})
+
+test('static: a property whose getter is static, a constant listed as a property, never one read off an instance', () => {
+  const plant = 'dw.garden.Plant'
+  const staticOf = (markdown: string) =>
+    Object.fromEntries((parseClassPage(plant, markdown).properties ?? []).map((property) => [property.name, property.static === true]))
+  // The page writes `static` on no property line: `count` is static because `getCount()` is,
+  // `DEPTH` because it is a constant listed as a property (an upper-case name with no getter).
+  assert.ok(!/^- static (?!get)/m.test(page(plant)), 'the fixture writes static on no property, as the documentation')
+  assert.deepEqual(staticOf(page(plant)), { DEPTH: true, ID: false, count: true, leaves: false, name: false, oldName: false })
+  // A getter that is not static makes the property an instance's.
+  assert.equal(staticOf(changed(plant, '- static getCount()', '- getCount()')).count, false)
+  // An upper-case property with a getter is what its getter says: `ID` an instance's, as
+  // `Product.ID`; with a static one, the class's, as `Log.NDC`.
+  assert.equal(staticOf(changed(plant, '- getID()', '- static getID()')).ID, true)
+  // A property line that says `static` itself is read too.
+  assert.equal(staticOf(changed(plant, '- leaves: [Collection]', '- static leaves: [Collection]')).leaves, true)
+  // No property is static when the class has none: the subclass's own, the root's.
+  assert.equal(parseClassPage('dw.garden.Tree', page('dw.garden.Tree')).properties?.[0].static, undefined)
 })
 
 test('no text of a description reaches an entry', () => {

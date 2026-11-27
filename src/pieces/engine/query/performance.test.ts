@@ -14,11 +14,13 @@ import type { QueryContext } from './modules'
 import { references } from './references'
 import { signatureHelp } from './signature'
 import { BASE, committedDw, dwLookup } from './testing'
+import { blockTime, settledTime, timed } from '../fixtures/timing'
 
 /**
  * The bound the editor needs is 50 ms; alone, the first query on a 5,000-line text takes 7 to 16 ms
- * (the numbers are in the log). A test asserts a bound that holds on a busy machine, the best of
- * several rounds, as the parser's timing tests do: the other test files run alongside.
+ * (the numbers are in the log). A test asserts a bound that holds on a busy machine, by the
+ * thread's processor time (../fixtures/timing.ts), as the parser's timing tests do: one run, then
+ * blocks of runs only while it does not pass. The other test files run alongside.
  */
 const BUSY_BOUND_MS = 150
 /** What reusing a text read costs: far under the bound even when busy. */
@@ -50,18 +52,7 @@ function largeTemplate(lines: number): string {
   return text + '</isdecorate>\n'
 }
 
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b)
-  return sorted[Math.floor(sorted.length / 2)]
-}
-
-function measure(run: () => unknown): number {
-  const started = performance.now()
-  run()
-  return performance.now() - started
-}
-
-test('timings: every query on a 5,000-line script and template, once the index is built, the best of several rounds', async () => {
+test('timings: every query on a 5,000-line script and template, once the index is built, by the thread’s time', async () => {
   const script = largeScript(5000)
   const template = largeTemplate(5000)
   const scriptPath = `${BASE}/cartridge/scripts/helpers/large.js`
@@ -100,22 +91,21 @@ test('timings: every query on a 5,000-line script and template, once the index i
   }
   const lines: string[] = []
   for (const query of queries) {
-    const first: number[] = []
-    const next: number[] = []
-    for (let round = 0; round < 15; round++) {
-      let analysis: Analysis | null = null
-      let answer: unknown = null
-      // The first query on a text reads it; the worker keeps what it read for the next ones.
-      first.push(measure(() => {
-        analysis = analyse(query.path, query.text)
-        answer = run(query.kind, analysis, query.offset)
-      }))
-      assert.ok(query.expect(answer), query.name)
-      next.push(measure(() => run(query.kind, analysis as unknown as Analysis, query.offset)))
+    // The first query on a text reads it; the worker keeps what it read for the next ones.
+    const firstRun = () => {
+      const analysis = analyse(query.path, query.text)
+      return { analysis, answer: run(query.kind, analysis, query.offset) }
     }
-    lines.push(`${query.name}: first ${median(first).toFixed(1)} ms (best ${Math.min(...first).toFixed(1)}, worst ${Math.max(...first).toFixed(1)}), then ${median(next).toFixed(2)} ms`)
-    assert.ok(Math.min(...first) < BUSY_BOUND_MS, `${query.name}: the first query took at best ${Math.min(...first)} ms`)
-    assert.ok(median(next) < NEXT_BOUND_MS, `${query.name}: the next query took ${median(next)} ms`)
+    const once = timed(firstRun)
+    assert.ok(query.expect(once.value.answer), query.name)
+    const { analysis } = once.value
+    const nextRun = () => run(query.kind, analysis, query.offset)
+    // Each timed over a block, so the log says what a run takes: one run reads 0 or a tick of 16 ms.
+    const first = settledTime(blockTime(firstRun), firstRun, (ms) => ms < BUSY_BOUND_MS)
+    const next = settledTime(blockTime(nextRun), nextRun, (ms) => ms < NEXT_BOUND_MS)
+    lines.push(`${query.name}: first ${first.toFixed(1)} ms, then ${next < 0.1 ? `${(next * 1000).toFixed(0)} µs` : `${next.toFixed(2)} ms`}`)
+    assert.ok(first < BUSY_BOUND_MS, `${query.name}: the first query took ${first.toFixed(1)} ms`)
+    assert.ok(next < NEXT_BOUND_MS, `${query.name}: the next query took ${next.toFixed(2)} ms`)
   }
   console.log(`queries on ${script.split('\n').length}-line script and ${template.split('\n').length}-line template:\n  ${lines.join('\n  ')}`)
 })

@@ -2,6 +2,9 @@
 // workspace it indexes, that `engine.index.status` never waits for a build, the watcher's changes
 // taken in, the settings, and a workspace on another host.
 import { assert, mockHost, mountWorker, test, type MockHost } from 'orca/testing'
+import { cpSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { translator } from '../../core/i18n'
 import type { PieceContext } from '../../core/piece'
@@ -10,6 +13,7 @@ import { createStore } from '../../core/store'
 import { createWorkspaces } from '../../core/workspaces'
 import type { B2c } from '../../core/b2c'
 import { GitError, type RefReader } from './checkout/checkout'
+import { diskFiles, watchCheckout } from './checkout/disk'
 import type { CheckoutFiles } from './checkout/files'
 import { MemoryFiles } from './checkout/memory'
 import { fixtureFiles, FakeRef } from './checkout/testing'
@@ -17,7 +21,7 @@ import { createDescriber, type Describer } from './dw/describe'
 import type { EngineCompletion, EngineDefinition, EngineHover, EngineIndexStatus, EngineReferences, EngineSignature } from './protocol'
 import { MAX_COMPLETION_ITEMS } from './query/complete'
 import { committedDw } from './query/testing'
-import { createEnginePiece, DEBOUNCE_MS, DESCRIBE_WAIT_MS, loadDw, MAX_WAIT_MS, REF_CHECK_MS, START_DELAY_MS, type EngineDeps } from './worker'
+import { createEnginePiece, DEBOUNCE_MS, DESCRIBE_WAIT_MS, FOLDER_RETRIES, FOLDER_RETRY_MS, loadDw, MAX_WAIT_MS, REF_CHECK_MS, START_DELAY_MS, type EngineDeps } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const SHOP = { id: 'w-shop', kind: 'worktree', name: 'Shop', path: 'C:/work/shop', branch: 'main', hostId: 'local' }
@@ -53,6 +57,7 @@ async function mount(host: MockHost, roots: Record<string, CheckoutFiles>, extra
       return { dispose: () => void (watcher.disposed = true) }
     },
     git: () => new FakeRef({}, {}),
+    exists: async () => true,
     dw: async () => (module) => (module.startsWith('dw/') ? module.replace(/\//g, '.') : null),
     setTimer: (run, ms) => {
       const timer = { run, ms, cleared: false }
@@ -70,7 +75,7 @@ async function mount(host: MockHost, roots: Record<string, CheckoutFiles>, extra
         api = orca
         const settings = createSettings(orca.settings)
         const workspaces = createWorkspaces(orca.host, createStore(orca.storage, 'core'))
-        const ctx: PieceContext = { orca, b2c: {} as B2c, settings, store: createStore(orca.storage, 'engine'), workspaces, t: translator(() => 'en'), log: (message) => orca.log(message) }
+        const ctx: PieceContext = { orca, b2c: { mask: async (text: string) => text } as unknown as B2c, settings, store: createStore(orca.storage, 'engine'), workspaces, t: translator(() => 'en'), log: (message) => orca.log(message) }
         disposable = await piece.activate(ctx)
       },
       deactivate: () => disposable?.dispose()
@@ -200,15 +205,137 @@ test('no workspace, or one on another host, is not indexed', async () => {
   assert.deepEqual(remote.watched, [])
 })
 
-test('a watcher that stops on its own is replaced on the next request, and dispose stops everything', async () => {
-  const { ready, watched, status, dispose } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() })
+test('a watcher that stops on its own is replaced at once, and dispose stops everything', async () => {
+  const { ready, watched, dispose } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() })
   await ready()
   watched[0].onError()
-  await status()
+  await settle()
   assert.equal(watched.length, 2)
   assert.equal((await ready()).watching, true)
   await dispose()
   assert.ok(watched[1].disposed)
+})
+
+test('a folder that is gone says so, is looked for on each request and every FOLDER_RETRY_MS, and is indexed again once back', async () => {
+  let there = true
+  const files = fixtureFiles()
+  const { ready, status, watched, timers, fire, dispose } = await mount(hostFor('w-shop'), { 'C:/work/shop': files }, { exists: async () => there })
+  assert.equal((await ready()).index?.cartridges.length, 4)
+  const looks = () => timers.filter((timer) => timer.ms === FOLDER_RETRY_MS && !timer.cleared).length
+
+  // Removed while watched: the watcher stops, and a status request finds the folder gone.
+  there = false
+  watched[0].onError()
+  await settle()
+  const gone = await status()
+  assert.deepEqual([gone.state, gone.error, gone.watching], ['failed', 'folder_missing', false])
+  assert.equal(looks(), 1, 'looked for again later')
+  // A request while it is still gone changes nothing, and builds nothing over the empty folder.
+  assert.deepEqual([(await status()).state, (await status()).error], ['failed', 'folder_missing'])
+  assert.equal(watched.length, 1)
+
+  // Back, with a cartridge less: the next request watches and indexes it again.
+  files.delete('cartridges/app_garden_outlet')
+  there = true
+  const back = await ready()
+  assert.deepEqual([back.state, back.error, back.watching], ['ready', null, true])
+  assert.deepEqual(back.index?.cartridges.map((c) => c.name), ['app_garden_base', 'app_garden_core', 'modules'])
+  assert.equal(looks(), 0, 'no more looking once it is back')
+
+  // Gone again, then back with no request at all: the timer finds it.
+  there = false
+  watched.at(-1)?.onError()
+  await settle()
+  assert.equal((await status()).error, 'folder_missing')
+  there = true
+  fire(FOLDER_RETRY_MS)
+  await settle()
+  const found = await ready()
+  assert.deepEqual([found.state, found.error, found.watching], ['ready', null, true])
+
+  // A folder that never comes back is looked for FOLDER_RETRIES times on the timer, then only on a request.
+  there = false
+  watched.at(-1)?.onError()
+  await settle()
+  for (let i = 0; i < FOLDER_RETRIES + 5; i++) {
+    fire(FOLDER_RETRY_MS)
+    await settle()
+  }
+  assert.equal(looks(), 0, 'the timer stops')
+  assert.equal(timers.filter((timer) => timer.ms === FOLDER_RETRY_MS).length, 2 + FOLDER_RETRIES)
+  there = true
+  assert.equal((await ready()).state, 'ready', 'a request still finds it')
+  await dispose()
+})
+
+test('a folder gone before its first build is never built over, not even when the problems are asked again', async () => {
+  let there = false
+  const { worker, status, ready, watched, dispose } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { exists: async () => there })
+  const gone = await status()
+  assert.deepEqual([gone.state, gone.error, gone.watching, gone.index], ['failed', 'folder_missing', false, null])
+  await worker.request('engine.problems.refresh', {} as never)
+  await settle()
+  const still = await status()
+  assert.deepEqual([still.state, still.error, still.index], ['failed', 'folder_missing', null], 'no build ran')
+  assert.equal(watched.length, 0)
+  there = true
+  assert.equal((await ready()).index?.cartridges.length, 4)
+  await dispose()
+})
+
+test('while the folder is gone, git is never asked about the ref; a setting changed meanwhile is applied once it is back', async () => {
+  let there = true
+  const files = fixtureFiles()
+  files.delete('sites')
+  const commit = 'a'.repeat(40)
+  const ref = new FakeRef({ 'origin/main': commit }, { [commit]: { 'sites/x/sites/Shop/site.xml': '<site site-id="Shop"><custom-cartridges>app_garden_base</custom-cartridges></site>' } })
+  const { ready, status, watched, fire, orca, dispose } = await mount(hostFor('w-shop', { metadataRef: 'origin/main' }), { 'C:/work/shop': files }, { git: () => ref, exists: async () => there })
+  assert.equal((await ready()).index?.pathSource, 'git-ref')
+  there = false
+  watched[0].onError()
+  await settle()
+  assert.equal((await status()).error, 'folder_missing')
+  const before = ref.calls.length
+  fire(REF_CHECK_MS)
+  await orca().settings.set('cartridgePath', 'app_garden_core:app_garden_base')
+  await settle()
+  assert.deepEqual(ref.calls.slice(before), [], 'neither the ref timer nor the setting asked git')
+  assert.equal((await status()).error, 'folder_missing')
+  there = true
+  const back = await ready()
+  assert.deepEqual([back.state, back.index?.pathSource, back.index?.storefronts.map((s) => s.cartridges)], ['ready', 'setting', [['app_garden_core', 'app_garden_base']]])
+  await dispose()
+})
+
+test('on the real disk: a folder removed and put back while status is asked is watched and indexed again', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'sfcc-tools-engine-'))
+  const root = join(parent, 'shop')
+  const fixture = new URL('./fixtures/checkout/', import.meta.url)
+  cpSync(fixture, root, { recursive: true })
+  const workspace = { id: 'w-disk', kind: 'folder', name: 'Disk', path: root, branch: null, hostId: 'local' }
+  const host = mockHost({
+    capabilities: CAPABILITIES,
+    results: {
+      'workspace.list': { workspaces: [workspace], truncated: false },
+      'workspace.readContext': { workspaceId: 'w-disk', branch: '', displayName: 'Disk', terminals: [] }
+    }
+  })
+  const { ready, status, dispose } = await mount(host, {}, { files: diskFiles, watch: watchCheckout, exists: undefined })
+  try {
+    assert.equal((await ready()).index?.cartridges.length, 4)
+    rmSync(root, { recursive: true, force: true })
+    // Asked while it is gone: said so, never built over the empty folder.
+    const gone = await status()
+    assert.deepEqual([gone.state, gone.error, gone.watching], ['failed', 'folder_missing', false])
+    cpSync(fixture, root, { recursive: true })
+    rmSync(join(root, 'cartridges', 'app_garden_outlet'), { recursive: true, force: true })
+    const back = await ready()
+    assert.deepEqual([back.state, back.error, back.watching], ['ready', null, true])
+    assert.deepEqual(back.index?.cartridges.map((c) => c.name), ['app_garden_base', 'app_garden_core', 'modules'])
+  } finally {
+    await dispose()
+    rmSync(parent, { recursive: true, force: true })
+  }
 })
 
 test('the committed dw.* index answers a class and a package, as require(“dw/…”) may name either', async () => {
@@ -401,5 +528,40 @@ test('engine.definition, engine.references and engine.signature answer on the ed
     assert.equal(bad.error, 'file_invalid', name)
     const far = (await worker.request(name, { ...query, offset: text.length + 1 } as never)) as { error: string | null }
     assert.equal(far.error, 'offset_invalid', name)
+  }
+})
+
+test('on the real disk: a folder removed and made again at once, before the watcher could see it gone, is indexed again', async () => {
+  // Only Windows reports the removed folder itself; elsewhere a status request finds it changed.
+  if (process.platform !== 'win32') return
+  const parent = mkdtempSync(join(tmpdir(), 'sfcc-tools-engine-'))
+  const root = join(parent, 'shop')
+  const fixture = new URL('./fixtures/checkout/', import.meta.url)
+  cpSync(fixture, root, { recursive: true })
+  const workspace = { id: 'w-disk', kind: 'folder', name: 'Disk', path: root, branch: null, hostId: 'local' }
+  const host = mockHost({
+    capabilities: CAPABILITIES,
+    results: {
+      'workspace.list': { workspaces: [workspace], truncated: false },
+      'workspace.readContext': { workspaceId: 'w-disk', branch: '', displayName: 'Disk', terminals: [] }
+    }
+  })
+  const { ready, dispose } = await mount(host, {}, { files: diskFiles, watch: watchCheckout, exists: undefined })
+  try {
+    assert.equal((await ready()).index?.cartridges.length, 4)
+    // Within one turn of the event loop: removed, and made again with a cartridge less.
+    rmSync(root, { recursive: true, force: true })
+    cpSync(fixture, root, { recursive: true })
+    rmSync(join(root, 'cartridges', 'app_garden_outlet'), { recursive: true, force: true })
+    const end = Date.now() + 10_000
+    let answer = await ready()
+    while (answer.index?.cartridges.length !== 3 && Date.now() < end) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      answer = await ready()
+    }
+    assert.deepEqual([answer.state, answer.error, answer.watching, answer.index?.cartridges.length], ['ready', null, true, 3])
+  } finally {
+    await dispose()
+    rmSync(parent, { recursive: true, force: true })
   }
 })

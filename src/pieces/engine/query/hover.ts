@@ -17,7 +17,7 @@ import { callRole, customTags, elementAt, stringArgumentAt } from './complete'
 import { ISML_TAG_ATTRIBUTES, TEMPLATE_ATTRIBUTE_TAGS } from './isml-tags'
 import { moduleMember, storefrontsOf, SUPER_MODULE, type QueryContext } from './modules'
 import { cartridgeRoutes } from './routes'
-import { guessedClass, isListedConstant, isStaticMember, memberName, membersFor, metadataTypeOf, subPackages, Types } from './types'
+import { guessedClass, memberName, membersFor, metadataTypeOf, subPackages, Types } from './types'
 
 /** The longest list a hover answers (storefronts, copies, candidates, definitions, steps). */
 export const MAX_HOVER_ENTRIES = 50
@@ -350,7 +350,7 @@ export function hoverItem(ctx: QueryContext, analysis: Analysis | null, id: stri
       const cls = dw?.findClass(head)
       const member = cls && dw ? dw.members(cls).find((each) => each.key === tail) : undefined
       // Read off the class when the completion offered it there: a static member, a static property, a constant.
-      content = member && cls && dw ? dwMemberHover(ctx, cls.id, member.name, isStaticMember(dw.members(cls), member) || isListedConstant(dw.members(cls), member)) : null
+      content = member && cls && dw ? dwMemberHover(ctx, cls.id, member.name, member.static) : null
       break
     }
     case 'dwclass':

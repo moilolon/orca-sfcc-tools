@@ -31,13 +31,24 @@ function folder(): string {
 
 type Counters = Record<string, number>
 
+/**
+ * How long the writers of a test of losing nothing wait for the lock. They take turns as fast as
+ * the disk lets them, so on a busy machine one can wait past the plugin's own bound (whose firing
+ * the test of the lock checks); what these tests prove is that no update is lost, however slow.
+ */
+const PATIENT = { lockTimeoutMs: 5 * 60_000 }
+
 /** Raises `key` by one, under the lock. */
 function bump(path: string, key: string) {
-  return updateDataFile<Counters>(path, (current) => {
-    const counters = { ...(current?.roles.counters ?? {}) }
-    counters[key] = (counters[key] ?? 0) + 1
-    return { version: 1, roles: { ...(current?.roles ?? {}), counters } }
-  })
+  return updateDataFile<Counters>(
+    path,
+    (current) => {
+      const counters = { ...(current?.roles.counters ?? {}) }
+      counters[key] = (counters[key] ?? 0) + 1
+      return { version: 1, roles: { ...(current?.roles ?? {}), counters } }
+    },
+    PATIENT
+  )
 }
 
 test('the data folder is the system’s own folder for application data, from the home folder only', () => {
@@ -116,7 +127,7 @@ test('two writers at once lose nothing: two processes, with a reader that never 
            const counters = { ...(current?.roles.counters ?? {}) }
            counters[${JSON.stringify(key)}] = (counters[${JSON.stringify(key)}] ?? 0) + 1
            return { version: 1, roles: { ...(current?.roles ?? {}), counters } }
-         })
+         }, ${JSON.stringify(PATIENT)})
        }`
     const run = (key: string) =>
       new Promise<number | null>((done) => {
@@ -223,8 +234,8 @@ test('the seen list over seen.json: one table per role, and two workers recordin
   try {
     const { seen: path } = dataFiles(root)
     // An old worker still stopping and the new one, or two copies of the plugin.
-    const first = createSeenList(createSeenFileStore(path))
-    const second = createSeenList(createSeenFileStore(path))
+    const first = createSeenList(createSeenFileStore(path, PATIENT))
+    const second = createSeenList(createSeenFileStore(path, PATIENT))
     await Promise.all([
       ...Array.from({ length: 20 }, (_, i) => first.record('sandbox', [{ signature: `first-${i}`, at: i, sample: SAMPLE }])),
       ...Array.from({ length: 20 }, (_, i) => second.record('sandbox', [{ signature: `second-${i}`, at: i, sample: SAMPLE }])),

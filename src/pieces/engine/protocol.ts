@@ -23,8 +23,9 @@ export type { CartridgeRouteEntry, Describe, DwMemberEntry, Hover, HoverContent,
 
 /**
  * `none`: no workspace to index (none uploads, none is focused, or it is on another host);
- * `building`: the first build is running; `ready`: built, kept current as files change;
- * `failed`: the build stopped (`error` says why, as a code).
+ * `building`: the first build is running, or the one after the workspace's folder came back;
+ * `ready`: built, kept current as files change; `failed`: the build stopped, or the folder is gone
+ * (`error` says why, as a code: `index_failed`, `folder_missing`).
  */
 export type EngineIndexState = 'none' | 'building' | 'ready' | 'failed'
 
