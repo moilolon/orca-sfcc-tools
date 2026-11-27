@@ -186,6 +186,9 @@ test('the save hook returns at once, changing nothing; the analysis runs after i
   const event = { workspaceId: 'w-shop', path: `C:\\work\\shop\\${CLEAN.replace(/\//g, '\\')}`, languageId: 'javascript', text }
   gate = true
   const decision = await worker.hooks.fire('editor.save.before', event)
+  // The hook answered before Orca's 2 s deadline: a hook that waited for the held analysis would
+  // time out, which the test host counts as passing and only logs.
+  assert.deepEqual(worker.logs.filter((line) => line.includes('editor.save.before')), [])
   // It goes on with the event as it came: nothing refused, nothing rewritten. The analysis is
   // only scheduled: it waits on the pause, and nothing of it has run when the hook returned.
   assert.equal(decision.kind, 'continue')
