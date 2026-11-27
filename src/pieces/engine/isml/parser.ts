@@ -14,6 +14,7 @@
 // node without a problem (ISML branches often open and close HTML on different paths).
 // Pure: no Node, no Orca.
 import type { Problem, ProblemCode, Range } from '../js/ast'
+import { countWork } from '../work'
 
 /** ISML's own tags (the grammar's list). Any other `<is…>` is a custom tag. */
 export const ISML_TAGS: ReadonlySet<string> = new Set([
@@ -173,6 +174,7 @@ export function parseTemplate(text: string): TemplateParse {
     parser.report('internal_error', 0, 0)
     children = []
   }
+  countWork(parser.scanned)
   return { document: { type: 'Document', start: 0, end: text.length, children, modules: parser.modules }, problems: parser.problems }
 }
 
@@ -207,6 +209,13 @@ class IsmlParser {
     this.problems.push(detail === undefined ? { code, start, end } : { code, start, end, detail })
   }
 
+  /**
+   * The characters this parse read (../work.ts): each construct's span, each search for an end,
+   * each scan thrown away. A span nested in another is counted in both: nesting is bounded, so
+   * the count stays within a fixed multiple of the work.
+   */
+  scanned = 0
+
   /** The last search of each pattern: from where, and its first match in the whole text (or none). */
   private readonly searches = new Map<RegExp, { from: number; match: RegExpExecArray | null }>()
 
@@ -223,6 +232,7 @@ class IsmlParser {
     } else {
       pattern.lastIndex = from
       match = pattern.exec(this.text)
+      this.scanned += (match ? match.index + match[0].length : this.text.length) - from
       this.searches.set(pattern, { from, match })
     }
     return match && match.index + match[0].length <= limit ? match : null
@@ -233,6 +243,7 @@ class IsmlParser {
     const text = this.text
     let q = at + (text[at] === '\r' && text[at + 1] === '\n' ? 2 : 1)
     while (q < limit && (text[q] === ' ' || text[q] === '\t')) q++
+    this.scanned += q - at + 1
     if (text[q] !== '<' || !(isLetter(text[q + 1]) || text[q + 1] === '/' || text[q + 1] === '!')) return false
     return !htmlOnly || !(this.isIsmlTagAt(q, false) || this.isIsmlTagAt(q, true))
   }
@@ -260,6 +271,8 @@ class IsmlParser {
    * only ISML is parsed and HTML is text.
    */
   parseNodes(from: number, limit: number, html: boolean): IsmlNode[] {
+    // Its position only moves forward, to `limit`.
+    this.scanned += limit - from
     const text = this.text
     const root: IsmlNode[] = []
     const stack: OpenFrame[] = []
@@ -308,6 +321,7 @@ class IsmlParser {
           let end = pos + 2
           while (end < limit && text[end] !== '>' && text[end] !== '<' && text[end] !== '\n' && text[end] !== '\r') end++
           if (end < limit && text[end] === '>') end++
+          this.scanned += end - pos
           children().push({ type: 'Doctype', start: pos, end })
           pos = end
           continue
@@ -365,6 +379,7 @@ class IsmlParser {
   private closeElement(close: CloseTag, stack: OpenFrame[], siblings: IsmlNode[], popTo: (index: number, at: number) => void): void {
     const isml = close.name.startsWith('is')
     for (let i = stack.length - 1; i >= 0; i--) {
+      this.scanned++
       const element = stack[i].element
       if (element.name === close.name) {
         popTo(i + 1, close.start)
@@ -379,6 +394,7 @@ class IsmlParser {
     // `<isprint …></isprint>`: an end tag right after an empty tag of the same name closes it.
     for (let i = siblings.length - 1; i >= 0; i--) {
       const sibling = siblings[i]
+      this.scanned += 1 + (sibling.type === 'Text' ? sibling.end - sibling.start : 0)
       if (sibling.type === 'Text' && this.text.slice(sibling.start, sibling.end).trim() === '') continue
       if (sibling.type === 'Element' && sibling.name === close.name && sibling.close === null && !sibling.selfClosing) {
         sibling.close = { start: close.start, end: close.end }
@@ -431,6 +447,7 @@ class IsmlParser {
     while (p < limit && text[p] !== '>' && text[p] !== '<' && text[p] !== '\n' && text[p] !== '\r') p++
     if (p < limit && text[p] === '>') p++
     else this.report('unclosed_start_tag', start, p, name)
+    this.scanned += p - start
     return { type: 'CloseTag', name, start, end: p }
   }
 
@@ -540,6 +557,7 @@ class IsmlParser {
     }
     element.openEnd = p
     element.end = p
+    this.scanned += p - start
     return element
   }
 
@@ -554,6 +572,7 @@ class IsmlParser {
     const attribute: Attribute = { name: text.slice(start, p).toLowerCase(), nameStart: start, nameEnd: p, value: null, start, end: p }
     let q = p
     while (q < limit && isSpace(text[q])) q++
+    this.scanned += q - start + 1
     if (text[q] !== '=') return attribute
     q++
     while (q < limit && isSpace(text[q])) q++
@@ -577,6 +596,7 @@ class IsmlParser {
     // exponential): a part that crosses the cut moves it back to where the part starts.
     let cut = start
     while (cut < scan.end && this.text[cut] !== '\n' && this.text[cut] !== '\r') cut++
+    this.scanned += cut - start + (this.problems.length - mark)
     const parts: AttributeValue['parts'] = []
     for (const part of scan.parts) {
       if (part.end <= cut) {
@@ -611,10 +631,12 @@ class IsmlParser {
       const c = text[p]
       if (c === quote) {
         flush(p)
+        this.scanned += p - from
         return { parts, end: p, closed: true }
       }
       if ((c === '\n' || c === '\r') && (oneLine || this.tagLineAfter(p, limit, true))) {
         flush(p)
+        this.scanned += p - from
         return { parts, end: p, closed: false }
       }
       if (c === '$' && text[p + 1] === '{') {
@@ -641,6 +663,7 @@ class IsmlParser {
       p++
     }
     flush(p)
+    this.scanned += p - from
     return { parts, end: p, closed: false }
   }
 
@@ -662,6 +685,7 @@ class IsmlParser {
       p++
     }
     if (p > textStart) parts.push({ type: 'Text', start: textStart, end: p })
+    this.scanned += p - start
     return { quote: null, contentStart: start, contentEnd: p, parts, closed: true, start, end: p }
   }
 
@@ -677,9 +701,13 @@ class IsmlParser {
     // the strict pass runs.
     if (quote !== null && this.rescanBudget > 0) {
       scan = scanExpression(this.text, codeStart, limit, quote, true, this.rescanBudget)
+      this.scanned += scan.scanned
       if (!scan.closed) this.rescanBudget -= scan.scanned
     }
-    if (!scan.closed) scan = scanExpression(this.text, codeStart, limit, quote, false)
+    if (!scan.closed) {
+      scan = scanExpression(this.text, codeStart, limit, quote, false)
+      this.scanned += scan.scanned
+    }
     if (scan.closed) return { type: 'Expression', codeStart, codeEnd: scan.end, closed: true, start, end: scan.end + 1 }
     this.report('unclosed_expression', start, scan.end)
     return { type: 'Expression', codeStart, codeEnd: scan.end, closed: false, start, end: scan.end }
