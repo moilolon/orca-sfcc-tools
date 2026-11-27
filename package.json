@@ -11,7 +11,8 @@
     "test": "orca plugin test .",
     "check": "orca plugin check .",
     "validate": "orca plugin validate .",
-    "manifest": "node scripts/build-manifest.ts"
+    "manifest": "node scripts/build-manifest.ts",
+    "dw-index": "node --import ./scripts/resolve-ts.ts scripts/generate-dw-index.ts"
   },
   "devDependencies": {
     "@types/node": "24.19.4",

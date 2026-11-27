@@ -1,0 +1,66 @@
+{
+  "format": 1,
+  "version": "99.1",
+  "generated": "2026-01-01",
+  "base": "https://docs.example.com/script-api/",
+  "classes": {
+    "TopLevel.Object": {
+      "constructors": [
+        {"name":"Object","params":[]}
+      ],
+      "methods": [
+        {"name":"toString","params":[],"returns":"TopLevel.String"}
+      ]
+    },
+    "dw.garden.GardenMgr": {
+      "super": "TopLevel.Object",
+      "deprecated": true,
+      "constants": [
+        {"name":"MAX_BEDS","type":"TopLevel.Number","value":12}
+      ],
+      "methods": [
+        {"name":"findPlant","params":[{"name":"name","type":"TopLevel.String"}],"returns":"dw.garden.Plant","static":true},
+        {"name":"harvest","params":[{"name":"plant","type":"dw.garden.Plant"},{"name":"options","type":"TopLevel.Object","rest":true}],"returns":"BasketWO","static":true}
+      ]
+    },
+    "dw.garden.Plant": {
+      "super": "TopLevel.Object",
+      "subclasses": ["dw.garden.Tree"],
+      "constants": [
+        {"name":"COLOUR_GREEN","type":"TopLevel.String","value":"leaf_green"},
+        {"name":"KIND","type":"TopLevel.Object"},
+        {"name":"STAGE_SEED","type":"TopLevel.Number","value":0},
+        {"name":"STAGE_WILTED","type":"TopLevel.Number","value":-1,"deprecated":true}
+      ],
+      "properties": [
+        {"name":"count","type":"TopLevel.Number","static":true,"readOnly":true},
+        {"name":"leaves","type":"dw.util.Collection","readOnly":true},
+        {"name":"name","type":"TopLevel.String"},
+        {"name":"oldName","type":"TopLevel.String","readOnly":true,"deprecated":true}
+      ],
+      "methods": [
+        {"name":"getName","params":[],"returns":"TopLevel.String"},
+        {"name":"getOldName","params":[],"returns":"TopLevel.String","deprecated":true},
+        {"name":"tag","params":[{"name":"labels","type":"TopLevel.String[]"}],"returns":"void"},
+        {"name":"water","params":[{"name":"litres","type":"TopLevel.Number"},{"name":"warm","type":"TopLevel.Boolean"}],"returns":"TopLevel.Boolean"}
+      ]
+    },
+    "dw.garden.Tree": {
+      "super": "dw.garden.Plant",
+      "properties": [
+        {"name":"height","type":"TopLevel.Number"}
+      ],
+      "constructors": [
+        {"name":"Tree","params":[]},
+        {"name":"Tree","params":[{"name":"name","type":"TopLevel.String"}]},
+        {"name":"Tree","params":[{"name":"name","type":"TopLevel.String"},{"name":"rings","type":"TopLevel.Number","rest":true}]}
+      ],
+      "methods": [
+        {"name":"getName","params":[],"returns":"TopLevel.String"},
+        {"name":"grow","key":"grow(Number) - Variant 1","params":[{"name":"metres","type":"TopLevel.Number"}],"returns":"void"},
+        {"name":"grow","key":"grow(Number) - Variant 2","params":[{"name":"centimetres","type":"TopLevel.Number"}],"returns":"void","deprecated":true},
+        {"name":"plantAll","params":[{"name":"names","type":"TopLevel.String","rest":true}],"returns":"dw.util.List","static":true}
+      ]
+    }
+  }
+}
