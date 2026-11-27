@@ -75,7 +75,8 @@ test('the editor frame loads only relative, pure modules: no Node, no worker cod
   const modules = frameModules()
   assert.ok(modules.includes('src/pieces/engine/js/lexer.ts'), 'the engine’s lexer colours the text')
   for (const module of modules) {
-    assert.ok(/^src\/(pieces\/(editor|engine\/(js|isml))|core\/i18n\.ts)/.test(module), `${module} is loaded by the editor frame`)
+    // work.ts is the parsers' clock-free work counter: no imports, no state between parses.
+    assert.ok(/^src\/(pieces\/(editor|engine\/(js\/|isml\/|work\.ts$))|core\/i18n\.ts$)/.test(module), `${module} is loaded by the editor frame`)
     assert.ok(!/(locate|worker)\.ts$/.test(module) || module.endsWith('locate-client.ts'), `${module} is worker code`)
     const source = readFileSync(join(ROOT, module), 'utf8')
     assert.ok(!/from\s*['"]node:/.test(source), `${module} imports Node`)
