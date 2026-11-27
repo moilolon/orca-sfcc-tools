@@ -1672,6 +1672,40 @@ test('isHost() is true for the whole host of the role in any letter case, false 
     assert.equal(calls.length, 0, 'it starts no process')
   }, ADMIN_DW))
 
+test('a call that names its config root reads that folder’s dw.json, whatever configRoot() names; one that does not follows it', async () => {
+  const first = makeWorkspace(ADMIN_DW)
+  const second = makeWorkspace({ hostname: 'other-box.example.com', 'client-id': 'invented-other-client-id', 'client-secret': 'invented-other-secret' })
+  const empty = makeWorkspace({})
+  rmSync(join(empty, 'dw.json'), { force: true })
+  try {
+    let root: string | null = second
+    const spawn = fakeSpawner()
+    const { b2c, calls } = runner(null, spawn, { configRoot: async () => root })
+    // Named: the first folder's file, though configRoot() names the second.
+    assert.equal(await b2c.isHost('sandbox', 'Sandbox-41.Example.com', { configRoot: first }), true)
+    assert.equal(await b2c.isHost('sandbox', 'Sandbox-41.Example.com'), false)
+    assert.equal(await b2c.isHost('sandbox', 'other-box.example.com'), true)
+    assert.deepEqual((await b2c.instances({ configRoot: empty })).config, 'missing')
+    assert.deepEqual((await b2c.instances({ configRoot: null })).config, 'missing')
+    assert.deepEqual((await b2c.instances({ configRoot: first })).config, 'ok')
+    await b2c.run(['sandbox', 'list'], { role: 'sandbox', configRoot: first })
+    assert.equal(calls.at(-1)?.options.env?.SFCC_SERVER, 'Sandbox-41.Example.com')
+    await b2c.run(['sandbox', 'list'], { role: 'sandbox' })
+    assert.equal(calls.at(-1)?.options.env?.SFCC_SERVER, 'other-box.example.com')
+    const running = await b2c.start(['logs', 'tail'], { role: 'sandbox', configRoot: first })
+    assert.equal(calls.at(-1)?.options.env?.SFCC_SERVER, 'Sandbox-41.Example.com')
+    running.stop()
+    // A named folder with no file configures no role, whatever configRoot() names.
+    root = first
+    assert.equal(await failureOf(b2c.run(['sandbox', 'list'], { role: 'sandbox', configRoot: empty })).then((error) => (error instanceof B2cError ? error.code : error)), 'role_not_configured')
+    assert.equal(await failureOf(b2c.run(['sandbox', 'list'], { role: 'sandbox', configRoot: null })).then((error) => (error instanceof B2cError ? error.code : error)), 'role_not_configured')
+    // What a named file holds is masked like any other read.
+    assert.equal(await b2c.mask('other-box.example.com'), '***')
+  } finally {
+    for (const dir of [first, second, empty]) rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a piece finds its own sandbox in a list b2c returns, and shows the list with nothing of the file unmasked', () =>
   withWorkspace(async (root) => {
     // What `sandbox list --json` might answer: run() hands it over as b2c printed it.

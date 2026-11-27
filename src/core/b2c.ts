@@ -102,7 +102,15 @@ export type RunOptions = {
   signal?: AbortSignal
   /** Default two minutes. */
   timeoutMs?: number
-}
+} & ConfigChoice
+
+/**
+ * The folder whose dw.json one call reads, named by the caller (null: none, so no role is
+ * configured). Left out, it is the one `configRoot()` names at that moment. A piece that follows
+ * one operation over several calls names the folder it began with, so a focus change in between
+ * does not give it another file; nothing else changes for the other calls.
+ */
+export type ConfigChoice = { configRoot?: string | null }
 
 /**
  * `json` is the parsed stdout; undefined when b2c printed nothing (`code activate`, `delete`).
@@ -171,7 +179,7 @@ export type B2c = {
   /** b2c's version, `null` when it answers something unexpected. */
   version(): Promise<string | null>
   /** The state of dw.json and of each role. The only thing the rest of the plugin learns of it. */
-  instances(): Promise<InstancesState>
+  instances(options?: ConfigChoice): Promise<InstancesState>
   /**
    * `text` as it may be shown: every value the runner has read from a dw.json since the worker
    * started is masked, for every role and whichever workspace is focused now, and the home
@@ -186,7 +194,7 @@ export type B2c = {
    * anything that is not a text, and it never throws. It lets a piece find its own instance in
    * a list b2c returns without ever holding the host.
    */
-  isHost(role: Role, value: unknown): Promise<boolean>
+  isHost(role: Role, value: unknown, options?: ConfigChoice): Promise<boolean>
 }
 
 export type B2cDeps = {
@@ -935,9 +943,11 @@ export function createB2c(deps: B2cDeps): B2c {
     )
   }
 
-  async function readConfig(): Promise<LoadedConfig> {
+  /** The file of `choice.configRoot` when the caller names one, else of the folder `configRoot()` names now. */
+  async function readConfig(choice: ConfigChoice = {}): Promise<LoadedConfig> {
     const values = await deps.settings.read()
-    const config = await loadConfig({ root: await deps.configRoot(), configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
+    const root = choice.configRoot !== undefined ? choice.configRoot : await deps.configRoot()
+    const config = await loadConfig({ root, configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
     for (const role of ROLES) masker.remember(config.roles[role].vars)
     everRead = true
     return config
@@ -947,14 +957,14 @@ export function createB2c(deps: B2cDeps): B2c {
    * Guard, flags, credentials, arguments, the folder and the command to spawn; throws a B2cError
    * before any start.
    */
-  async function prepare(args: readonly string[], options: { role?: Role; cwd?: string }, flag: '--json' | '--jsonl' | null) {
+  async function prepare(args: readonly string[], options: { role?: Role; cwd?: string } & ConfigChoice, flag: '--json' | '--jsonl' | null) {
     const { role } = options
     const verdict = guard(args, role)
     if (!verdict.ok) throw new B2cError(verdict.code)
     // `--version` is a command of its own, not a flag any other command may carry.
     const flagAt = commandOf(args) === '--version' ? -1 : refusedFlag(args)
     if (flagAt !== -1) throw new B2cError('flag_not_allowed', { argument: flagAt })
-    const config = await readConfig()
+    const config = await readConfig(options)
     const known = valuesOf(config)
     const mask = masker.mask
     let vars: B2cEnvironment = {}
@@ -1158,8 +1168,8 @@ export function createB2c(deps: B2cDeps): B2c {
       return parseVersion(result.stdout)
     },
 
-    async instances() {
-      const config = await readConfig()
+    async instances(options = {}) {
+      const config = await readConfig(options)
       const instances = {} as Record<Role, RoleState>
       for (const role of ROLES) instances[role] = config.roles[role].state
       return { config: config.state, instances }
@@ -1172,10 +1182,10 @@ export function createB2c(deps: B2cDeps): B2c {
       return masker.mask(text)
     },
 
-    async isHost(role, value) {
+    async isHost(role, value, options = {}) {
       if (typeof value !== 'string' || !isRole(role)) return false
       try {
-        const host = (await readConfig()).roles[role].vars.SFCC_SERVER
+        const host = (await readConfig(options)).roles[role].vars.SFCC_SERVER
         return !!host && host.trim().toLowerCase() === value.trim().toLowerCase()
       } catch {
         return false
