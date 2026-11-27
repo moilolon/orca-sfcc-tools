@@ -469,3 +469,43 @@ test('secrets never survive normalisation: keys, passwords, tokens, cookies, JWT
     assert.equal(normalize(text), text, text)
   }
 })
+
+test('after a word of the password family, a plain lowercase word is masked unless the sentence goes on with it', () => {
+  // Invented passwords, each a plain lowercase word: masked.
+  for (const [text, expected] of [
+    ['Login failed with password sunshine', 'Login failed with password <secret>'],
+    ['login failed for password letmein', 'login failed for password <secret>'],
+    ['password correcthorsebatterystaple', 'password <secret>'],
+    ['passwd qwerty rejected', 'passwd <secret> rejected'],
+    ['invalid pwd monkey', 'invalid pwd <secret>'],
+    ['secret mysecretvalue leaked', 'secret <secret> leaked'],
+    ['apikey liveabcdefghij refused', 'apikey <secret> refused'],
+    ['api_key liveabcdefghij refused', 'api_key <secret> refused'],
+    ['passphrase opensesame refused', 'passphrase <secret> refused'],
+    ['token abcdefghijklmnop rejected', 'token <secret> rejected'],
+    ['used Bearer abcdefghijklmnop', 'used Bearer <secret>']
+  ]) {
+    assert.equal(normalize(text), expected, text)
+  }
+  // Invented sentences: kept as they are.
+  for (const text of [
+    'Payment authorization failed',
+    'Session expired for basket',
+    'Token expired, refreshing',
+    'token refresh failed',
+    'token is missing',
+    'Password reset email could not be sent',
+    'password policy violated: too short',
+    'Secret store unavailable',
+    'Secret manager timeout',
+    'Password must contain a digit',
+    'Missing password for service account',
+    'Password expired for account',
+    'password mismatch on confirmation',
+    'Password field empty',
+    'cookie missing from request',
+    'sent Bearer token without scope'
+  ]) {
+    assert.equal(normalize(text), text, text)
+  }
+})

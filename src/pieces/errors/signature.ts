@@ -20,10 +20,13 @@
 //         `dwsecuretoken_x=…`, `"token":"…"`), a key holding one of `SECRET_WORDS` anywhere in it,
 //         any letter case, up to the next separator (space, `,`, `;`, `&`, a bracket or a quote;
 //         a quoted value whole), a `Bearer`/`Basic` scheme before it included
-//       - the value after one of those words and a space (`with password Hunter2!`), unless it
-//         is a plain lowercase word, which in a log is the sentence going on (`authorization
-//         failed`, `session expired`)
-//       - `Bearer …` and `Basic …` credentials (not a plain lowercase word)
+//       - the value after one of those words and a space (`with password Hunter2!`). A plain
+//         lowercase word there is the sentence going on (`authorization failed`, `session
+//         expired`) and stays, except after a word of the password family (`PASSWORD_WORDS`),
+//         where a weak password is just such a word: there it stays only when it is one of
+//         `SENTENCE_WORDS` (`password reset`, `token expired`), so `password sunshine` is masked
+//       - `Bearer …` and `Basic …` credentials (not a plain lowercase word; after `Bearer`, a
+//         lowercase run of 12 characters or more is one)
 //       - JWT-shaped tokens: three base64url parts joined by dots (`eyJ…` first, or each of 16
 //         characters or more, with a digit)
 //       - runs of 20 or more hexadecimal characters, and runs of 20 or more base64 characters
@@ -252,13 +255,34 @@ function numbers(text: string): string {
 }
 
 /** Words that, in a key or before a value, say the value is a secret. */
-const SECRET_WORDS = 'password|passwd|pwd|secret|token|apikey|api_key|authorization|set-cookie|cookie|session'
+const SECRET_WORDS = 'password|passwd|pwd|passphrase|secret|token|apikey|api_key|authorization|set-cookie|cookie|session'
+
+/** The words whose value is a password far more often than a sentence: see `keepsSentence`. */
+const PASSWORD_WORDS = /^(?:password|passwd|pwd|passphrase|secret|token|apikey|api_key)$/i
+
+/** Lowercase words a sentence goes on with after a word of the password family. */
+export const SENTENCE_WORDS: ReadonlySet<string> = new Set([
+  'is', 'was', 'are', 'be', 'for', 'to', 'of', 'and', 'or', 'not', 'has', 'had', 'must', 'should', 'can', 'cannot', 'could', 'will',
+  'policy', 'reset', 'recovery', 'expired', 'expiry', 'invalid', 'incorrect', 'wrong', 'missing', 'required', 'mismatch', 'changed',
+  'change', 'failed', 'failure', 'rejected', 'empty', 'length', 'too', 'store', 'manager', 'field', 'hash', 'validation', 'update',
+  'updated', 'the', 'a', 'an', 'in', 'on', 'with', 'without', 'from', 'by', 'if', 'when', 'after', 'attempt', 'attempts', 'check', 'verification',
+  // `token refresh failed`, `token refreshed`: the usual sentences of a token.
+  'refresh', 'refreshed', 'refreshing'
+])
 /** A value up to the next separator; a quoted one whole. */
 const SECRET_VALUE = `(?:(?:Bearer|Basic)\\s+)?(?:"[^"\\n]*"|'[^'\\n]*'|[^\\s,;&()\\[\\]{}<>"']+)`
 
-/** Whether a value after a secret's word and a space is the sentence going on, not a value. */
 function isPlainWord(value: string): boolean {
   return /^[a-z]+$/.test(value)
+}
+
+/**
+ * Whether the value after a secret's word and a space is the sentence going on, not a value: a
+ * plain lowercase word, and after a word of the password family only one of `SENTENCE_WORDS`.
+ */
+function keepsSentence(word: string, value: string): boolean {
+  if (!isPlainWord(value)) return false
+  return PASSWORD_WORDS.test(word) ? SENTENCE_WORDS.has(value) : true
 }
 
 /** Whether a run of 20 or more base64 characters looks like a key or a token, not a name or a path. */
@@ -280,8 +304,9 @@ const RULES: readonly Rule[] = [
   // Secrets first (see above).
   [/\b((?:set-)?cookie)(\s*:\s*)[^\n]*/gi, '$1$2<secret>'],
   [new RegExp(`(\\b[\\w.-]*?(?:${SECRET_WORDS})[\\w.-]*["']?)(\\s*[=:]\\s*)${SECRET_VALUE}`, 'gi'), '$1$2<secret>'],
-  [new RegExp(`\\b(${SECRET_WORDS})(\\s+)(${SECRET_VALUE})`, 'gi'), (whole: string, word: string, space: string, value: string) => (isPlainWord(value) || value === '<secret>' ? whole : `${word}${space}<secret>`)],
-  [/\b(Bearer|Basic)(\s+)([A-Za-z0-9._~+/=-]{6,})/g, (whole: string, scheme: string, space: string, value: string) => (isPlainWord(value) ? whole : `${scheme}${space}<secret>`)],
+  [new RegExp(`\\b(${SECRET_WORDS})(\\s+)(${SECRET_VALUE})`, 'gi'), (whole: string, word: string, space: string, value: string) => (keepsSentence(word, value) || value === '<secret>' ? whole : `${word}${space}<secret>`)],
+  [/\b(Bearer|Basic)(\s+)([A-Za-z0-9._~+/=-]{6,})/g, (whole: string, scheme: string, space: string, value: string) =>
+    isPlainWord(value) && !(scheme === 'Bearer' && value.length >= 12) ? whole : `${scheme}${space}<secret>`],
   [/\beyJ[\w-]{2,}\.[\w-]{2,}\.[\w-]{2,}/g, '<secret>'],
   [/(?<![\w.-])(?=[\w.-]*\d)[\w-]{16,}\.[\w-]{16,}\.[\w-]{16,}(?![\w.-])/g, '<secret>'],
   [/(?<![\w-])[0-9a-fA-F]{20,}(?![\w-])/g, '<secret>'],
