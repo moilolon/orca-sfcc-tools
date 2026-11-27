@@ -164,6 +164,10 @@ test('where an expression ends, as in the ISML grammar', () => {
     // A regex literal's quotes are not strings.
     ['<p>${s.replace(/\'/g, "")}</p><b>${t}</b>', '${s.replace(/\'/g, "")}', true],
     ['<p>${a / b / c}</p>', '${a / b / c}', true],
+    // After a postfix `++` or `--` a `/` divides.
+    ['<p>${count++ / 2}</p><b>${t}</b>', '${count++ / 2}', true],
+    ["<p>${n-- / 2 + '}'}</p>", "${n-- / 2 + '}'}", true],
+    ['<p>${a + /x/.test(b)}</p>', '${a + /x/.test(b)}', true],
     ['<!-- ${a --> after', '${a ', false],
     ['<p>${ "}" + \'{\' + `x${y}z` }</p>', '${ "}" + \'{\' + `x${y}z` }', true],
     ['<p>${ /* } */ a }</p>', '${ /* } */ a }', true],

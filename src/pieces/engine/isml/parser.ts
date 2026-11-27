@@ -191,6 +191,7 @@ class IsmlParser {
 
   constructor(text: string) {
     this.text = text
+    this.rescanBudget = 2 * text.length + EXPRESSION_CHARACTERS
   }
 
   private tooDeep = false
@@ -303,8 +304,10 @@ class IsmlParser {
           continue
         }
         if (html && this.startsWithCI('<!doctype', pos)) {
-          const close = text.indexOf('>', pos)
-          const end = close === -1 || close >= limit ? limit : close + 1
+          // To its `>`; one missing it stops before the next `<` or the end of its line.
+          let end = pos + 2
+          while (end < limit && text[end] !== '>' && text[end] !== '<' && text[end] !== '\n' && text[end] !== '\r') end++
+          if (end < limit && text[end] === '>') end++
           children().push({ type: 'Doctype', start: pos, end })
           pos = end
           continue
@@ -434,6 +437,14 @@ class IsmlParser {
   /** How many start tags are being read inside one another (ISML tags inside a tag or a value). */
   private tagDepth = 0
 
+  /**
+   * How many characters may still be read and then thrown away: by a lenient `${…}` pass that
+   * fails, and by an unclosed value read past the end of its line. What is thrown away is read
+   * again, so without a bound a long line of such constructs costs quadratic time; with one, the
+   * whole parse reads at most about three times the text. Real templates never spend it.
+   */
+  private rescanBudget: number
+
   private parseStartTag(start: number, limit: number): Element {
     this.tagDepth++
     try {
@@ -558,7 +569,8 @@ class IsmlParser {
 
   private parseQuotedValue(start: number, limit: number, quote: '"' | "'"): AttributeValue {
     const mark = this.problems.length
-    const scan = this.scanValueParts(start + 1, limit, quote)
+    // Past the rescan budget a value no longer looks beyond its line for its quote.
+    const scan = this.scanValueParts(start + 1, limit, quote, this.rescanBudget <= 0)
     if (scan.closed) return { quote, contentStart: start + 1, contentEnd: scan.end, parts: scan.parts, closed: true, start, end: scan.end + 1 }
     // No closing quote: the value stops at the end of its line, and the rest is parsed again as
     // content. The scan is cut there, never run twice (tags nested in values would make that
@@ -575,6 +587,7 @@ class IsmlParser {
       else if (part.start < cut) cut = part.start
       break
     }
+    this.rescanBudget -= scan.end - cut
     // What was read past the cut is read again: its problems go with it.
     for (let i = this.problems.length - 1; i >= mark; i--) if (this.problems[i].start >= cut) this.problems.splice(i, 1)
     this.report('unclosed_attribute_value', start, cut)
@@ -586,7 +599,7 @@ class IsmlParser {
    * span lines, but not into a line that starts with an HTML tag: its quote is taken as missing
    * there. An ISML tag belongs in a value, at the start of a line too (`class="a\n<isif …>b</isif>"`).
    */
-  private scanValueParts(from: number, limit: number, quote: '"' | "'"): { parts: AttributeValue['parts']; end: number; closed: boolean } {
+  private scanValueParts(from: number, limit: number, quote: '"' | "'", oneLine = false): { parts: AttributeValue['parts']; end: number; closed: boolean } {
     const text = this.text
     const parts: AttributeValue['parts'] = []
     let p = from
@@ -600,7 +613,7 @@ class IsmlParser {
         flush(p)
         return { parts, end: p, closed: true }
       }
-      if ((c === '\n' || c === '\r') && this.tagLineAfter(p, limit, true)) {
+      if ((c === '\n' || c === '\r') && (oneLine || this.tagLineAfter(p, limit, true))) {
         flush(p)
         return { parts, end: p, closed: false }
       }
@@ -658,8 +671,15 @@ class IsmlParser {
    */
   parseExpression(start: number, limit: number, quote: '"' | "'" | null): IsmlExpression {
     const codeStart = start + 2
-    let scan = scanExpression(this.text, codeStart, limit, quote, quote !== null)
-    if (!scan.closed && quote !== null) scan = scanExpression(this.text, codeStart, limit, quote, false)
+    let scan: ExpressionScan = { end: codeStart, closed: false, scanned: 0 }
+    // The lenient pass may read past the value's quote; when it fails, what it read is read again
+    // by what follows, so its work is charged to the rescan budget, and once that is spent only
+    // the strict pass runs.
+    if (quote !== null && this.rescanBudget > 0) {
+      scan = scanExpression(this.text, codeStart, limit, quote, true, this.rescanBudget)
+      if (!scan.closed) this.rescanBudget -= scan.scanned
+    }
+    if (!scan.closed) scan = scanExpression(this.text, codeStart, limit, quote, false)
     if (scan.closed) return { type: 'Expression', codeStart, codeEnd: scan.end, closed: true, start, end: scan.end + 1 }
     this.report('unclosed_expression', start, scan.end)
     return { type: 'Expression', codeStart, codeEnd: scan.end, closed: false, start, end: scan.end }
@@ -716,10 +736,19 @@ class IsmlParser {
  * nested braces, strings, template literals, regex literals and `/* *\/` comments, across lines
  * too. One that does not balance is unclosed and ends at the first of: the end of its first line,
  * `</` or `-->` (outside a quoted value), or `quote` unless `lenient`. Looking for the balance
- * stops at a line that starts with a tag, or past `EXPRESSION_LINES` or `EXPRESSION_CHARACTERS`,
- * so no `${` reads far: the work per expression is bounded.
+ * past its first line stops at a line that starts with a tag, or past `EXPRESSION_LINES` or
+ * `EXPRESSION_CHARACTERS` (checked on every character), and the whole scan stops past `budget`
+ * characters. `scanned` says how far it read: the parser charges a failed lenient scan to its
+ * rescan budget, which keeps a whole template linear.
  */
-export function scanExpression(text: string, from: number, limit: number, quote: '"' | "'" | null, lenient: boolean): { end: number; closed: boolean } {
+export function scanExpression(
+  text: string,
+  from: number,
+  limit: number,
+  quote: '"' | "'" | null,
+  lenient: boolean,
+  budget = Infinity
+): ExpressionScan {
   // What is open: ordinary braces, a template literal, a template's `${`.
   const stack: ('brace' | 'template' | 'substitution')[] = []
   let p = from
@@ -727,9 +756,15 @@ export function scanExpression(text: string, from: number, limit: number, quote:
   let lines = 0
   // The last character of code that is not a space: whether a `/` starts a regex or divides.
   let previous = ''
-  const unclosed = (at: number) => ({ end: firstLineEnd === -1 ? Math.min(at, limit) : Math.min(at, firstLineEnd), closed: false })
+  const unclosed = (at: number): ExpressionScan => ({
+    end: firstLineEnd === -1 ? Math.min(at, limit) : Math.min(at, firstLineEnd),
+    closed: false,
+    scanned: Math.min(at, limit) - from
+  })
   const stopsAt = (c: string) => quote !== null && !lenient && c === quote
   while (p < limit) {
+    // Checked on every character, not only at line breaks: a long line is bounded too.
+    if (p - from > budget || (firstLineEnd !== -1 && p - from > EXPRESSION_CHARACTERS)) return unclosed(p)
     const c = text[p]
     if (c === '\n' || c === '\r') {
       if (firstLineEnd === -1) firstLineEnd = p
@@ -754,7 +789,7 @@ export function scanExpression(text: string, from: number, limit: number, quote:
     if (quote === null && c === '<' && text[p + 1] === '/') return unclosed(p)
     if (quote === null && c === '-' && text.startsWith('-->', p)) return unclosed(p)
     if (c === '}') {
-      if (stack.length === 0) return { end: p, closed: true }
+      if (stack.length === 0) return { end: p, closed: true, scanned: p - from }
       stack.pop()
       p++
       previous = '}'
@@ -812,10 +847,23 @@ export function scanExpression(text: string, from: number, limit: number, quote:
       previous = 'a'
       continue
     }
+    if ((c === '+' || c === '-') && text[p + 1] === c) {
+      // `++` and `--` end an operand (`count++ / 2` divides): after them a `/` divides.
+      previous = 'a'
+      p += 2
+      continue
+    }
     if (c !== ' ' && c !== '\t') previous = c
     p++
   }
   return unclosed(limit)
+}
+
+/** Where a scan of a `${…}` ended, whether it balanced, and how many characters it read. */
+export interface ExpressionScan {
+  end: number
+  closed: boolean
+  scanned: number
 }
 
 // After these (or at the start), a `/` begins a regex literal; after anything else it divides.
@@ -857,7 +905,7 @@ export function walkTemplate(document: IsmlDocument, visit: (node: IsmlNode) => 
     visit(node)
     if (node.type === 'Element') {
       const inner: IsmlNode[] = [...node.inTag]
-      for (const a of node.attributes) if (a.value) inner.push(...a.value.parts)
+      for (const a of node.attributes) if (a.value) for (const part of a.value.parts) inner.push(part)
       inner.sort((x, y) => x.start - y.start)
       pushAll(node.children)
       pushAll(inner)

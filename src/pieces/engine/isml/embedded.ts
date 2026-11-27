@@ -41,15 +41,15 @@ export function templateScript(text: string, document: IsmlDocument = parseTempl
     if (node.type === 'Expression') {
       const parsed = parseExpression(text, { start: node.codeStart, end: node.codeEnd })
       fragments.push({ kind: 'expression', node: parsed.expression, owner: node, start: node.codeStart, end: node.codeEnd })
-      comments.push(...parsed.comments)
-      problems.push(...parsed.problems)
+      for (const comment of parsed.comments) comments.push(comment)
+      for (const problem of parsed.problems) problems.push(problem)
     } else if (node.type === 'IsScript') {
       const parsed = parseScript(text, { start: node.codeStart, end: node.codeEnd })
       fragments.push({ kind: 'script', node: parsed.program, owner: node, start: node.codeStart, end: node.codeEnd })
-      comments.push(...parsed.comments)
-      problems.push(...parsed.problems)
+      for (const comment of parsed.comments) comments.push(comment)
+      for (const problem of parsed.problems) problems.push(problem)
     } else if (node.type === 'Element') {
-      declarations.push(...elementDeclarations(text, node))
+      for (const declaration of elementDeclarations(text, node)) declarations.push(declaration)
     }
   })
   fragments.sort((a, b) => a.start - b.start)

@@ -122,8 +122,11 @@ Changing it needs the owner's yes.
       unclosed one ends with its first line, and the search for its `}` stops at a line that
       starts with a tag (bounded by `EXPRESSION_LINES`/`EXPRESSION_CHARACTERS`). A quoted value
       may hold ISML tags anywhere, a line start included; it is unclosed only before a line that
-      starts with an HTML tag. Searches for a construct's end are remembered per pattern, so runs
-      of unclosed constructs stay linear. `isml/embedded.ts` parses its JavaScript in template
+      starts with an HTML tag. Searches for a construct's end are remembered per pattern, and
+      what is read and thrown away (a failed lenient `${…}` pass in a value, an unclosed value
+      cut at its line) is charged to a rescan budget of about twice the text, past which only
+      the cheap reading runs: any template parses in linear time (`limits.test.ts` checks every
+      shape it knows at two sizes). `isml/embedded.ts` parses its JavaScript in template
       positions, where a template-level name is seen only after it is declared. Fixtures are
       invented and read with LF (`fixtures/read.ts`); `line-endings.test.ts` runs each with LF,
       CRLF and CR, and `limits.test.ts` holds the inputs that once broke a bound or took

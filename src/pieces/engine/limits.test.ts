@@ -37,10 +37,10 @@ test('a 100,000-link chain past the bound reports too_deep once', () => {
   assert.ok(problems.length < 20, `${problems.length} problems`)
 })
 
-/** The best of two runs, in milliseconds. */
+/** The best of three runs, in milliseconds. */
 function time(run: () => void): number {
   let best = Infinity
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < 3; i++) {
     const started = performance.now()
     run()
     best = Math.min(best, performance.now() - started)
@@ -75,6 +75,71 @@ test('runs of unclosed constructs take linear time', () => {
   }
   script('20,000 unclosed comments in strings', "a('/*');\n".repeat(20000))
   script('20,000 var of one name', 'var v = v + 1;\n'.repeat(20000))
+})
+
+/** `prefix`, then `unit` repeated until the text holds `size` characters, then `suffix`. */
+const build = (size: number, unit: string, prefix = '', suffix = '') => prefix + unit.repeat(Math.max(1, Math.ceil((size - prefix.length - suffix.length) / unit.length))) + suffix
+
+test('a 1 MB line of values with an unclosed ${ parses in well under a second', () => {
+  const text = build(1_000_000, 'b="${(x" ', '<a ', '>')
+  const took = time(() => templateScript(text, parseTemplate(text).document))
+  console.log(`1 MB line of b="\${(x": ${took.toFixed(0)} ms`)
+  assert.ok(took < 1000, `${took.toFixed(0)} ms`)
+  const tags = build(1_000_000, '<a b="${(x">')
+  const tagsTook = time(() => templateScript(tags, parseTemplate(tags).document))
+  console.log(`1 MB line of <a b="\${(x">: ${tagsTook.toFixed(0)} ms`)
+  assert.ok(tagsTook < 1000, `${tagsTook.toFixed(0)} ms`)
+})
+
+test('no input shape grows worse than linear', () => {
+  // Each shape at 64 KB and at four times that. Linear work grows about 4 times, quadratic 16:
+  // the bound (8 times, plus room for a busy machine and its garbage collector) tells them apart.
+  const templates: [string, string, string?, string?][] = [
+    ['values with an unclosed ${ on one line', 'b="${(x" ', '<a ', '>'],
+    ['tags with an unclosed ${ in a value', '<a b="${(x">'],
+    ['unclosed braces closed at the end', 'b="${{x" ', '<a ', '}">'],
+    ['values with an unclosed ${ on many lines', 'b="${{x"\n', '<a ', '>'],
+    ['unclosed ${{ in text', '${{', '<p>'],
+    ['unclosed ${ on many lines', '${(x\n'],
+    ['unclosed template literals in ${', '${`'],
+    ['unclosed regex literals in ${', '${(/x'],
+    ['comments in ${', '${/*}\n'],
+    ['unclosed values on lines without a tag', 'x<a b="x\n'],
+    ['ISML tags in values', '<a b="<isif c=\'${x}\'>'],
+    ['unclosed doctypes', '<!doctype x'],
+    ['stray end tags under deep nesting', '</span>', '<div>'.repeat(300)],
+    ['unclosed start tags', '<a b'],
+    ['attributes of one tag', 'x ', '<a ', '>'],
+    ['unclosed comments', '<!--'],
+    ['unclosed <isscript>', '<isscript>a(\n'],
+    ['stray ISML end tags', '</isif>'],
+    ['isset of one name', '<isset name="v" value="${v}"/>${v}\n']
+  ]
+  const scripts: [string, string, string?][] = [
+    ['broken statements on one line', 'a b '],
+    ['unclosed calls', 'f('],
+    ['objects missing commas', 'x = {a: 1 b: 2}\n'],
+    ['unterminated templates', '`${'],
+    ['comments in strings', "a('/*');\n"],
+    ['an else-if chain', ' else if (c) { u(); }', 'if (a) {}'],
+    ['many exports of one name', 'module.exports = base;\nbase.x = function () {};\nObject.assign(base, { y: 1 });\n', 'var base = {};\n'],
+    ['one name declared many times', 'var v = v + 1;\n']
+  ]
+  const SIZE = 64_000
+  const check = (label: string, run: (text: string) => void, make: (size: number) => string) => {
+    const small = make(SIZE)
+    const large = make(SIZE * 4)
+    const tSmall = time(() => run(small))
+    const tLarge = time(() => run(large))
+    console.log(`${label}: ${tSmall.toFixed(1)} ms, ×4: ${tLarge.toFixed(1)} ms`)
+    assert.ok(tLarge < tSmall * 8 + 50, `${label}: ${tSmall.toFixed(1)} ms then ${tLarge.toFixed(1)} ms`)
+  }
+  for (const [label, unit, prefix, suffix] of templates) {
+    check(label, (text) => templateScript(text, parseTemplate(text).document), (size) => build(size, unit, prefix, suffix))
+  }
+  for (const [label, unit, prefix] of scripts) {
+    check(label, (text) => scriptFacts(parseScript(text).program), (size) => build(size, unit, prefix))
+  }
 })
 
 test('a run of sibling loops still gives each fragment its own loop', () => {

@@ -809,6 +809,7 @@ class FactsBuilder {
     }
     // Names whose members are exported: what module.exports is assigned (directly or as an
     // Object.assign base), and every binding of module.superModule.
+    const builtOn = this.builtOn(assignments)
     const exportedNames = new Set<number>(superBindings)
     for (const assignment of assignments) {
       if (assignment.value.kind === 'identifier' && assignment.value.declaration != null) exportedNames.add(assignment.value.declaration)
@@ -816,7 +817,7 @@ class FactsBuilder {
     }
     for (const id of exportedNames) {
       const declaration = this.declarations[id]
-      if (superBindings.has(id) && !this.exportsBuildOn(assignments, id)) continue
+      if (superBindings.has(id) && !builtOn.has(id)) continue
       if (declaration.init && declaration.init.type === 'ObjectExpression') {
         for (const member of this.objectMembers(declaration.init, 'object')) members.push({ ...member, value: classify(member.valueNode), order: member.start })
       }
@@ -824,7 +825,7 @@ class FactsBuilder {
     for (const extension of this.extensions) {
       const declaration = resolve(extension.object, extension.objectScope, extension.objectStart)
       if (declaration === null || !exportedNames.has(declaration)) continue
-      if (superBindings.has(declaration) && !this.exportsBuildOn(assignments, declaration)) continue
+      if (superBindings.has(declaration) && !builtOn.has(declaration)) continue
       const fact: ExportMember & { order: number } = { name: extension.member, start: extension.start, end: extension.end, value: classify(extension.value), source: 'extension', order: extension.start }
       if (extension.doc) fact.doc = extension.doc
       members.push(fact)
@@ -839,7 +840,7 @@ class FactsBuilder {
       else if (target.type === 'Identifier' && target.name === 'exports') exported = isGlobal(target, scope)
       else if (target.type === 'Identifier') {
         const declaration = resolve(target.name, scope, target.start)
-        exported = declaration !== null && exportedNames.has(declaration) && (!superBindings.has(declaration) || this.exportsBuildOn(assignments, declaration))
+        exported = declaration !== null && exportedNames.has(declaration) && (!superBindings.has(declaration) || builtOn.has(declaration))
       }
       if (!exported) continue
       for (const argument of call.arguments.slice(1)) {
@@ -868,13 +869,14 @@ class FactsBuilder {
     }
   }
 
-  /** Whether a `module.exports = …` exports the declaration `id` or builds on it. */
-  private exportsBuildOn(assignments: ExportAssignment[], id: number): boolean {
-    return assignments.some(
-      (assignment) =>
-        (assignment.value.kind === 'identifier' && assignment.value.declaration === id) ||
-        (assignment.bases ?? []).some((base) => base.kind === 'identifier' && base.declaration === id)
-    )
+  /** The declarations a `module.exports = …` exports or builds on (as an `Object.assign` base). */
+  private builtOn(assignments: ExportAssignment[]): Set<number> {
+    const ids = new Set<number>()
+    for (const assignment of assignments) {
+      if (assignment.value.kind === 'identifier' && assignment.value.declaration != null) ids.add(assignment.value.declaration)
+      for (const base of assignment.bases ?? []) if (base.kind === 'identifier' && base.declaration != null) ids.add(base.declaration)
+    }
+    return ids
   }
 
   private objectMembers(object: AST.ObjectExpression, source: ExportSource): { name: string; start: number; end: number; valueNode: Expression; source: ExportSource; doc?: Comment }[] {

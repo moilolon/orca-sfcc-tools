@@ -67,6 +67,7 @@ export {
   type CloseTag,
   type Doctype,
   type Element,
+  type ExpressionScan,
   type HtmlComment,
   type IsComment,
   type IsScript,
