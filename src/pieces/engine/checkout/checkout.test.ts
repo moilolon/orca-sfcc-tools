@@ -312,8 +312,8 @@ test('6. metadata: custom attributes per object type with their type and positio
   const source = text(path)
   // `name` is a system attribute, not a custom one.
   assert.deepEqual(index.attributes('Product'), [
-    { id: 'gardenColour', type: 'string', path, start: offsetOf(source, 'gardenColour'), end: offsetOf(source, 'gardenColour') + 12, line: 10 },
-    { id: 'gardenBadge', type: 'enum-of-string', path, start: offsetOf(source, 'gardenBadge'), end: offsetOf(source, 'gardenBadge') + 11, line: 15 }
+    { id: 'gardenColour', type: 'string', path, start: offsetOf(source, 'gardenColour'), end: offsetOf(source, 'gardenColour') + 12, line: 10, source: 'checkout' },
+    { id: 'gardenBadge', type: 'enum-of-string', path, start: offsetOf(source, 'gardenBadge'), end: offsetOf(source, 'gardenBadge') + 11, line: 15, source: 'checkout' }
   ])
   assert.deepEqual(
     index.sitePreferences().map(({ id, type }) => ({ id, type })),
@@ -380,7 +380,9 @@ test('7. a controller that extends nothing, does not export, or extends a missin
   assert.deepEqual(show.problems.map((p) => p.code).sort(), ['not_exported', 'route_missing'])
   const home = copyOf(index.route('Home-Show')?.storefronts ?? [], 'GardenShop')
   assert.deepEqual(home.problems.map((p) => p.code), ['route_redefined'])
-  assert.equal(home.steps[0].cartridge, 'app_garden_core')
+  // SFRA refuses the second declaration when the controller loads: the first one is kept, the second is a problem.
+  assert.equal(home.steps[0].cartridge, 'app_garden_base')
+  assert.deepEqual(home.applied.map((step) => step.cartridge), ['app_garden_base'])
   assert.deepEqual(copyOf(index.route('Search-Show')?.storefronts ?? [], 'GardenOutlet').problems.map((p) => p.code), ['base_missing'])
 })
 

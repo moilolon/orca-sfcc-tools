@@ -121,16 +121,22 @@ export type ResourceResolution = {
   bundle: string
   locale: string
   copies: ResourceCopy[]
-  /** Every definition of the key in a bundle of that name, any cartridge and locale. */
+  /** Every definition of the key in a bundle of that name (or that name and a locale, `_fr`, `_fr_FR`), any cartridge. */
   candidates: ResourceKey[]
 }
 
 export type RouteStep = RouteOperation & { path: string; cartridge: string }
 
 export type RouteProblemCode =
-  /** `append` or `prepend` on a route the chain does not have. */
+  /**
+   * `append`, `prepend` or `replace` on a route the chain does not have. SFRA throws `Route with
+   * this name does not exist` and the controller does not load; the operation is not applied.
+   */
   | 'route_missing'
-  /** `get`, `post` or `use` on a name the chain already has: the later one wins. */
+  /**
+   * `get`, `post` or `use` on a name the chain already has. SFRA throws `Route with this name
+   * already exists` and the controller does not load; the earlier declaration is kept in the chain.
+   */
   | 'route_redefined'
   /** `server.extend(module.superModule)` with no copy after it on the path. */
   | 'base_missing'
@@ -145,7 +151,7 @@ export type RouteChain = {
   controller: string | null
   /** The steps in the order they run: prepends, the declaration, appends. Empty when the route is not served. */
   steps: RouteStep[]
-  /** Every operation on the route along the chain, in the order they are applied. */
+  /** Every operation applied to the route along the chain, in order; one SFRA refuses is a problem instead. */
   applied: RouteStep[]
   problems: RouteProblem[]
 }
@@ -156,13 +162,24 @@ export type RouteResolution = {
   storefronts: RouteChain[]
 }
 
+/** Where a metadata definition was read: a `meta/*.xml` of the checkout, or of the `metadataRef` ref. */
+export type MetadataOrigin = 'checkout' | 'git-ref'
+
+/** A custom attribute, with where it was read (`path` is in the checkout, or in the ref). */
+export type IndexedAttribute = AttributeDefinition & { source: MetadataOrigin }
+
 export type ObjectType = {
   typeId: string
   kind: ObjectTypeKind
-  attributes: AttributeDefinition[]
+  attributes: IndexedAttribute[]
 }
 
-export type MetadataSource = 'checkout' | 'git-ref' | 'none'
+/**
+ * Where the metadata came from as a whole: `both` when the checkout and the ref each gave some.
+ * The two are merged per object type and attribute; where both define an attribute, the checkout's
+ * definition is kept.
+ */
+export type MetadataSource = 'checkout' | 'git-ref' | 'both' | 'none'
 
 export type IndexCounts = {
   files: number
@@ -270,6 +287,98 @@ export function splitRouteId(id: string): { controller: string; name: string } |
 
 type GitCache = { ref: string; commit: string; archives: SiteArchive[]; metadata: ObjectTypeDefinition[] }
 
+/** A cartridge folder as the files show it now: where it is, its name and kind. */
+type RootInfo = { name: string; root: string; kind: CartridgeKind }
+
+/** A bundle file's name is `name`, or `name` and a locale: `_xx` or `_xx_XX`. `name_tile` is another bundle. */
+function isBundleOf(file: string, name: string): boolean {
+  return file === name || (file.startsWith(name + '_') && /^[a-z]{2}(_[A-Z]{2})?$/.test(file.slice(name.length + 1)))
+}
+
+/** The cartridge folders of a set of paths: a folder with `.project` and a `cartridge/` folder, or `modules` with `.project`. */
+function findRoots(paths: Iterable<string>): Map<string, RootInfo> {
+  const projects: string[] = []
+  const hasCartridgeFolder = new Set<string>()
+  for (const path of paths) {
+    if (basename(path) === '.project') projects.push(dirname(path))
+    if (path.startsWith('cartridge/')) hasCartridgeFolder.add('')
+    // Every folder that holds a `cartridge/` folder somewhere above the file.
+    let from = 0
+    while (true) {
+      const found = path.indexOf('/cartridge/', from)
+      if (found === -1) break
+      hasCartridgeFolder.add(path.slice(0, found))
+      from = found + 1
+    }
+  }
+  const roots = new Map<string, RootInfo>()
+  for (const root of projects.sort()) {
+    const name = root === '' ? '' : basename(root)
+    if (!name) continue
+    if (hasCartridgeFolder.has(root)) roots.set(root, { name, root, kind: 'cartridge' })
+    else if (name === 'modules') roots.set(root, { name, root, kind: 'modules' })
+  }
+  return roots
+}
+
+function sameRoots(a: ReadonlyMap<string, RootInfo>, b: ReadonlyMap<string, RootInfo>): boolean {
+  if (a.size !== b.size) return false
+  for (const [root, info] of a) if (b.get(root)?.kind !== info.kind) return false
+  return true
+}
+
+/** The nearest cartridge folder up from a path, in a map of roots. */
+function rootIn<T>(roots: ReadonlyMap<string, T>, path: string): T | null {
+  let dir = dirname(path)
+  while (true) {
+    const found = roots.get(dir)
+    if (found) return found
+    if (dir === '') return null
+    dir = dirname(dir)
+  }
+}
+
+/**
+ * Everything a query reads, published at once. A change works on its own copies of the files and
+ * records and builds a whole new `Published`; it is swapped in synchronously when complete, so a
+ * query never sees a half-built index.
+ */
+type Published = {
+  paths: Set<string>
+  records: Map<string, FileRecord>
+  roots: Map<string, CartridgeEntry>
+  cartridgeList: CartridgeEntry[]
+  byName: Map<string, CartridgeEntry>
+  duplicates: string[]
+  storefrontList: Storefront[]
+  pathSource: PathSource | 'none'
+  metadataSource: MetadataSource
+  objectTypes: Map<string, ObjectType>
+  bundles: Map<string, Map<string, Map<string, ResourceKey>>>
+  keyIndex: Map<string, ResourceKey[]>
+  gitError: GitFailure | null
+  truncated: boolean
+}
+
+function emptyPublished(): Published {
+  return {
+    paths: new Set(),
+    records: new Map(),
+    roots: new Map(),
+    cartridgeList: [],
+    byName: new Map(),
+    duplicates: [],
+    storefrontList: [],
+    pathSource: 'none',
+    metadataSource: 'none',
+    objectTypes: new Map(),
+    bundles: new Map(),
+    keyIndex: new Map(),
+    gitError: null,
+    truncated: false
+  }
+}
+
 export class CheckoutIndex {
   private readonly files: CheckoutFiles
   private settings: Required<CheckoutSettings>
@@ -277,28 +386,18 @@ export class CheckoutIndex {
   private readonly dw: ((module: string) => string | null) | null
   private readonly now: () => number
   private readonly concurrency: number
-
-  private paths = new Set<string>()
-  private records = new Map<string, FileRecord>()
-  private truncated = false
   private queue: Promise<unknown> = Promise.resolve()
 
-  // Derived
-  private cartridgeList: CartridgeEntry[] = []
-  private byName = new Map<string, CartridgeEntry>()
-  private roots = new Map<string, CartridgeEntry>()
-  private duplicates: string[] = []
-  private storefrontList: Storefront[] = []
-  private pathSource: PathSource | 'none' = 'none'
-  private metadataSource: MetadataSource = 'none'
-  private objectTypes = new Map<string, ObjectType>()
-  private bundles = new Map<string, Map<string, Map<string, ResourceKey>>>()
-  /** Every definition of a key, in any bundle and cartridge, the cartridges in order of their names. */
-  private keyIndex = new Map<string, ResourceKey[]>()
+  // What a change works on; queries never read these.
+  private workPaths = new Set<string>()
+  private workRecords = new Map<string, FileRecord>()
+  private workRoots = new Map<string, RootInfo>()
+  private workTruncated = false
   private gitCache: GitCache | null = null
-  private refRead: Promise<GitCache | null> | null = null
-  private refAllowed = false
   private gitError: GitFailure | null = null
+
+  // What queries read: the last complete index (see `Published`), and what is computed from it.
+  private published: Published = emptyPublished()
   private routeTables = new Map<string, Map<string, Map<string, RouteChain>>>()
   private countsCache: IndexCounts | null = null
   private builtAt: number | null = null
@@ -315,6 +414,37 @@ export class CheckoutIndex {
     this.concurrency = Math.max(1, options.concurrency ?? 8)
   }
 
+  // The published state, by the names the queries use.
+  private get paths(): Set<string> {
+    return this.published.paths
+  }
+  private get records(): Map<string, FileRecord> {
+    return this.published.records
+  }
+  private get cartridgeList(): CartridgeEntry[] {
+    return this.published.cartridgeList
+  }
+  private get byName(): Map<string, CartridgeEntry> {
+    return this.published.byName
+  }
+  private get storefrontList(): Storefront[] {
+    return this.published.storefrontList
+  }
+  private get objectTypes(): Map<string, ObjectType> {
+    return this.published.objectTypes
+  }
+  private get bundles(): Map<string, Map<string, Map<string, ResourceKey>>> {
+    return this.published.bundles
+  }
+  private get keyIndex(): Map<string, ResourceKey[]> {
+    return this.published.keyIndex
+  }
+
+  /** The published cartridge a path lies in. */
+  private rootOf(path: string): CartridgeEntry | null {
+    return rootIn(this.published.roots, path)
+  }
+
   /** Runs one change at a time: a build, an update and a change of settings never interleave. */
   private serial<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task)
@@ -327,10 +457,10 @@ export class CheckoutIndex {
     return this.serial(async () => {
       const started = this.now()
       const walked = await walkFiles(this.files)
-      this.truncated = walked.truncated
-      this.paths = new Set(walked.files)
-      for (const path of [...this.records.keys()]) if (!this.paths.has(path)) this.records.delete(path)
-      this.roots = this.findRoots()
+      this.workTruncated = walked.truncated
+      this.workPaths = new Set(walked.files)
+      for (const path of [...this.workRecords.keys()]) if (!this.workPaths.has(path)) this.workRecords.delete(path)
+      this.workRoots = findRoots(this.workPaths)
       await this.refresh(walked.files)
       await this.derive(true)
       this.builtAt = this.now()
@@ -340,21 +470,21 @@ export class CheckoutIndex {
 
   /**
    * Takes in the paths a watcher reported changed: a file is read again when its time changed, a
-   * folder is walked again, a path gone is dropped with what was below it. A `.project` added or
-   * removed changes what is a cartridge: every file is classified again (reading only those whose
-   * time or kind changed).
+   * folder is walked again, a path gone is dropped with what was below it. Then the cartridges are
+   * decided again from the files as they are now, whatever batch each event came in: when they
+   * changed (a `.project` added or removed, the first file of a `cartridge/` folder), every file is
+   * classified again, reading only those whose time or kind changed.
    */
   update(changed: readonly string[]): Promise<void> {
     return this.serial(async () => {
       const started = this.now()
-      let structural = false
       let archives = false
       const touched = new Set<string>()
       const drop = (known: string) => {
-        const kind = this.records.get(known)?.kind
+        const kind = this.workRecords.get(known)?.kind
         if (kind === 'site' || kind === 'metadata') archives = true
-        if (basename(known) === '.project') structural = true
-        this.drop(known)
+        this.workPaths.delete(known)
+        this.workRecords.delete(known)
       }
       for (const raw of new Set(changed)) {
         const path = normalizePath(raw)
@@ -363,35 +493,30 @@ export class CheckoutIndex {
         if (entries) {
           const walked = await walkFiles(this.files, path)
           const present = new Set(walked.files)
-          for (const known of [...this.paths]) {
-            if (isUnder(known, path) && !present.has(known)) drop(known)
-          }
+          for (const known of [...this.workPaths]) if (isUnder(known, path) && !present.has(known)) drop(known)
           for (const file of walked.files) {
-            if (!this.paths.has(file) && basename(file) === '.project') structural = true
-            this.paths.add(file)
+            this.workPaths.add(file)
             touched.add(file)
           }
           continue
         }
         const time = await this.files.time(path)
         if (time === null) {
-          for (const known of [...this.paths]) {
-            if (isUnder(known, path)) drop(known)
-          }
+          for (const known of [...this.workPaths]) if (isUnder(known, path)) drop(known)
         } else {
-          if (!this.paths.has(path) && basename(path) === '.project') structural = true
-          this.paths.add(path)
+          this.workPaths.add(path)
           touched.add(path)
         }
       }
-      if (structural) {
-        this.roots = this.findRoots()
-        await this.refresh([...this.paths].sort())
-      } else {
-        await this.refresh([...touched].sort())
-      }
-      // A cartridge's own file (its `.project`) changes its path's membership: the paths are rebuilt.
-      await this.derive(structural || archives || [...touched].some((path) => this.records.get(path)?.kind === 'site' || this.records.get(path)?.kind === 'metadata'))
+      const roots = findRoots(this.workPaths)
+      const structural = !sameRoots(roots, this.workRoots)
+      this.workRoots = roots
+      await this.refresh(structural ? [...this.workPaths].sort() : [...touched].sort())
+      const archiveTouched = [...touched].some((path) => {
+        const kind = this.workRecords.get(path)?.kind
+        return kind === 'site' || kind === 'metadata'
+      })
+      await this.derive(structural || archives || archiveTouched)
       this.updatedAt = this.now()
       this.updateMs = this.updatedAt - started
     })
@@ -406,64 +531,29 @@ export class CheckoutIndex {
     })
   }
 
-  /** The ref may point at another commit (a fetch, a commit): read it again if it does. */
+  /**
+   * The ref may point at another commit (a fetch, a commit): asks git which commit it names and,
+   * only when it changed, reads it again. Cheap enough to call on a timer.
+   */
   refreshRef(): Promise<void> {
-    return this.serial(() => this.derive(true))
-  }
-
-  private drop(path: string): void {
-    this.paths.delete(path)
-    this.records.delete(path)
-  }
-
-  // ---- classification
-
-  private findRoots(): Map<string, CartridgeEntry> {
-    const projects: string[] = []
-    for (const path of this.paths) if (basename(path) === '.project') projects.push(dirname(path))
-    const roots = new Map<string, CartridgeEntry>()
-    const hasCartridgeFolder = new Set<string>()
-    for (const path of this.paths) {
-      const at = path.indexOf('/cartridge/')
-      if (at !== -1) {
-        // Every folder that holds a `cartridge/` folder somewhere in the path.
-        let from = 0
-        while (true) {
-          const found = path.indexOf('/cartridge/', from)
-          if (found === -1) break
-          hasCartridgeFolder.add(path.slice(0, found))
-          from = found + 1
+    return this.serial(async () => {
+      const ref = this.settings.metadataRef.trim()
+      if (!ref || !this.git) return
+      if (this.gitCache && this.gitCache.ref === ref) {
+        try {
+          if ((await this.git.commit(ref)) === this.gitCache.commit) return
+        } catch {
+          // Read again below, which keeps the failure's code.
         }
-      } else if (path.startsWith('cartridge/')) {
-        hasCartridgeFolder.add('')
       }
-    }
-    for (const root of projects.sort()) {
-      const name = root === '' ? '' : basename(root)
-      if (!name) continue
-      if (hasCartridgeFolder.has(root)) roots.set(root, this.emptyCartridge(name, root, 'cartridge'))
-      else if (name === 'modules') roots.set(root, this.emptyCartridge(name, root, 'modules'))
-    }
-    return roots
+      await this.derive(true)
+    })
   }
 
-  private emptyCartridge(name: string, root: string, kind: CartridgeKind): CartridgeEntry {
-    return { name, root, kind, folders: [], templateLocales: [], formLocales: [], files: 0, paths: new Set() }
-  }
-
-  /** The cartridge folder a path lies in: the nearest one up. */
-  private rootOf(path: string): CartridgeEntry | null {
-    let dir = dirname(path)
-    while (true) {
-      const found = this.roots.get(dir)
-      if (found) return found
-      if (dir === '') return null
-      dir = dirname(dir)
-    }
-  }
+  // ---- classification (of the files a change works on)
 
   private classify(path: string): FileKind {
-    const cartridge = this.rootOf(path)
+    const cartridge = rootIn(this.workRoots, path)
     if (!cartridge) {
       if (isSiteArchivePath(path)) return 'site'
       if (isMetadataPath(path)) return 'metadata'
@@ -487,22 +577,24 @@ export class CheckoutIndex {
     await eachLimited(paths, this.concurrency, async (path) => {
       const kind = this.classify(path)
       if (kind === 'other') {
-        this.records.delete(path)
+        this.workRecords.delete(path)
         return
       }
       const time = await this.files.time(path)
       if (time === null) {
-        this.drop(path)
+        this.workPaths.delete(path)
+        this.workRecords.delete(path)
         return
       }
-      const known = this.records.get(path)
+      const known = this.workRecords.get(path)
       if (known && known.kind === kind && known.time === time) return
       const text = await this.files.read(path)
       if (text === null) {
-        this.drop(path)
+        this.workPaths.delete(path)
+        this.workRecords.delete(path)
         return
       }
-      this.records.set(path, this.scan(kind, path, stripBom(text), time))
+      this.workRecords.set(path, this.scan(kind, path, stripBom(text), time))
     })
   }
 
@@ -524,34 +616,51 @@ export class CheckoutIndex {
     }
   }
 
-  // ---- what is derived
+  // ---- what is derived, then published
 
+  /**
+   * Builds a whole new published state from the work copies and swaps it in. The ref is read first
+   * (the only wait), at most once, and only when `paths` says the paths are rebuilt: a file saved
+   * never starts git. Everything after it runs without a pause, so no query lands in between.
+   */
   private async derive(paths: boolean): Promise<void> {
-    // The ref is read at most once per change, and only when the paths are rebuilt: a file saved
-    // never starts git.
-    this.refRead = null
-    this.refAllowed = paths
-    this.routeTables.clear()
+    const ref = this.settings.metadataRef.trim()
+    let fromRef: GitCache | null = null
+    if (!ref || !this.git) {
+      this.gitCache = null
+      this.gitError = null
+    } else if (paths) {
+      fromRef = await this.readRef(ref)
+    } else {
+      fromRef = this.gitCache
+    }
+    const previous = this.published
+    const next: Published = { ...emptyPublished(), paths: new Set(this.workPaths), records: new Map(this.workRecords), truncated: this.workTruncated, gitError: this.gitError }
+    this.deriveCartridges(next)
+    this.deriveBundles(next)
+    if (paths || previous.storefrontList.length === 0) this.derivePaths(next, fromRef)
+    else {
+      next.storefrontList = previous.storefrontList.map((storefront) => ({ ...storefront, missing: storefront.cartridges.filter((name) => !next.byName.has(name)) }))
+      next.pathSource = previous.pathSource
+    }
+    this.deriveMetadata(next, fromRef)
+    // The swap: one assignment, with what is computed from the published state cleared with it.
+    this.published = next
+    this.routeTables = new Map()
     this.countsCache = null
-    this.deriveCartridges()
-    this.deriveBundles()
-    if (paths || this.storefrontList.length === 0) await this.derivePaths()
-    else this.storefrontList = this.storefrontList.map((storefront) => ({ ...storefront, missing: storefront.cartridges.filter((name) => !this.byName.has(name)) }))
-    await this.deriveMetadata()
   }
 
-  private deriveCartridges(): void {
-    for (const entry of this.roots.values()) {
-      entry.paths = new Set()
-      entry.files = 0
+  private deriveCartridges(next: Published): void {
+    for (const info of this.workRoots.values()) {
+      next.roots.set(info.root, { ...info, folders: [], templateLocales: [], formLocales: [], files: 0, paths: new Set() })
     }
-    for (const path of this.paths) {
-      const cartridge = this.rootOf(path)
+    for (const path of next.paths) {
+      const cartridge = rootIn(next.roots, path)
       if (!cartridge) continue
       cartridge.paths.add(path.slice(cartridge.root.length + 1))
       cartridge.files++
     }
-    const list = [...this.roots.values()].filter((entry) => entry.kind === 'modules' || entry.files > 0)
+    const list = [...next.roots.values()].filter((entry) => entry.kind === 'modules' || entry.files > 0)
     for (const entry of list) {
       const folders = new Set<string>()
       const templates = new Set<string>()
@@ -574,81 +683,66 @@ export class CheckoutIndex {
       entry.formLocales = [...forms].sort()
     }
     list.sort((a, b) => (a.root < b.root ? -1 : a.root > b.root ? 1 : 0))
-    this.cartridgeList = list
-    this.byName = new Map()
+    next.cartridgeList = list
     const duplicates = new Set<string>()
     for (const entry of list) {
-      if (this.byName.has(entry.name)) duplicates.add(entry.name)
-      else this.byName.set(entry.name, entry)
+      if (next.byName.has(entry.name)) duplicates.add(entry.name)
+      else next.byName.set(entry.name, entry)
     }
-    this.duplicates = [...duplicates].sort()
+    next.duplicates = [...duplicates].sort()
   }
 
-  private deriveBundles(): void {
-    this.bundles = new Map()
-    for (const [path, record] of this.records) {
+  private deriveBundles(next: Published): void {
+    for (const [path, record] of next.records) {
       if (record.kind !== 'properties') continue
-      const cartridge = this.rootOf(path)
-      if (!cartridge || this.byName.get(cartridge.name) !== cartridge) continue
+      const cartridge = rootIn(next.roots, path)
+      if (!cartridge || next.byName.get(cartridge.name) !== cartridge) continue
       const bundle = basename(path).replace(/\.properties$/i, '')
-      let ofCartridge = this.bundles.get(cartridge.name)
-      if (!ofCartridge) this.bundles.set(cartridge.name, (ofCartridge = new Map()))
+      let ofCartridge = next.bundles.get(cartridge.name)
+      if (!ofCartridge) next.bundles.set(cartridge.name, (ofCartridge = new Map()))
       const keys = new Map<string, ResourceKey>()
       // A key written twice: the last one counts, as Java reads it.
       for (const key of record.keys) keys.set(key.key, { ...key, path, cartridge: cartridge.name, bundle })
       ofCartridge.set(bundle, keys)
     }
-    this.keyIndex = new Map()
-    for (const name of [...this.bundles.keys()].sort()) {
-      for (const keys of (this.bundles.get(name) as Map<string, Map<string, ResourceKey>>).values()) {
+    for (const name of [...next.bundles.keys()].sort()) {
+      for (const keys of (next.bundles.get(name) as Map<string, Map<string, ResourceKey>>).values()) {
         for (const definition of keys.values()) {
-          const known = this.keyIndex.get(definition.key)
+          const known = next.keyIndex.get(definition.key)
           if (known) known.push(definition)
-          else this.keyIndex.set(definition.key, [definition])
+          else next.keyIndex.set(definition.key, [definition])
         }
       }
     }
   }
 
-  private checkoutArchives(): SiteArchive[] {
-    const archives: SiteArchive[] = []
-    for (const path of [...this.records.keys()].sort()) {
-      const record = this.records.get(path) as FileRecord
-      if (record.kind === 'site' && record.site) archives.push(record.site)
+  /** The records of one kind, by path. */
+  private recordsOf<K extends FileRecord['kind']>(records: Map<string, FileRecord>, kind: K): [string, Extract<FileRecord, { kind: K }>][] {
+    const out: [string, Extract<FileRecord, { kind: K }>][] = []
+    for (const path of [...records.keys()].sort()) {
+      const record = records.get(path) as FileRecord
+      if (record.kind === kind) out.push([path, record as Extract<FileRecord, { kind: K }>])
     }
-    return archives
-  }
-
-  private checkoutMetadata(): ObjectTypeDefinition[] {
-    const types: ObjectTypeDefinition[] = []
-    for (const path of [...this.records.keys()].sort()) {
-      const record = this.records.get(path) as FileRecord
-      if (record.kind === 'metadata') types.push(...record.types)
-    }
-    return types
-  }
-
-  /** The ref's files, read once per rebuild of the paths; otherwise what was read last. */
-  private readRefOnce(): Promise<GitCache | null> {
-    if (!this.refAllowed) return Promise.resolve(this.gitCache)
-    if (!this.refRead) this.refRead = this.readRef()
-    return this.refRead
+    return out
   }
 
   /** The ref's site archives and metadata, read again only when it names another commit. */
-  private async readRef(): Promise<GitCache | null> {
-    const ref = this.settings.metadataRef.trim()
-    if (!ref || !this.git) return null
+  private async readRef(ref: string): Promise<GitCache | null> {
+    const git = this.git as RefReader
     try {
-      const commit = await this.git.commit(ref)
+      const commit = await git.commit(ref)
       if (commit === null) throw new GitError('ref_not_found')
-      if (this.gitCache && this.gitCache.ref === ref && this.gitCache.commit === commit) return this.gitCache
-      const listed = await this.git.list(commit, '')
+      if (this.gitCache && this.gitCache.ref === ref && this.gitCache.commit === commit) {
+        this.gitError = null
+        return this.gitCache
+      }
+      const listed = await git.list(commit, '')
       const archives: SiteArchive[] = []
       const metadata: ObjectTypeDefinition[] = []
       const wanted = listed.filter((path) => !/(^|\/)cartridge\//.test(path) && (isSiteArchivePath(path) || isMetadataPath(path))).sort()
       for (const path of wanted) {
-        const text = await this.git.read(commit, path)
+        // A file listed and gone before it is read is skipped.
+        const text = await git.read(commit, path)
         if (text === null) continue
         if (isSiteArchivePath(path)) {
           const site = parseSiteArchive(stripBom(text), path)
@@ -667,26 +761,19 @@ export class CheckoutIndex {
     }
   }
 
-  private async derivePaths(): Promise<void> {
-    if (!this.settings.metadataRef.trim()) {
-      this.gitError = null
-      this.gitCache = null
-    }
+  private derivePaths(next: Published, fromRef: GitCache | null): void {
     const setting = splitCartridgePath(this.settings.cartridgePath)
-    const missing = (cartridges: string[]) => cartridges.filter((name) => !this.byName.has(name))
+    const missing = (cartridges: string[]) => cartridges.filter((name) => !next.byName.has(name))
     if (setting.length > 0) {
-      this.pathSource = 'setting'
-      this.storefrontList = [{ id: SETTING_STOREFRONT, source: 'setting', cartridges: setting, missing: missing(setting), file: null, conflicts: 0 }]
+      next.pathSource = 'setting'
+      next.storefrontList = [{ id: SETTING_STOREFRONT, source: 'setting', cartridges: setting, missing: missing(setting), file: null, conflicts: 0 }]
       return
     }
-    let archives = this.checkoutArchives()
+    let archives = this.recordsOf(next.records, 'site').flatMap(([, record]) => (record.site ? [record.site] : []))
     let source: PathSource = 'site-archive'
-    if (archives.length === 0) {
-      const fromRef = await this.readRefOnce()
-      if (fromRef && fromRef.archives.length > 0) {
-        archives = fromRef.archives
-        source = 'git-ref'
-      }
+    if (archives.length === 0 && fromRef && fromRef.archives.length > 0) {
+      archives = fromRef.archives
+      source = 'git-ref'
     }
     const bySite = new Map<string, Storefront>()
     for (const archive of archives) {
@@ -697,29 +784,36 @@ export class CheckoutIndex {
       }
       bySite.set(archive.siteId, { id: archive.siteId, source, cartridges: archive.cartridges, missing: missing(archive.cartridges), file: archive.path, conflicts: 0 })
     }
-    this.storefrontList = [...bySite.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    this.pathSource = this.storefrontList.length > 0 ? source : 'none'
+    next.storefrontList = [...bySite.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    next.pathSource = next.storefrontList.length > 0 ? source : 'none'
   }
 
-  private async deriveMetadata(): Promise<void> {
-    let types = this.checkoutMetadata()
-    let source: MetadataSource = types.length > 0 ? 'checkout' : 'none'
-    if (types.length === 0) {
-      const fromRef = this.settings.metadataRef.trim() ? await this.readRefOnce() : null
-      if (fromRef && fromRef.metadata.length > 0) {
-        types = fromRef.metadata
-        source = 'git-ref'
+  /**
+   * The checkout's metadata and the ref's, merged per object type and attribute: the checkout's
+   * definition wins where both define an attribute, the ref fills in the rest, and each attribute
+   * says where it was read. Within one source, the first file by path wins.
+   */
+  private deriveMetadata(next: Published, fromRef: GitCache | null): void {
+    const merged = new Map<string, ObjectType>()
+    const used = new Set<MetadataOrigin>()
+    const take = (types: readonly ObjectTypeDefinition[], source: MetadataOrigin) => {
+      for (const type of types) {
+        let known = merged.get(type.typeId)
+        if (!known) merged.set(type.typeId, (known = { typeId: type.typeId, kind: type.kind, attributes: [] }))
+        for (const attribute of type.attributes) {
+          if (known.attributes.some((a) => a.id === attribute.id)) continue
+          known.attributes.push({ ...attribute, source })
+          used.add(source)
+        }
       }
     }
-    const merged = new Map<string, ObjectType>()
-    for (const type of types) {
-      let known = merged.get(type.typeId)
-      if (!known) merged.set(type.typeId, (known = { typeId: type.typeId, kind: type.kind, attributes: [] }))
-      // An attribute defined in two files (two site import folders): the first, by path, is kept.
-      for (const attribute of type.attributes) if (!known.attributes.some((a) => a.id === attribute.id)) known.attributes.push(attribute)
-    }
-    this.objectTypes = merged
-    this.metadataSource = source
+    take(
+      this.recordsOf(next.records, 'metadata').flatMap(([, record]) => record.types),
+      'checkout'
+    )
+    if (fromRef) take(fromRef.metadata, 'git-ref')
+    next.objectTypes = merged
+    next.metadataSource = used.has('checkout') && used.has('git-ref') ? 'both' : used.has('checkout') ? 'checkout' : used.has('git-ref') ? 'git-ref' : 'none'
   }
 
   // ---- queries: cartridges and paths
@@ -887,7 +981,7 @@ export class CheckoutIndex {
       }
       return { storefront: storefront.id, key: null }
     })
-    const candidates = (this.keyIndex.get(key) ?? []).filter((definition) => definition.bundle === name || definition.bundle.startsWith(name + '_'))
+    const candidates = (this.keyIndex.get(key) ?? []).filter((definition) => isBundleOf(definition.bundle, name))
     return { key, bundle: name, locale: localeFallbacks(locale)[0], copies, candidates }
   }
 
@@ -896,7 +990,7 @@ export class CheckoutIndex {
     const out: ResourceKey[] = []
     for (const [name, ofCartridge] of this.bundles) {
       if (cartridge !== undefined && name !== cartridge) continue
-      for (const [file, keys] of ofCartridge) if (file === bundle || file.startsWith(bundle + '_')) out.push(...keys.values())
+      for (const [file, keys] of ofCartridge) if (isBundleOf(file, bundle)) out.push(...keys.values())
     }
     return out
   }
@@ -909,11 +1003,11 @@ export class CheckoutIndex {
   }
 
   /** The custom attributes of an object type (`Product`, `Order`, a custom object type). */
-  attributes(typeId: string): AttributeDefinition[] {
+  attributes(typeId: string): IndexedAttribute[] {
     return [...(this.objectTypes.get(typeId)?.attributes ?? [])]
   }
 
-  sitePreferences(): AttributeDefinition[] {
+  sitePreferences(): IndexedAttribute[] {
     return this.attributes(SITE_PREFERENCES)
   }
 
@@ -951,20 +1045,22 @@ export class CheckoutIndex {
     for (const operation of facts.operations) {
       const step: RouteStep = { ...operation, path, cartridge: cartridge.name }
       let chain = routes.get(operation.name)
+      if (!chain) routes.set(operation.name, (chain = { storefront: storefront.id, controller: path, steps: [], applied: [], problems: [] }))
+      const exists = chain.steps.length > 0
+      // As SFRA's server does: a declaration of a name that exists, and a change of one that does
+      // not, throw when the controller loads. They are kept as problems and not applied.
       if (DEFINING_METHODS.has(operation.method)) {
-        if (chain && chain.steps.length > 0) chain.problems.push({ code: 'route_redefined', path, start: operation.start, end: operation.end })
-        if (!chain) routes.set(operation.name, (chain = { storefront: storefront.id, controller: path, steps: [], applied: [], problems: [] }))
+        if (exists) {
+          chain.problems.push({ code: 'route_redefined', path, start: operation.start, end: operation.end })
+          continue
+        }
         chain.steps = [step]
-      } else if (operation.method === 'replace') {
-        if (!chain) routes.set(operation.name, (chain = { storefront: storefront.id, controller: path, steps: [], applied: [], problems: [] }))
-        chain.steps = [step]
-      } else {
-        if (!chain || chain.steps.length === 0) {
-          if (!chain) routes.set(operation.name, (chain = { storefront: storefront.id, controller: path, steps: [], applied: [], problems: [] }))
-          chain.problems.push({ code: 'route_missing', path, start: operation.start, end: operation.end })
-        } else if (operation.method === 'append') chain.steps.push(step)
-        else chain.steps.unshift(step)
-      }
+      } else if (!exists) {
+        chain.problems.push({ code: 'route_missing', path, start: operation.start, end: operation.end })
+        continue
+      } else if (operation.method === 'replace') chain.steps = [step]
+      else if (operation.method === 'append') chain.steps.push(step)
+      else chain.steps.unshift(step)
       chain.applied.push(step)
     }
     for (const chain of routes.values()) {
@@ -1109,13 +1205,13 @@ export class CheckoutIndex {
   status(): IndexStatus {
     return {
       cartridges: this.cartridgeList.map((entry) => ({ name: entry.name, kind: entry.kind, files: entry.files })),
-      duplicates: [...this.duplicates],
+      duplicates: [...this.published.duplicates],
       storefronts: this.storefronts(),
-      pathSource: this.pathSource,
-      metadataSource: this.metadataSource,
-      gitError: this.gitError,
+      pathSource: this.published.pathSource,
+      metadataSource: this.published.metadataSource,
+      gitError: this.published.gitError,
       counts: this.counts(),
-      truncated: this.truncated,
+      truncated: this.published.truncated,
       builtAt: this.builtAt,
       buildMs: this.buildMs,
       updatedAt: this.updatedAt,
