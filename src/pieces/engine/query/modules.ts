@@ -18,9 +18,23 @@ export type ModuleCopy = { storefront: string | null; path: string }
 export { SUPER_MODULE }
 
 /**
- * The files `require(module)` from `from` reaches. A `*\/…` module gives the copy of each
- * storefront that has one; with no storefront paths at all, every cartridge's copy, unlabelled.
- * `SUPER_MODULE` gives the copy `module.superModule` reaches on each storefront.
+ * The storefronts that load a file: those whose path holds its cartridge. Null when its cartridge
+ * is on no path (or it is in none, or `modules`): then which storefront runs it is not known.
+ */
+export function storefrontsOf(ctx: QueryContext, from: string): ReadonlySet<string> | null {
+  const cartridge = ctx.index.cartridgeOf(from)
+  if (!cartridge || cartridge.kind !== 'cartridge') return null
+  const on = ctx.index.storefronts().filter((storefront) => storefront.cartridges.includes(cartridge.name))
+  return on.length > 0 ? new Set(on.map((storefront) => storefront.id)) : null
+}
+
+/**
+ * The files `require(module)` from `from` reaches. A `*\/…` module gives, for each storefront
+ * whose path holds the file's own cartridge, the copy that path loads: a storefront that never
+ * loads the file never runs its `require`. For a file whose cartridge is on no path, the copies
+ * the paths reach, unlabelled: it may be loaded by name from any of them, so each copy may run
+ * but no storefront can be named. With no storefront path at all, every cartridge's copy,
+ * unlabelled. `SUPER_MODULE` gives the copy `module.superModule` reaches on each storefront.
  */
 export function moduleCopies(ctx: QueryContext, from: string, module: string): ModuleCopy[] {
   if (module === SUPER_MODULE) return ctx.index.superModule(from).copies.flatMap((copy) => (copy.path ? [{ storefront: copy.storefront, path: copy.path }] : []))
@@ -28,7 +42,10 @@ export function moduleCopies(ctx: QueryContext, from: string, module: string): M
   if (resolved.kind === 'file') return resolved.path ? [{ storefront: null, path: resolved.path }] : []
   if (resolved.kind === 'dw') return []
   if (resolved.copies.length === 0) return resolved.candidates.map((path) => ({ storefront: null, path }))
-  return resolved.copies.flatMap((copy) => (copy.path ? [{ storefront: copy.storefront, path: copy.path }] : []))
+  const on = storefrontsOf(ctx, from)
+  if (on) return resolved.copies.flatMap((copy) => (copy.path && on.has(copy.storefront) ? [{ storefront: copy.storefront, path: copy.path }] : []))
+  const paths = [...new Set(resolved.copies.flatMap((copy) => (copy.path ? [copy.path] : [])))]
+  return paths.map((path) => ({ storefront: null, path }))
 }
 
 /** What a script exports, from the index; null for a file it does not hold as a script. */

@@ -15,7 +15,7 @@ import { signature, type DwMemberKind } from '../dw/index'
 import { pathAt, rootAt, type Analysis, type Root } from './analysis'
 import { callRole, customTags, elementAt, stringArgumentAt } from './complete'
 import { ISML_TAG_ATTRIBUTES, TEMPLATE_ATTRIBUTE_TAGS } from './isml-tags'
-import { moduleMember, SUPER_MODULE, type QueryContext } from './modules'
+import { moduleMember, storefrontsOf, SUPER_MODULE, type QueryContext } from './modules'
 import { cartridgeRoutes } from './routes'
 import { guessedClass, isListedConstant, isStaticMember, memberName, membersFor, metadataTypeOf, subPackages, Types } from './types'
 
@@ -247,7 +247,10 @@ function moduleHover(ctx: QueryContext, from: string, module: string): HoverCont
     return ctx.dw.packageClasses(id).length > 0 ? packageHover(ctx, id) : null
   }
   if (resolved.kind === 'file') return { kind: 'module', module, form: resolved.form, copies: [{ storefront: null, path: resolved.path }], candidates: [] }
-  return { kind: 'module', module, form: resolved.form, copies: cap(resolved.copies), candidates: cap(resolved.candidates) }
+  // Only the storefronts that load the reading file run its require (all of them for a file on no path).
+  const on = storefrontsOf(ctx, from)
+  const copies = on ? resolved.copies.filter((copy) => on.has(copy.storefront)) : resolved.copies
+  return { kind: 'module', module, form: resolved.form, copies: cap(copies), candidates: cap(resolved.candidates) }
 }
 
 function moduleMemberHover(ctx: QueryContext, from: string, module: string, name: string): HoverContent | null {

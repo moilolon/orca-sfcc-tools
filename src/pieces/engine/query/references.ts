@@ -77,9 +77,10 @@ export function references(ctx: QueryContext, analysis: Analysis, offset: number
   }
   // Every other file of the checkout from the index, this one from its text.
   const reached = new Map<string, string[] | null | false>()
-  const reaches = (from: string, module: string): string[] | null | false => {
-    // What a module reaches does not depend on the file for `*/`, a cartridge or a `modules` name.
-    const key = /^(\.|~)/.test(module) || module === 'module.superModule' ? `${from}\u0000${module}` : module
+  const reaches = (from: string, cartridge: string, module: string): string[] | null | false => {
+    // A cartridge or `modules` name reaches the same file from anywhere; `*/` depends on the
+    // storefronts that load the reading file, so on its cartridge; the rest on the file itself.
+    const key = /^(\.|~)/.test(module) || module === 'module.superModule' ? `${from}\u0000${module}` : module.startsWith('*/') ? `${cartridge}\u0000${module}` : module
     let found = reached.get(key)
     if (found === undefined) {
       found = false
@@ -93,9 +94,11 @@ export function references(ctx: QueryContext, analysis: Analysis, offset: number
     return found
   }
   const scan = (path: string, uses: readonly MemberUse[]) => {
+    let cartridge: string | null = null
     for (const use of uses) {
       if (use.member !== wanted.name) continue
-      const storefronts = reaches(path, use.module)
+      cartridge ??= ctx.index.cartridgeOf(path)?.root ?? ''
+      const storefronts = reaches(path, cartridge, use.module)
       if (storefronts === false) continue
       push({ path, start: use.start, end: use.end, line: use.line, kind: 'use', storefronts })
     }
