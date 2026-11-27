@@ -9,7 +9,8 @@
 //     twice, so nothing is.
 //   - `report.json`, this command's own cursor: `{ version: 1, roles: { <role>: { lastReportAt,
 //     reported, counted } } }`. `lastReportAt` is the time of the newest entry read, as the
-//     instance stamped it (GMT), never this machine's clock. A report reads each log from
+//     instance stamped it (GMT), never past the run itself; before any entry, the start of the
+//     first window (`nextCursor`). A report reads each log from
 //     `REPORT_OVERLAP_MS` before it (one day back the first time, or `--since`), since another
 //     app server may flush an entry stamped earlier after the last report; an entry the last
 //     report already counted (`counted`: its signature and time, for the entries of that overlap)
@@ -215,17 +216,34 @@ export async function buildReport(deps: ReportDeps): Promise<{ report: Report; c
     // Listed now first, then what earlier reports listed and nobody marked since; bounded.
     const listed = [...fresh, ...unmarked].map((row) => row.signature)
     const kept = (cursor?.reported ?? []).filter((signature) => !listed.includes(signature) && table[signature]?.markedAt === undefined)
-    // The entries' own times, never this machine's clock: a clock ahead of the instance's loses nothing.
-    const newestAt = Math.max(cursor?.lastReportAt ?? -Infinity, ...inWindow.map((entry) => entry.timestamp))
-    if (Number.isFinite(newestAt)) {
-      const recent = inWindow.map((entry, index) => ({ at: entry.timestamp, key: keys[index] })).filter(({ at }) => at > newestAt - REPORT_OVERLAP_MS)
-      cursors[role] = { lastReportAt: newestAt, reported: [...listed, ...kept].slice(0, MAX_REPORTED), counted: [...new Set(recent.map(({ key }) => key))] }
-    }
+    cursors[role] = nextCursor(cursor, inWindow.map((entry, index) => ({ at: entry.timestamp, key: keys[index] })), { now, since })
+    cursors[role]!.reported = [...listed, ...kept].slice(0, MAX_REPORTED)
   }
   return {
     report: { version: REPORT_VERSION, generatedAt: iso(now), config, seenList: seen.state, lastReport: last.state, roles },
     cursors
   }
+}
+
+/**
+ * Where the next report of a role starts, from the entries of this one's window (`at`, and
+ * `key`: signature and time):
+ *   - the newest entry's own time (GMT), so a machine clock ahead of the instance's loses nothing;
+ *   - but never past the run itself: an entry a server stamped in the future cannot push the
+ *     cursor past every other server's entries;
+ *   - never back from where the last report left it;
+ *   - with no entry yet, the start of this window, kept: the next report reads on from there
+ *     instead of a new day back from its own clock, so an entry stamped just before this report
+ *     and flushed after it is still read.
+ * `counted` holds every entry the next window reads again (at or after the cursor less
+ * `REPORT_OVERLAP_MS`, the same bound as its `since`), so none is counted twice.
+ */
+export function nextCursor(cursor: ReportCursor | null, entries: readonly { at: number; key: string }[], { now, since }: { now: number; since: number }): ReportCursor {
+  const newestEntry = Math.max(-Infinity, ...entries.map(({ at }) => at))
+  let at = Math.max(cursor?.lastReportAt ?? -Infinity, Math.min(newestEntry, now))
+  if (!Number.isFinite(at)) at = since
+  const counted = entries.filter((entry) => entry.at >= at - REPORT_OVERLAP_MS).map(({ key }) => key)
+  return { lastReportAt: at, reported: cursor?.reported ?? [], counted: [...new Set(counted)] }
 }
 
 /** Whether every role asked was read: the command line exits 0 only then. */

@@ -13,7 +13,7 @@ import { main, parseArguments, parseSince } from './cli'
 import { dataFiles } from './data-folder'
 import { cartError, jobError, LOGS_GET, paymentError } from './fixtures/logs'
 import { parseTimestamp } from './reader'
-import { FIRST_REPORT_MS, REPORT_OVERLAP_MS, type Report } from './report'
+import { FIRST_REPORT_MS, nextCursor, REPORT_OVERLAP_MS, type Report } from './report'
 import { signatureOf } from './signature'
 
 const NOW = Date.UTC(2026, 10, 26, 12, 0, 0)
@@ -134,8 +134,9 @@ test('the report in JSON: new errors per environment, one marked in seen.json le
     for (const call of calls) assertNoSecrets(call.args.join(' '), 'the arguments')
     // The cursor moved for the environments read, and only for them.
     const cursor = reportFile(s)
-    // Development read nothing: with no entry and no earlier report there is nothing to keep yet.
-    assert.deepEqual(Object.keys(cursor?.roles ?? {}).sort(), ['sandbox'])
+    assert.deepEqual(Object.keys(cursor?.roles ?? {}).sort(), ['development', 'sandbox'])
+    // Development read nothing: its cursor keeps the start of this window, for the next report.
+    assert.equal(cursor?.roles.development.lastReportAt, NOW - FIRST_REPORT_MS)
     // The newest entry's own time, not the clock of the machine.
     assert.equal(cursor?.roles.sandbox.lastReportAt, Date.UTC(2026, 10, 26, 11, 40, 19, 877))
     assert.deepEqual(cursor?.roles.sandbox.reported.sort(), sandbox.new.map((row) => row.signature).sort())
@@ -400,4 +401,77 @@ test('bin/errors.ts runs under plain Node: every module it reaches imports expli
   assert.match(help.stdout, /^Usage: node bin\/errors\.ts --config-file <dw\.json> --role <role>\.\.\./)
   const wrong = spawnSync(process.execPath, [bin, '--json'], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', LANG: 'en_US.UTF-8' } })
   assert.equal(wrong.status, 2)
+})
+
+/** One run over `log` at `now`, as JSON, for the sandbox. */
+async function sandboxReport(s: Setup, log: () => unknown, now: number) {
+  const { code, out } = await run(s, ['--json', '--role', 'sandbox'], { [SANDBOX]: log }, { now })
+  assert.equal(code, 0)
+  const role = json(out).roles[0]
+  if (!role.read) throw new Error('not read')
+  return role
+}
+
+test('an entry exactly on the overlap boundary is counted once, however many reports read it again', async () => {
+  const s = setup()
+  try {
+    // The newest entry at 11:05, and one exactly five minutes before it, on a log that stays quiet.
+    const log = () => ({ entries: [jobError('2026-11-26 11:00:00.000 GMT'), cartError({ at: '2026-11-26 11:05:00.000 GMT' })] })
+    const first = await sandboxReport(s, log, NOW)
+    assert.equal(first.new.length, 2)
+    for (const later of [NOW + 60_000, NOW + 120_000]) {
+      const again = await sandboxReport(s, log, later)
+      assert.equal(again.since, '2026-11-26T11:00:00.000Z', 'the boundary entry is in the window')
+      assert.deepEqual([again.new.length, again.unmarked.length], [0, 0], 'and counted already')
+    }
+  } finally {
+    s.done()
+  }
+})
+
+test('an entry stamped in the future never moves the cursor past the run itself', async () => {
+  const s = setup()
+  try {
+    // One server's clock runs a day ahead.
+    const future = jobError('2026-11-27 11:00:00.000 GMT')
+    const first = await sandboxReport(s, () => ({ entries: [future] }), NOW)
+    assert.equal(first.new.length, 1)
+    assert.equal(reportFile(s)?.roles.sandbox.lastReportAt, NOW, 'held at the time of the run')
+    // Another server writes an ordinary entry after the run.
+    const ordinary = cartError({ at: '2026-11-26 12:30:00.000 GMT' })
+    const second = await sandboxReport(s, () => ({ entries: [future, ordinary] }), NOW + 3_600_000)
+    assert.deepEqual(second.new.map((row) => row.message.slice(0, 13)), ['ISH-CORE-2368'], 'the ordinary entry is listed')
+    assert.equal(second.unmarked.length, 0, 'the future entry is not counted again')
+    assert.equal(reportFile(s)?.roles.sandbox.lastReportAt, Date.UTC(2026, 10, 26, 13), 'held at the second run')
+  } finally {
+    s.done()
+  }
+})
+
+test('an empty first report keeps its window start: an entry stamped just before it and flushed after is read a day later', async () => {
+  const s = setup()
+  try {
+    const first = await sandboxReport(s, () => ({ entries: [] }), NOW)
+    assert.deepEqual([first.new.length, first.since], [0, new Date(NOW - FIRST_REPORT_MS).toISOString()])
+    assert.equal(reportFile(s)?.roles.sandbox.lastReportAt, NOW - FIRST_REPORT_MS)
+    // Stamped ten seconds before the first report, flushed after it; the bot runs again a day later.
+    const late = cartError({ at: '2026-11-26 11:59:50.000 GMT' })
+    const second = await sandboxReport(s, () => ({ entries: [late] }), NOW + FIRST_REPORT_MS)
+    assert.equal(second.since, new Date(NOW - FIRST_REPORT_MS - REPORT_OVERLAP_MS).toISOString())
+    assert.equal(second.new.length, 1)
+    assert.equal(reportFile(s)?.roles.sandbox.lastReportAt, Date.UTC(2026, 10, 26, 11, 59, 50), 'from then on, the entries\' own times')
+  } finally {
+    s.done()
+  }
+})
+
+test('nextCursor: newest entry, never past the run, never back, the window start before any entry', () => {
+  const run = { now: 1_000_000, since: 100_000 }
+  const entry = (at: number) => ({ at, key: `s@${at}` })
+  assert.deepEqual(nextCursor(null, [], run), { lastReportAt: 100_000, reported: [], counted: [] })
+  assert.equal(nextCursor(null, [entry(500_000)], run).lastReportAt, 500_000)
+  assert.equal(nextCursor(null, [entry(5_000_000)], run).lastReportAt, 1_000_000)
+  assert.equal(nextCursor({ lastReportAt: 900_000, reported: [], counted: [] }, [entry(500_000)], run).lastReportAt, 900_000)
+  const boundary = 500_000 - REPORT_OVERLAP_MS
+  assert.deepEqual(nextCursor(null, [entry(boundary - 1), entry(boundary), entry(500_000)], { ...run, since: 0 }).counted, [`s@${boundary}`, 's@500000'])
 })
