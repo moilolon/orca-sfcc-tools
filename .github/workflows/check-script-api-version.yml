@@ -1,0 +1,69 @@
+name: Check the Script API version
+
+# Weekly, and by hand: one request to the public Script API index to read its version, compared
+# with the version data/dw-api.json was built from. When they differ it opens one issue, or
+# updates the one already open, asking for `npm run dw-index` on the owner's machine. It
+# regenerates nothing: the documentation's CDN blocks hosted runners that read many pages.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: check-script-api-version
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the index
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: data/dw-api.json
+          sparse-checkout-cone-mode: false
+
+      - name: Compare the versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INDEX_URL: https://developer.salesforce.com/docs/commerce/b2c-commerce/references/b2c-script-api/index.md
+          PREFIX: 'Regenerate the dw.* index:'
+        run: |
+          set -euo pipefail
+          old=$(jq -r '.version // empty' data/dw-api.json)
+          if ! printf '%s' "$old" | grep -Eq '^[0-9]+(\.[0-9]+)+$'; then
+            echo "::error::data/dw-api.json names no version"
+            exit 1
+          fi
+          page=$(curl --fail --silent --show-error --max-time 30 "$INDEX_URL")
+          first=${page%%$'\n'*}
+          new=$(printf '%s\n' "$first" | sed -n 's/^# B2C Commerce Script API \([0-9][0-9]*\(\.[0-9][0-9]*\)\{1,\}\)$/\1/p')
+          if [ -z "$new" ]; then
+            echo "::error::the index does not start with its version"
+            exit 1
+          fi
+          if [ "$old" = "$new" ]; then
+            echo "The index is up to date: Script API $old."
+            exit 0
+          fi
+          title="$PREFIX $old → $new"
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "The public Script API index now names version $new; data/dw-api.json was built from $old." \
+            "Run \`npm run dw-index\` on the owner's machine (it reads every class through \`b2c docs\`), check the diff and open a pull request with the new file." \
+            "Opened by the weekly version check. It is updated, not duplicated, while it stays open.")
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json number,title \
+            --jq "[.[] | select(.title | startswith(\"$PREFIX\"))][0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            echo "Updated issue #$number: $title"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            echo "Opened an issue: $title"
+          fi
