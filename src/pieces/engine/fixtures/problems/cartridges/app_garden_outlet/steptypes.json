@@ -1,0 +1,10 @@
+{
+    "step-types": {
+        "script-module-step": [
+            {
+                "@type-id": "custom.Garden.Outlet",
+                "module": "app_garden_outlet/cartridge/scripts/outlet.js",
+            }
+        ]
+    }
+}

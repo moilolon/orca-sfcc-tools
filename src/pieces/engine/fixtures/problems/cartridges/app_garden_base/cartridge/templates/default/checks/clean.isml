@@ -1,0 +1,7 @@
+<isinclude template="components/modules" />
+<isinclude template="product/components/price" />
+<isscript>
+    var Site = require('dw/system/Site');
+    var currency = Site.current.getCustomPreferenceValue('gardenCurrency');
+</isscript>
+<div>${Resource.msg('label.price', 'product', null)} ${currency}</div>
