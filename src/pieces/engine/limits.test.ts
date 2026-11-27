@@ -67,9 +67,10 @@ test('runs of unclosed constructs take linear time', () => {
   const check = (label: string, text: string, run: () => void) => {
     // The first run is cold: a time that passes then passes warm too.
     const { work, ms } = measured(run)
+    // The count first: a quadratic regression fails here in one run, before any timing is retried.
+    assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
     const took = settledTime(ms, run, (best) => best < BOUND)
     console.log(`${label}: ${took.toFixed(0)} ms, ${(work / text.length).toFixed(1)} steps a character`)
-    assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
     assert.ok(took < BOUND, `${label}: ${took.toFixed(0)} ms`)
   }
   const template = (label: string, text: string, withScript = false) =>
@@ -101,9 +102,9 @@ test('a 1 MB line of values with an unclosed ${ parses in well under a second', 
   for (const [label, text] of lines) {
     const run = () => templateScript(text, parseTemplate(text).document)
     const { work, ms } = measured(run)
+    assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
     const took = settledTime(ms, run, (best) => best < 1000)
     console.log(`1 MB line of ${label}: ${took.toFixed(0)} ms, ${(work / text.length).toFixed(1)} steps a character`)
-    assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
     assert.ok(took < 1000, `${label}: ${took.toFixed(0)} ms`)
   }
 })
@@ -148,14 +149,17 @@ test('no input shape grows worse than linear', () => {
     const small = make(SIZE)
     const large = make(SIZE * 4)
     // Counted cold, timed warm: a cold small run would read slow and flatter the ratio.
+    // The count first, the small size before the large one: under a quadratic regression a large
+    // run alone takes a minute, and the small one already counts far past the bound.
     const workSmall = measured(() => run(small)).work
+    assert.ok(workSmall > 0 && workSmall <= WORK_PER_CHARACTER * small.length, `${label}: ${workSmall} steps for ${small.length} characters`)
     const workLarge = measured(() => run(large)).work
+    assert.ok(workLarge < workSmall * 5, `${label}: ${workSmall} steps, then ${workLarge}`)
+    assert.ok(workLarge <= WORK_PER_CHARACTER * large.length, `${label}: ${workLarge} steps for ${large.length} characters`)
     const holds = (tSmall: number, tLarge: number) => tLarge < tSmall * 8 + 50
     const first: [number, number] = [timed(() => run(small)).ms, timed(() => run(large)).ms]
     const [tSmall, tLarge] = settledTimes(first, [() => run(small), () => run(large)], holds)
     console.log(`${label}: ${tSmall.toFixed(1)} ms, ×4: ${tLarge.toFixed(1)} ms; work ×${(workLarge / workSmall).toFixed(2)}`)
-    assert.ok(workSmall > 0 && workLarge < workSmall * 5, `${label}: ${workSmall} steps, then ${workLarge}`)
-    assert.ok(workLarge <= WORK_PER_CHARACTER * large.length, `${label}: ${workLarge} steps for ${large.length} characters`)
     assert.ok(holds(tSmall, tLarge), `${label}: ${tSmall.toFixed(1)} ms, then ${tLarge.toFixed(1)} ms`)
   }
   for (const [label, unit, prefix, suffix] of templates) {
