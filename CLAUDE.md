@@ -312,9 +312,10 @@ Changing it needs the owner's yes.
       the checkout lacks counts neither way, a file of a cartridge on no path gets no warning,
       and a route chain that extends past such a cartridge is not read on that storefront, nor
       one whose base is read inside a function or that requires another controller; an
-      attribute or preference the file tests for (`in`, `hasOwnProperty`, a condition, the left
-      of `&&`, a comparison with `undefined`, `null` or a `typeof`) is not warned from that test
-      on; a fallback (`x.custom.y || ''`) is no test.
+      attribute or preference the code tests for existence (`in`, `hasOwnProperty`, `typeof`, a
+      comparison with `undefined` or `null`) is not warned after that test, in the same function
+      (the whole file for a test outside every function); a truthiness test (`if`, `!`, `?:`,
+      `&&`) and a fallback (`|| ''`) are no existence test.
       `analyse.ts` splits a file in two steps: `readUses` (what the text names, parsed once per
       change) and `checkUses` (against `Lookup`, read once per state of the index, its
       `generation`). `checkout.ts` (`CheckoutProblems`) keeps them per file: a pass reads every

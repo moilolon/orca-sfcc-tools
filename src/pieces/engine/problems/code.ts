@@ -12,13 +12,14 @@
 // - Unknown site preference: the same for `SitePreferences`, written
 //   `Site.current.preferences.custom.y` or `<a Site>.getCustomPreferenceValue('y')`, the name a
 //   literal and the object known to be a `dw.system.Site`.
-// - A name the file tests for is not warned from that test on: the code says itself that it may
-//   not exist. A test is `'y' in x.custom`, `x.custom.hasOwnProperty('y')`,
-//   `Object.prototype.hasOwnProperty.call(x.custom, 'y')`, or `x.custom.y` (or
-//   `getCustomPreferenceValue('y')`) as a condition (`if`, `?:`, a loop, `!`, the left of `&&`,
-//   and the `&&`, `||` and `!` of a condition), under `typeof`, or compared with `undefined`,
-//   `null` or a `typeof`. A fallback (`x.custom.y || ''`) is no test: it hides an absent name, and
-//   a use before the test is warned.
+// - A name the code tests for existence is not warned after that test, in the same function (the
+//   innermost one holding the test; the whole file for a test outside every function): the code
+//   says itself that it may not exist. An existence test is `'y' in x.custom`,
+//   `x.custom.hasOwnProperty('y')`, `Object.prototype.hasOwnProperty.call(x.custom, 'y')`,
+//   `typeof x.custom.y`, or `x.custom.y` (or `getCustomPreferenceValue('y')`) compared with
+//   `undefined` or `null`. A truthiness test (`if (x.custom.y)`, `!x.custom.y`, `?:`, `&&`) is how
+//   a boolean is read, not a test of existence, and a fallback (`|| ''`) hides an absent name:
+//   both are warned, as is a use before the test or in another function.
 // - Template: the literal name of `res.render`, `ISML.renderTemplate`, `new Template`, and the
 //   `template` attribute of `<isinclude>`, `<isdecorate>` and `<ismodule>` when it holds no `${…}`.
 //   Found in any locale folder of a cartridge of the path. Missing everywhere or on some storefronts
@@ -46,7 +47,7 @@ export type AttributeUse = Spot & {
   typeId: string
   name: string
   preference: boolean
-  /** The file tests for this name at or before this use: it is not warned. */
+  /** An existence test of this name comes before this use, in its function: it is not warned. */
   guarded: boolean
 }
 export type TemplateNameUse = Spot & { name: string }
@@ -115,48 +116,44 @@ export function codeUses(ctx: QueryContext, analysis: Analysis): CodeUses {
     const type = types.of(node as AST.Expression)
     return type && type.kind === 'custom' ? type.typeId : null
   }
-  /** Where each name is first tested, by `<type>\u0000<name>`. */
-  const guarded = new Map<string, number>()
+  /** Every function's range: a test counts only inside the innermost function that holds it. */
+  const functions: { start: number; end: number }[] = []
+  for (const root of analysis.roots) {
+    walk(root.node, (node) => {
+      if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') functions.push({ start: node.start, end: node.end })
+    })
+  }
+  /** The range a test at `at` covers: its innermost function, else the whole file (a template's too). */
+  const scopeOf = (at: number): { start: number; end: number } => {
+    let best = { start: 0, end: analysis.text.length }
+    for (const fn of functions) if (fn.start <= at && at < fn.end && fn.end - fn.start < best.end - best.start) best = fn
+    return best
+  }
+  /** Each name's tests, by `<type>\u0000<name>`: where each is, and the range it covers. */
+  const guards = new Map<string, { at: number; start: number; end: number }[]>()
   const guard = (typeId: string | null, name: string | null, at: number) => {
     if (typeId === null || name === null) return
     const key = `${typeId}\u0000${name}`
-    guarded.set(key, Math.min(at, guarded.get(key) ?? at))
+    const list = guards.get(key) ?? []
+    list.push({ at, ...scopeOf(at) })
+    guards.set(key, list)
   }
-  /** `null`, `undefined` or a `typeof`: what a comparison with nothing compares to. */
-  const nothing = (side: Node) => (side.type === 'Literal' && side.kind === 'null') || (side.type === 'Identifier' && side.name === 'undefined') || (side.type === 'UnaryExpression' && side.operator === 'typeof')
-  /** What a condition tests: an attribute read, through `!`, `&&`, `||` and a comparison with nothing. */
-  const tested = (start: Node | null | undefined) => {
-    const stack: Node[] = start ? [start] : []
-    while (stack.length > 0) {
-      const node = stack.pop() as Node
-      const found = attributeOf(node)
-      if (found) guard(found.typeId, found.name, node.start)
-      else if (node.type === 'LogicalExpression') stack.push(node.left, node.right)
-      else if (node.type === 'UnaryExpression' && (node.operator === '!' || node.operator === 'typeof')) stack.push(node.argument)
-      else if (node.type === 'BinaryExpression' && /^[!=]==?$/.test(node.operator) && (nothing(node.left) || nothing(node.right))) stack.push(nothing(node.left) ? node.right : node.left)
-      else if (node.type === 'SequenceExpression' && node.expressions.length > 0) stack.push(node.expressions[node.expressions.length - 1])
-    }
+  /** `null` or `undefined`: what a comparison with nothing compares to. */
+  const nothing = (side: Node) => (side.type === 'Literal' && side.kind === 'null') || (side.type === 'Identifier' && side.name === 'undefined')
+  /** An attribute read that is itself the test (`typeof x.custom.y`, `x.custom.y === undefined`). */
+  const testedRead = (node: Node) => {
+    const found = attributeOf(node)
+    if (found) guard(found.typeId, found.name, node.start)
   }
   for (const root of analysis.roots) {
     walk(root.node, (node) => {
       switch (node.type) {
-        case 'IfStatement':
-        case 'ConditionalExpression':
-        case 'WhileStatement':
-        case 'DoWhileStatement':
-        case 'ForStatement':
-          tested(node.test)
-          break
-        case 'LogicalExpression':
-          // `a && b` tests `a`; `a || b` falls back from it, which is no test.
-          if (node.operator === '&&') tested(node.left)
-          break
         case 'UnaryExpression':
-          if (node.operator === '!' || node.operator === 'typeof') tested(node.argument)
+          if (node.operator === 'typeof') testedRead(node.argument)
           break
         case 'BinaryExpression':
           if (node.operator === 'in') guard(customOf(node.right), (stringLiteral(node.left)?.value as string | undefined) ?? null, node.start)
-          else if (/^[!=]==?$/.test(node.operator) && (nothing(node.left) || nothing(node.right))) tested(nothing(node.left) ? node.right : node.left)
+          else if (/^[!=]==?$/.test(node.operator) && (nothing(node.left) || nothing(node.right))) testedRead(nothing(node.left) ? node.right : node.left)
           break
         case 'CallExpression': {
           const callee = node.callee
@@ -222,8 +219,8 @@ export function codeUses(ctx: QueryContext, analysis: Analysis): CodeUses {
     })
   }
   for (const use of uses.attributes) {
-    const at = guarded.get(`${use.typeId}\u0000${use.name}`)
-    use.guarded = at !== undefined && at <= use.start
+    const tests = guards.get(`${use.typeId}\u0000${use.name}`) ?? []
+    use.guarded = tests.some((test) => test.at <= use.start && test.start <= use.start && use.start < test.end)
   }
   return uses
 }

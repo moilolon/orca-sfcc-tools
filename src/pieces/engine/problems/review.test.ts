@@ -1,7 +1,7 @@
 // What the review of 6.5 found warned where nothing is wrong, each now silent, with what must
 // still be warned beside it: a controller that reads `module.superModule` without
 // `server.extend`, the attributes of the official form schema, the bundle each form of
-// `Resource.msg` reads, accesses guarded for absence, and a bundle whose name ends like a locale.
+// `Resource.msg` reads, accesses guarded by an existence test, and a bundle whose name ends like a locale.
 import { assert, test } from 'orca/testing'
 import { bundleBase, isBundleOf, isLocaleSuffix } from '../checkout/locales'
 import { brief, BASE, checked, CORE } from './testing'
@@ -97,7 +97,7 @@ test('each form of Resource.msg reads the bundle the documentation says: message
   )
 })
 
-test('an access the file guards for absence is not warned (in, hasOwnProperty, a comparison with nothing, a condition); a fallback or a use before the test is', async () => {
+test('only an existence test guards a name (in, hasOwnProperty, typeof, a comparison with undefined or null), after it and in its own function', async () => {
   const check = await checked()
   const path = `${BASE}/cartridge/scripts/checks/guarded.js`
   const header = "var ProductMgr = require('dw/catalog/ProductMgr');\nvar Site = require('dw/system/Site');\nvar product = ProductMgr.getProduct('1');\n"
@@ -106,22 +106,29 @@ test('an access the file guards for absence is not warned (in, hasOwnProperty, a
     "var b = product.custom.hasOwnProperty('gardenWidth') ? product.custom.gardenWidth : 0;",
     "var c = Object.prototype.hasOwnProperty.call(product.custom, 'gardenDepth') ? product.custom.gardenDepth : 0;",
     'var d = product.custom.gardenHeight !== undefined ? product.custom.gardenHeight : 0;',
-    'if (product.custom.gardenWeight) { var e = product.custom.gardenWeight; }',
     "var f = 'gardenFlag' in Site.current.preferences.custom ? Site.current.preferences.custom.gardenFlag : false;",
-    "if (Site.getCurrent().getCustomPreferenceValue('gardenLimit')) { var g = Site.getCurrent().getCustomPreferenceValue('gardenLimit'); }",
-    'var k = product.custom.gardenNote && product.custom.gardenNote.length;',
+    "var g = Site.getCurrent().getCustomPreferenceValue('gardenLimit') != null ? Site.getCurrent().getCustomPreferenceValue('gardenLimit') : 10;",
     'if (product.custom.gardenNull == null) { var l = 0; } else { var m = product.custom.gardenNull; }',
-    "if (typeof product.custom.gardenTag === 'undefined') { var h = null; } else { var i = product.custom.gardenTag; }"
+    "if (typeof product.custom.gardenTag === 'undefined') { var h = null; } else { var i = product.custom.gardenTag; }",
+    "function inner() { var p = ProductMgr.getProduct('a'); if ('gardenInner' in p.custom) { return p.custom.gardenInner; } return null; }"
   ]
   for (const line of guarded) assert.deepEqual(check.problems.analyseText(path, `${header}${line}\n`), [], line)
-  // Unguarded, each is warned: a plain read, a fallback (which hides the absence), a comparison
-  // with a value, and a use before the test.
+  // Each warned: a plain read, a fallback (which hides the absence), a comparison with a value, a
+  // use before the test, the review's samples (a misspelt boolean read in an `if`, a preference
+  // defined nowhere tested in an `if`, a negation, the left of `&&`), and a use in another
+  // function than the test's.
   const plain = [
     'var x = product.custom.gardenSize;',
     "var y = Site.getCurrent().getCustomPreferenceValue('gardenLimit') || 10;",
     "if (product.ID != Site.current.getCustomPreferenceValue('gardenBox')) { var z = 1; }",
     'var w = product.custom.gardenLate;',
-    "if ('gardenLate' in product.custom) { var v = product.custom.gardenLate; }"
+    "if ('gardenLate' in product.custom) { var v = product.custom.gardenLate; }",
+    'if (product.custom.gardenColuor) { var colour = 1; }',
+    "if (Site.current.getCustomPreferenceValue('nopeEnable')) { var on = 1; }",
+    'var off = !product.custom.nopeNeg;',
+    'var note = product.custom.nopeNote && product.custom.nopeNote.length;',
+    "function first() { var p = ProductMgr.getProduct('a'); return typeof p.custom.nopeFlag === 'undefined' ? 0 : 1; }",
+    "function second() { var p = ProductMgr.getProduct('b'); return p.custom.nopeFlag.length; }"
   ].join('\n')
   assert.deepEqual(
     check.problems.analyseText(path, `${header}${plain}\n`).map((each) => [each.code, each.args.name, each.line]),
@@ -129,7 +136,13 @@ test('an access the file guards for absence is not warned (in, hasOwnProperty, a
       ['unknown_attribute', 'gardenSize', 4],
       ['unknown_preference', 'gardenLimit', 5],
       ['unknown_preference', 'gardenBox', 6],
-      ['unknown_attribute', 'gardenLate', 7]
+      ['unknown_attribute', 'gardenLate', 7],
+      ['unknown_attribute', 'gardenColuor', 9],
+      ['unknown_preference', 'nopeEnable', 10],
+      ['unknown_attribute', 'nopeNeg', 11],
+      ['unknown_attribute', 'nopeNote', 12],
+      ['unknown_attribute', 'nopeNote', 12],
+      ['unknown_attribute', 'nopeFlag', 14]
     ]
   )
 })

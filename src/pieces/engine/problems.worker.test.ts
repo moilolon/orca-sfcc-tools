@@ -176,18 +176,25 @@ test('engine.problems answers a text with the index of its workspace; a text of 
 })
 
 test('the save hook returns at once, changing nothing; the analysis runs after it and tells how many new problems, never what', async () => {
-  const { worker, analysed, notices } = await mount(hostFor('w-shop'), { 'C:/work/shop': problemFiles() })
+  // The worker's pause is held shut during the save: what waits on it has not run.
+  let gate = false
+  const held: (() => void)[] = []
+  const pause = () => (gate ? new Promise<void>((resolve) => held.push(resolve)) : new Promise<void>((resolve) => setImmediate(resolve)))
+  const { worker, analysed, notices } = await mount(hostFor('w-shop'), { 'C:/work/shop': problemFiles() }, { pause })
   await analysed()
   const text = "var ProductMgr = require('dw/catalog/ProductMgr');\nvar a = ProductMgr.getProduct('1').custom.gardenColor;\nvar b = ProductMgr.getProduct('1').custom.gardenHue;\n"
   const event = { workspaceId: 'w-shop', path: `C:\\work\\shop\\${CLEAN.replace(/\//g, '\\')}`, languageId: 'javascript', text }
-  const started = performance.now()
+  gate = true
   const decision = await worker.hooks.fire('editor.save.before', event)
-  const took = performance.now() - started
-  // It goes on with the event as it came: nothing refused, nothing rewritten, nothing awaited.
+  // It goes on with the event as it came: nothing refused, nothing rewritten. The analysis is
+  // only scheduled: it waits on the pause, and nothing of it has run when the hook returned.
   assert.equal(decision.kind, 'continue')
   assert.deepEqual(decision.kind === 'continue' ? decision.event : null, event)
+  assert.equal(held.length, 1)
   assert.equal(notices().length, 0)
-  assert.ok(took < 200, `${took.toFixed(1)} ms`)
+  assert.equal(((await worker.request('engine.problems.file', { path: CLEAN })) as ProblemsOfFile).total, 0)
+  gate = false
+  for (const release of held.splice(0)) release()
   await settle()
   assert.deepEqual(notices(), [{ title: 'New problems', body: '2 new problems in the file just saved' }])
   // The notice names no file and no problem.
