@@ -3,16 +3,17 @@
 import type { OrcaWorkerApi } from 'orca/worker'
 import type { OpenFile, OpenFileFailure } from '../../core/open-file'
 import type { Workspace, Workspaces } from '../../core/piece'
-import { isLocal } from '../../core/workspaces'
+import { activeWorkspace, isLocal } from '../../core/workspaces'
 
 /**
- * The workspace whose cartridges are debugged: the one that uploads to the sandbox, else the
- * focused one. The same rule tells b2c which dw.json to read (`configRoot`), so the credentials and
- * the cartridges always come from one workspace. The uploading workspace is picked by hand in the
- * sandbox piece; until it is, this follows the focus.
+ * The workspace whose cartridges are debugged: the one the plugin works on (`activeWorkspace`: the
+ * one that uploads to the sandbox; else the focused one with a configuration file; else the last
+ * one that had one). The same rule tells b2c which dw.json to read (`configRoot`), so the
+ * credentials and the cartridges always come from one workspace, even while the focus is on a
+ * workspace with no dw.json.
  */
 export async function debugWorkspace(workspaces: Workspaces): Promise<Workspace | null> {
-  return (await workspaces.uploading()) ?? (await workspaces.focused())
+  return (await activeWorkspace(workspaces))?.workspace ?? null
 }
 
 export { isLocal }

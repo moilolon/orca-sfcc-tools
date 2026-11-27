@@ -125,7 +125,7 @@ test('the requests answer with the state; a refused one rejects with its code', 
   sandbox.dispose()
 })
 
-test('the project in use: the owner’s; else the focused one’s when it has dw.json; else every project with one', async () => {
+test('the project in use: the owner’s; else that of the workspace the plugin is on when it has dw.json; else every project with one', async () => {
   const { b2c, fake, host, sandbox, timers } = await start()
   const DOCS = { id: 'w-docs', kind: 'worktree' as const, name: 'Docs', path: 'C:/work/docs', branch: 'main', hostId: 'local', projectId: 'p-docs' }
   host.state.listed = [{ ...SHOP, projectId: 'p-shop' }, { ...FIX, projectId: 'p-shop' }, { ...REMOTE, projectId: 'p-shop' }, DOCS]
@@ -160,15 +160,11 @@ test('the project in use: the owner’s; else the focused one’s when it has dw
   // Focusing a workspace with one keeps its project first.
   host.state.focused = SHOP.id
   assert.deepEqual(await grouping(), shopFirst)
-  // Two projects with one, the focus on neither (a remote workspace is never looked at): both first.
+  // Two projects with one, the focus on neither (a remote workspace is never looked at): the
+  // workspace the plugin works on is the last one focused with a file, kept, so its project first.
   await configure([SHOP.path, FIX.path, DOCS.path])
   host.state.focused = REMOTE.id
-  assert.deepEqual(await grouping(), [
-    [SHOP.id, true],
-    [FIX.id, true],
-    [REMOTE.id, true],
-    [DOCS.id, true]
-  ])
+  assert.deepEqual(await grouping(), shopFirst)
   // The focus on a workspace with one: only its project.
   host.state.focused = DOCS.id
   assert.deepEqual(await grouping(), [

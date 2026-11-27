@@ -81,8 +81,9 @@ Changing it needs the owner's yes.
       an answer made with another `dw.json` does not count for it), `status-bar.ts` (its two
       items' texts), `worker.ts` (requests, commands, `workspace.removed`; its state gives each
       workspace's branch and whether it is of a project in use, which only chooses what the
-      view lists first: the uploading workspace's project; else the focused one's when it has a
-      configuration file; else every project with one; else all); `testing.ts` holds the fakes
+      view lists first: the uploading workspace's project; else that of the workspace the plugin
+      works on (`activeWorkspace()`) when it has a configuration file; else every project with
+      one; else all); `testing.ts` holds the fakes
       its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
       beside the code) and `seen.ts` (over a store it is given) are pure; `digest.ts` holds what
@@ -161,8 +162,9 @@ Changing it needs the owner's yes.
       request matching), `session.ts` (one `b2c debug` session: its states, driven by the
       adapter's events, never by its responses), `breakpoints.ts` (the single store of
       breakpoints, per workspace, paths relative to it; the editor phase reads and writes it
-      too), `workspace.ts` (which workspace is debugged and how a file is opened, each in one
-      function), `files.ts` (the scripts of the workspace's cartridges, and the cartridges),
+      too), `workspace.ts` (which workspace is debugged, by `activeWorkspace()` like
+      `configRoot()` so credentials and cartridges come from one folder, and how a file is
+      opened, each in one function), `files.ts` (the scripts of the workspace's cartridges, and the cartridges),
       `source.ts` (one script's lines for the view's source table: read only for a script
       `files.ts` found and only inside the workspace's folder, cut, masked, never stored; the
       view shows a window of `WINDOW_LINES` of them at a time), and `fake-adapter.ts`, the

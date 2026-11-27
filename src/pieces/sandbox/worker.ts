@@ -4,7 +4,7 @@
 // used, and only once dw.json makes it `ready`: otherwise every command answers why, and runs
 // nothing.
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
-import { hiddenProjects, isLocal, listWorkspaces } from '../../core/workspaces'
+import { activeWorkspace, hiddenProjects, isLocal, listWorkspaces } from '../../core/workspaces'
 import { DEFAULT_PREFIX, prefixOf } from './code-version'
 import { messages } from './i18n'
 import { checkable, HOST_TIMEOUT_MS, Ownership, type Listing, type Notice } from './ownership'
@@ -190,8 +190,9 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
 
   /**
    * The projects the view lists first, only to choose what is shown, never what uploads: the
-   * uploading workspace's; else the focused workspace's when it has a configuration file; else
-   * every project with a workspace that has one. Only whether the file exists is asked, never what
+   * uploading workspace's; else the workspace the plugin works on (`activeWorkspace`: the focused
+   * one, or the last one kept) when it has a configuration file; else every project with a
+   * workspace that has one. Only whether the file exists is asked, never what
    * it holds. Null when no project has one: the view then lists every workspace as one.
    */
   async function projectsInUse(listed: Listing, ownerId: string | null): Promise<Set<string> | null> {
@@ -200,8 +201,8 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     if (owner) return new Set([projectKey(owner)])
     const focusedId = await new Promise<string | null>((resolve) => {
       const timer = timers.setTimeout(() => resolve(null), HOST_TIMEOUT_MS)
-      workspaces.focused().then(
-        (workspace) => (timers.clearTimeout(timer), resolve(workspace?.id ?? null)),
+      activeWorkspace(workspaces).then(
+        (active) => (timers.clearTimeout(timer), resolve(active?.workspace.id ?? null)),
         () => (timers.clearTimeout(timer), resolve(null))
       )
     })
