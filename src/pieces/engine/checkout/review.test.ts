@@ -4,7 +4,7 @@
 // workspace below its repository's root and on a file the commit lacks.
 import { assert, test } from 'orca/testing'
 import { EventEmitter } from 'node:events'
-import { CheckoutIndex, type CheckoutOptions } from './checkout'
+import { CheckoutIndex, GitError, type CheckoutOptions } from './checkout'
 import type { CheckoutFiles } from './files'
 import { createGitReader, type GitChild, type GitSpawnOptions } from './git'
 import { MemoryFiles } from './memory'
@@ -292,4 +292,48 @@ test('4. refreshRef asks only which commit the ref names, and reads again only w
   const none = await built(files, { git: quiet })
   await none.refreshRef()
   assert.deepEqual(quiet.calls, [])
+})
+
+test('5. a failed check of the ref keeps the last good paths and metadata; only a successful read replaces them', async () => {
+  const files = new MemoryFiles({ 'c/app_a/.project': '<projectDescription/>', 'c/app_a/cartridge/scripts/a.js': '' })
+  const tree = {
+    'sites/x/sites/Shop/site.xml': '<site site-id="Shop"><custom-cartridges>app_a</custom-cartridges></site>',
+    'sites/x/meta/system-objecttype-extensions.xml': metadata(extension('Product', attribute('gardenColour', 'string')))
+  }
+  const ref = new FakeRef({ main: COMMIT }, { [COMMIT]: tree })
+  const index = await built(files, { metadataRef: 'main', git: ref })
+  const good = () => {
+    assert.deepEqual(index.storefronts().map((s) => [s.id, s.cartridges, s.source]), [['Shop', ['app_a'], 'git-ref']])
+    assert.deepEqual(index.attributes('Product').map((a) => [a.id, a.source]), [['gardenColour', 'git-ref']])
+  }
+  good()
+  // One check fails (git busy, a timeout): the paths and the metadata stay, the code says why.
+  ref.failure = new GitError('git_timeout')
+  await index.refreshRef()
+  good()
+  assert.equal(index.status().gitError, 'git_timeout')
+  assert.equal(index.status().pathSource, 'git-ref')
+  assert.equal(index.status().metadataSource, 'git-ref')
+  // A rebuild of the paths while git still fails (a saved site archive, a setting) keeps them too.
+  await index.configure({ cartridgePath: '' })
+  good()
+  // The ref no longer names a commit: a failed read as well, the last good state stays.
+  ref.failure = null
+  ref.commits = {}
+  await index.refreshRef()
+  good()
+  assert.equal(index.status().gitError, 'ref_not_found')
+  // A successful read replaces them, and clears the code.
+  const moved = 'e'.repeat(40)
+  ref.commits = { main: moved }
+  ref.trees[moved] = { 'sites/x/sites/Shop/site.xml': '<site site-id="Shop"><custom-cartridges>app_a:app_b</custom-cartridges></site>' }
+  await index.refreshRef()
+  assert.deepEqual(index.storefronts()[0].cartridges, ['app_a', 'app_b'])
+  assert.deepEqual(index.attributes('Product'), [])
+  assert.equal(index.status().gitError, null)
+  // Another ref that fails gives nothing of the old one.
+  ref.failure = new GitError('git_failed')
+  await index.configure({ metadataRef: 'other' })
+  assert.deepEqual(index.storefronts(), [])
+  assert.equal(index.status().gitError, 'git_failed')
 })

@@ -755,8 +755,12 @@ export class CheckoutIndex {
       this.gitError = null
       return this.gitCache
     } catch (error) {
-      this.gitCache = null
       this.gitError = error instanceof GitError ? error.code : 'git_failed'
+      // Only a successful read replaces what the ref gave: one failed check (git busy, a timeout,
+      // a fetch rewriting the refs) keeps the last good paths and metadata of the same ref, and
+      // says why in `gitError`. Another ref, or none read yet, gives nothing.
+      if (this.gitCache && this.gitCache.ref === ref) return this.gitCache
+      this.gitCache = null
       return null
     }
   }
