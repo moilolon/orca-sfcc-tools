@@ -35,6 +35,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INDEX_URL: https://developer.salesforce.com/docs/commerce/b2c-commerce/references/b2c-script-api/index.md
           PREFIX: 'Regenerate the dw.* index:'
+          # The login `github.token` acts as, written as is and as a URL query value.
+          BOT: 'github-actions[bot]'
+          BOT_URL: 'github-actions%5Bbot%5D'
         run: |
           set -euo pipefail
           old=$(jq -r '.version // empty' data/dw-api.json)
@@ -58,8 +61,11 @@ jobs:
             "The public Script API index now names version $new; data/dw-api.json was built from $old." \
             "Run \`npm run dw-index\` on the owner's machine (it reads every class through \`b2c docs\`), check the diff and open a pull request with the new file." \
             "Opened by the weekly version check. It is updated, not duplicated, while it stays open.")
-          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json number,title \
-            --jq "[.[] | select(.title | startswith(\"$PREFIX\"))][0].number // empty")
+          # Only an issue this workflow opened (its author is the Actions bot), never one of
+          # someone else's that happens to share the title. The issues endpoint lists pull
+          # requests too; they are left out.
+          number=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&creator=$BOT_URL&per_page=100" \
+            --jq "[.[] | select(.pull_request == null) | select(.user.login == \"$BOT\") | select(.title | startswith(\"$PREFIX\"))][0].number // empty")
           if [ -n "$number" ]; then
             gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
             echo "Updated issue #$number: $title"
