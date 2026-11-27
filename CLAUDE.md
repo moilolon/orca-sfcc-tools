@@ -156,10 +156,15 @@ Changing it needs the owner's yes.
       reads and writes it too), `workspace.ts` (which workspace is debugged and how a file is
       opened, each in one function), `files.ts` (the scripts of the workspace's cartridges, and
       the cartridges; `isScriptPath` decides from a path whether a breakpoint can go in it),
-      `inspect.ts` (what the editor may evaluate: a plain name, `this` or a chain of property
-      reads with literal indexes, read by the engine's parser and rebuilt from its tree; any
-      call, `new`, assignment, update, operator or expression index is refused before anything
-      reaches the adapter),
+      `inspect.ts` (what the editor may ask the value of: a plain name, `this` or a chain of
+      property reads with literal indexes, read by the engine's parser; any call, `new`,
+      assignment, update, operator or expression index is refused. What passes is **never
+      evaluated**: it is a path of names the worker walks through the halted frame's scopes and
+      members with the `scopes` and `variables` requests the view's tree makes, so a hover runs
+      nothing that expanding those names would not, a getter with a side effect included),
+      `line-diff.ts` (where each line of one text stands in another: equal start and end, the
+      longest common run of lines, and each changed hunk paired by likeness, a line deleted whole
+      dropped; pure and with no imports, the editor's frame loads it too),
       `source.ts` (one script's lines for the view's source table: read only for a script
       `files.ts` found and only inside the workspace's folder, cut, masked, never stored; the
       view shows a window of `WINDOW_LINES` of them at a time), and `fake-adapter.ts`, the
@@ -170,8 +175,12 @@ Changing it needs the owner's yes.
       `debugger.setBreakpoints`, and then only a script of its cartridges is taken
       (`not_script`); it asks `debugger.file { workspaceId, path }` (whether the file takes
       breakpoints, its lines with the session's verdict, the topmost frame of the halt in it)
-      again on every `debugger.state` post, and `debugger.hover` evaluates an `inspect.ts` read
-      in a frame of the halt in that file, masked and cut to `HOVER_MAX_TEXT`. Every
+      again on every `debugger.state` post, and `debugger.hover` reads an `inspect.ts` path in a
+      frame of the halt in that file, masked and cut to `HOVER_MAX_TEXT`. On every
+      `editor.save.before` (from any editor tab, the plugin's or Orca's own; observed only, it
+      waits at most `REMAP_HOOK_MS` for the file to be read before Orca writes it) the worker
+      moves the saved file's breakpoints with `line-diff.ts`, the file on disk against the text
+      saved, so the store, the session and every view keep the lines that now run. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
     - `src/pieces/engine/` (phase 6, delivered with its **Problems** view since 6.5): the syntax
@@ -427,15 +436,23 @@ Changing it needs the owner's yes.
       tooltip (a disc verified, a ring not verified, a ring with a dot with no session, a dashed
       ring until saved), and a click or `F9` (Orca binds no F9; handled in the frame, no
       keybinding) sets or removes one through `debugger.breakpoint`, only where the worker says
-      the file is a script of a cartridge. Marks follow edits (`line-map.ts`: lines inserted or
-      removed above move them, Enter at a line's start takes it down, a joined line up); the
-      store keeps lines of the file as saved, so a click on a written line waits (`marks.ts`),
-      and on the editor's own save (`editor.flush`, then an `own` `editor.saved`) every mark is
-      written where it is seen. The halted line (the topmost frame of the halt in this file, or
-      a caller's) is highlighted with its frame's name and scrolled into view once per halt; a
-      halt elsewhere opens nothing. While halted here, a pointer resting on a name asks its
-      value: `expression.ts` takes the chain of reads that ends at it, and the worker checks it
-      again (`inspect.ts`).
+      the file is a script of a cartridge. The store keeps lines of the file as saved; `marks.ts`
+      keeps the text it believes is on disk and draws each stored line where the debugger's
+      `line-diff.ts` from that text to the text now puts it, the same diff the worker moves the
+      store with on save, so a mark shows before a save where the store has it after. A line
+      deleted whole hides its mark, and undo brings it back. That text is the last save this
+      editor saw of the file (its own, `editor.flush` then an `own` `editor.saved`, or any save
+      whose hash is its text), or the last write from outside (the outside side of a merge, else
+      the replaced text): marks never move with an outside write, they stay on the store's lines,
+      which is what runs, and the stopped line and a click use them too. A click on a line
+      written since is held (`line-map.ts` moves it with edits) and set once a save makes it a
+      line of the file. Two editors of one file agree after every save; while one has unsaved
+      edits, the other takes them as a write from outside. The halted line (the topmost frame of
+      the halt in this file, or a caller's) is highlighted with its frame's name and scrolled into
+      view once per halt; a halt elsewhere opens nothing. While halted in a script (never a
+      template), a pointer resting on a name asks its value, in that topmost frame of the file:
+      `expression.ts` takes the chain of reads that ends at it, and the worker checks it again
+      and walks it (`inspect.ts`).
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

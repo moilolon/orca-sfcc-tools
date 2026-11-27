@@ -3,14 +3,17 @@
 // reaches the panel as one post. A session runs on the sandbox only, in the debugged workspace's
 // folder (src/pieces/debugger/workspace.ts), and is always disconnected on stop and when the
 // worker goes away.
+import { readFile, stat } from 'node:fs/promises'
+import { posix, win32 } from 'node:path'
 import type { RoleState } from '../../core/instances'
 import type { Disposable, PieceContext, Workspace, WorkerPiece } from '../../core/piece'
 import { createBreakpoints, BreakpointsError, normalizePath, type BreakpointFile } from './breakpoints'
 import { byCartridge, isScriptPath, scriptFiles, type ReadDir } from './files'
 import { plainRead } from './inspect'
+import { remapLines, textLines } from './line-diff'
 import { readSource, SourceError, type SourceFileSystem } from './source'
 import { messages } from './i18n'
-import type { DebuggerFileState, DebuggerHoverValue, DebuggerState, DebugWorkspaceState, StepKind } from './protocol'
+import type { DebuggerFileState, DebuggerHoverValue, DebuggerState, DebugWorkspaceState, StepKind, Variable } from './protocol'
 import { createSession, SessionError, type SessionSnapshot } from './session'
 import { DapError } from './dap-client'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
@@ -26,6 +29,25 @@ const FILES_TTL_MS = 30_000
 const FILES_KEPT = 4
 /** What the editor's hover is sent of a value at most, once masked. */
 export const HOVER_MAX_TEXT = 1_000
+/** How long a save waits, at most, for the file's text before it is written (to move its breakpoints). */
+export const REMAP_READ_MS = 500
+/** How long the save hook waits at all; Orca allows a hook 2 s. */
+const REMAP_HOOK_MS = 1_000
+/** A file larger than this is not read to move its breakpoints: they stay where they are. */
+const REMAP_MAX_BYTES = 4 * 1024 * 1024
+
+/** A text cut to `max` characters with an ellipsis, never between the halves of a surrogate pair. */
+export function cutText(text: string, max: number): string {
+  if (text.length <= max) return text
+  const code = text.charCodeAt(max - 1)
+  return `${text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max)}…`
+}
+
+/** A file's text from the disk, or null past REMAP_MAX_BYTES. */
+async function readTextFile(file: string): Promise<string | null> {
+  if ((await stat(file)).size > REMAP_MAX_BYTES) return null
+  return readFile(file, 'utf8')
+}
 
 /** An error the panel words by its code (the piece's `reason.*` texts, else core's). */
 export class DebuggerError extends Error {
@@ -43,6 +65,8 @@ export type DebuggerOptions = {
   openFile?: OpenFile
   /** How a script's lines are read for its source view; default the local disk. */
   sourceFs?: SourceFileSystem
+  /** How a saved file's text before the save is read, to move its breakpoints; default the local disk. */
+  readText?: (file: string) => Promise<string | null>
 }
 
 const STEP_KINDS: readonly StepKind[] = ['continue', 'over', 'in', 'out']
@@ -66,6 +90,7 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   const breakpoints = createBreakpoints(ctx.store)
   const open = options.openFile ?? createOpenFile({ log: ctx.log })
   const coalesceMs = options.coalesceMs ?? COALESCE_MS
+  const platform = options.platform ?? process.platform
   let timer: ReturnType<typeof setTimeout> | null = null
   let disposed = false
   /** The last state posted, so the view can be told once that the session ended with the worker. */
@@ -200,22 +225,101 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   }
 
   /**
-   * A plain read (inspect.ts) in a frame of the halt that is in this file; null for anything else.
-   * Only the expression inspect.ts rebuilt is sent, so nothing with a side effect reaches the adapter.
+   * The value of a plain read (inspect.ts) in a frame of the halt that is in this file; null for
+   * anything else. Nothing is evaluated: its names are looked up one by one in the frame's scopes
+   * (Local, Closure, Global, in the adapter's order) and then among each value's members, with the
+   * `scopes` and `variables` requests the debugger's view makes when those names are expanded in
+   * its tree, so a hover runs nothing that expanding them would not. A name the listing lacks
+   * gives no value.
    */
   async function hover(input: { workspaceId?: unknown; path?: unknown; expression?: unknown; frameId?: unknown } | undefined): Promise<DebuggerHoverValue | null> {
-    const expression = plainRead(input?.expression)
-    if (expression === null) return null
+    const read = plainRead(input?.expression)
+    if (read === null) return null
     const workspace = await workspaceById(input?.workspaceId)
     const path = normalizePath(input?.path)
     const frameId = input?.frameId
     if (!workspace || !path || typeof frameId !== 'number' || !sessionOn(workspace)) return null
     const snapshot = session.snapshot()
     if (snapshot.status !== 'halted' || !snapshot.frames.some((frame) => frame.id === frameId) || session.frameLocation(frameId)?.path !== path) return null
-    // Masked and cut by the session; cut again to what a pop-up shows.
-    const answer = await session.evaluate(expression, frameId)
-    const value = answer.result.length > HOVER_MAX_TEXT ? `${answer.result.slice(0, HOVER_MAX_TEXT)}…` : answer.result
-    return { expression, value, expandable: answer.reference > 0 }
+    let found: Variable | null = null
+    for (const scope of await session.variables({ frameId })) {
+      if (scope.reference <= 0) continue
+      found = (await session.variables({ reference: scope.reference })).find((each) => each.name === read.path[0]) ?? null
+      if (found) break
+    }
+    for (const name of read.path.slice(1)) {
+      if (!found || found.reference <= 0) return null
+      found = (await session.variables({ reference: found.reference })).find((each) => each.name === name || each.name === `[${name}]`) ?? null
+    }
+    if (!found) return null
+    // Masked and cut by the session; cut again to what a pop-up shows, never inside a surrogate pair.
+    return { expression: read.expression, value: cutText(found.value, HOVER_MAX_TEXT), expandable: found.reference > 0 }
+  }
+
+  /**
+   * After a save from any editor tab: the file's breakpoints move with its text (line-diff.ts, the
+   * file on disk before against the text saved), so the store, the session and every view agree
+   * with what now runs. Read before Orca writes (the hook waits for it, `REMAP_READ_MS` at most);
+   * nothing is changed or refused of the save itself.
+   */
+  async function remapOnSave(event: { workspaceId?: unknown; path?: unknown; text?: unknown } | undefined): Promise<void> {
+    if (typeof event?.path !== 'string' || typeof event.text !== 'string') return
+    const workspace = await savedWorkspace(event.workspaceId, event.path)
+    if (!workspace) return
+    const rel = relativeTo(workspace.path, event.path)
+    if (!rel) return
+    const lines = (await breakpoints.list(workspace.id)).find((file) => file.path === rel)?.lines ?? []
+    if (lines.length === 0) return
+    const before = await readOld((platform === 'win32' ? win32 : posix).join(workspace.path, ...rel.split('/')))
+    if (before === null) return
+    const moved = remapLines(lines, textLines(before), textLines(event.text))
+    if (moved.length === lines.length && moved.every((line, i) => line === lines[i])) return
+    // The save need not wait for the store or the session: only the read had to come first.
+    void (async () => {
+      const files = await breakpoints.set(workspace.id, rel, moved)
+      await synced(workspace.id, files.find((file) => file.path === rel) ?? { path: rel, lines: [] })
+    })().catch((error: unknown) => ctx.log(`moving breakpoints after a save failed (${codeOf(error)})`))
+  }
+
+  /** The file as it is on disk now, or null when it cannot be read whole and in time. */
+  async function readOld(file: string): Promise<string | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const read = (options.readText ?? readTextFile)(file)
+      const late = new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), REMAP_READ_MS)))
+      return await Promise.race([read, late])
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** The local workspace a save names, by its id or by the folder that holds the file. */
+  async function savedWorkspace(workspaceId: unknown, path: string): Promise<Workspace | null> {
+    const workspaces = (await ctx.workspaces.list().catch((): Workspace[] => [])).filter(isLocal)
+    const byId = typeof workspaceId === 'string' ? workspaces.find((each) => each.id === workspaceId) : undefined
+    if (byId) return byId
+    // `<project>::<folder>` as an editor tab names it, else the deepest folder that holds the file.
+    const folder = typeof workspaceId === 'string' && workspaceId.includes('::') ? workspaceId.slice(workspaceId.indexOf('::') + 2) : null
+    const fold = (value: string) => {
+      const slashes = value.replace(/\\/g, '/').replace(/\/+$/, '')
+      return platform === 'win32' ? slashes.toLowerCase() : slashes
+    }
+    if (folder) {
+      const byFolder = workspaces.find((each) => fold(each.path) === fold(folder))
+      if (byFolder) return byFolder
+    }
+    return workspaces.filter((each) => relativeTo(each.path, path) !== null).sort((a, b) => b.path.length - a.path.length)[0] ?? null
+  }
+
+  /** A saved file's path relative to a workspace's folder, `/` between parts; null outside it. */
+  function relativeTo(root: string, file: string): string | null {
+    const paths = platform === 'win32' ? win32 : posix
+    if (!paths.isAbsolute(file)) return normalizePath(file)
+    const rel = paths.relative(root, file)
+    if (!rel || rel.startsWith('..') || paths.isAbsolute(rel)) return null
+    return normalizePath(rel.split(paths.sep).join('/'))
   }
 
   /**
@@ -333,6 +437,17 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
         return { path, lines: masked, truncated }
       })
     ),
+    // Observed only: never changes or refuses the save; waits at most REMAP_HOOK_MS for the read.
+    ctx.orca.hooks.on('editor.save.before', async (event) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([remapOnSave(event), new Promise((resolve) => (timer = setTimeout(resolve, REMAP_HOOK_MS)))])
+      } catch {
+        // Whatever happens here, the save goes on.
+      } finally {
+        clearTimeout(timer)
+      }
+    }),
     ctx.orca.panels.handle('debugger.file', (input) => guarded(() => fileState(input))),
     ctx.orca.panels.handle('debugger.hover', (input) => guarded(() => hover(input))),
     ctx.orca.panels.handle('debugger.threads', () => guarded(() => session.threads())),

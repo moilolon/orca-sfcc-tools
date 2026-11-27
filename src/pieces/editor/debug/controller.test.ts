@@ -7,6 +7,7 @@ import { assert, test } from 'orca/testing'
 import { t, LANGUAGES } from '../../../core/i18n'
 import { NOTICE_MAX_CHARS } from '../../../panel/ui'
 import type { DebuggerFileInput, DebuggerFileState, StoppedLine } from '../../debugger/protocol'
+import { remapLines, textLines } from '../../debugger/line-diff'
 import { EditorModel } from '../surface/model'
 import type { LineHighlight, LineMark } from '../surface/view'
 import { DebugController, type DebugRequests } from './controller'
@@ -52,20 +53,25 @@ class FakeDebugger implements DebugRequests {
     return {}
   }
 
-  async setBreakpoints(input: DebuggerFileInput & { lines: number[] }): Promise<unknown> {
-    this.calls.push(`set ${input.lines.join(',')}`)
-    this.lines.set(input.path, [...input.lines])
-    return {}
+  /** A save of the file from any tab: the worker moves the store's lines as its save hook does. */
+  saved(before: string, after: string): void {
+    this.lines.set(PATH, remapLines(this.lines.get(PATH) ?? [], textLines(before), textLines(after)))
   }
 
-  async hover(): Promise<null> {
+  hovers: string[] = []
+  async hover(input: DebuggerFileInput & { expression: string }): Promise<null> {
+    this.hovers.push(input.expression)
     return null
   }
 }
 
-function setup(stored: number[] = []) {
-  const debug = new FakeDebugger()
+function setup(stored: number[] = [], debug = new FakeDebugger()) {
   debug.lines.set(PATH, stored)
+  return editorOf(debug)
+}
+
+/** One editor of the file over a debugger, which another editor may share. */
+function editorOf(debug: FakeDebugger) {
   const model = new EditorModel(SCRIPT)
   const drawn = { marks: new Map<number, LineMark>(), clickable: false, highlight: null as LineHighlight | null, revealed: [] as number[], notices: [] as string[] }
   const controller = new DebugController(
@@ -78,7 +84,7 @@ function setup(stored: number[] = []) {
       notify: (text) => drawn.notices.push(text)
     },
     (key, vars) => t(debugMessages, 'en', key, vars),
-    () => model.buffer.lineCount
+    () => model.buffer.lines
   )
   model.buffer.onChange((fromLine, oldEnd, newEnd, change) => controller.bufferChanged(fromLine, oldEnd, newEnd, change))
   /** The gutter as drawn: 1-based line and the classes of its mark. */
@@ -147,7 +153,7 @@ test('a refused change says so in one line and shows the store as it is', async 
   assert.deepEqual(gutter(), ['2:bp-idle'])
 })
 
-test('marks follow edits, and the editor’s save writes them where they are seen', async () => {
+test('marks follow edits; on the editor’s save the store holds them where they were seen, and a held one is set', async () => {
   const { debug, model, controller, gutter } = setup([4])
   controller.setFile(FILE)
   await controller.refresh()
@@ -160,10 +166,113 @@ test('marks follow edits, and the editor’s save writes them where they are see
   assert.deepEqual(gutter(), ['2:bp-pending', '6:bp-idle'])
   assert.deepEqual(debug.calls, [])
   controller.flushed()
-  await controller.saved()
-  assert.deepEqual(debug.calls, ['set 2,6'])
+  debug.saved(SCRIPT, model.text())
+  await controller.savedOwn()
+  assert.deepEqual(debug.calls, ['breakpoint 2 true'])
   assert.deepEqual(debug.lines.get(PATH), [2, 6])
   assert.deepEqual(gutter(), ['2:bp-idle', '6:bp-idle'])
+})
+
+test('finding 4: a breakpoint the store gains between the flush and the save is kept, moved with the save', async () => {
+  const { debug, model, controller, gutter } = setup([3])
+  controller.setFile(FILE)
+  await controller.refresh()
+  model.setSelection({ line: 0, col: 0 })
+  model.enter()
+  controller.flushed()
+  // The Errors view adds line 6 of the file as saved: shown on 7.
+  debug.lines.set(PATH, [3, 6])
+  await controller.refresh()
+  assert.deepEqual(gutter(), ['4:bp-idle', '7:bp-idle'])
+  // The save lands: the worker moves every line the store holds then.
+  debug.saved(SCRIPT, model.text())
+  await controller.savedOwn()
+  assert.deepEqual(debug.lines.get(PATH), [4, 7])
+  assert.deepEqual(gutter(), ['4:bp-idle', '7:bp-idle'])
+})
+
+test('finding 2: after a write from outside, the stopped line and a click use the line the sandbox runs', async () => {
+  const { debug, model, controller, drawn, gutter } = setup([3])
+  controller.setFile(FILE)
+  await controller.refresh()
+  // An agent writes the file: two lines at the top. The store still says 3, as the session does.
+  const written = `'use strict';\n\n${SCRIPT}`
+  model.replaceAll(written)
+  await controller.rebase(textLines(written))
+  assert.deepEqual(gutter(), ['3:bp-idle'], 'the mark stays on the store’s line')
+  debug.session = 'halted'
+  debug.stopped = { line: 3, name: 'show()', frameId: 1, top: true }
+  await controller.refresh()
+  assert.equal(drawn.highlight?.line, 2, 'line 3 of the file on disk')
+  await controller.toggle(5)
+  assert.deepEqual(debug.calls, ['breakpoint 6 true'])
+})
+
+test('finding 3: two editors of one file agree after either saves, and after a save from another tab', async () => {
+  const debug = new FakeDebugger()
+  const a = setup([3], debug)
+  const b = editorOf(debug)
+  for (const each of [a, b]) {
+    each.controller.setFile(FILE)
+    await each.controller.refresh()
+  }
+  // Enter at the top in A; B gets it from Orca as a write from outside (attach.ts takes its text as
+  // the file's), so until A saves, B keeps the mark on the store's line.
+  a.model.setSelection({ line: 0, col: 0 })
+  a.model.enter()
+  b.model.replaceAll(a.model.text())
+  await b.controller.rebase(textLines(a.model.text()))
+  assert.deepEqual(a.gutter(), ['4:bp-idle'])
+  assert.deepEqual(b.gutter(), ['3:bp-idle'])
+  // A saves: the worker moves the store, A takes its flushed text as the file, B the save of the text it holds.
+  a.controller.flushed()
+  debug.saved(SCRIPT, a.model.text())
+  await a.controller.savedOwn()
+  await b.controller.rebase([...b.model.buffer.lines])
+  assert.deepEqual(debug.lines.get(PATH), [4])
+  assert.deepEqual(a.gutter(), ['4:bp-idle'])
+  assert.deepEqual(b.gutter(), ['4:bp-idle'])
+  // Orca's own editor saves a further change: both hear the write and stay on the store's line.
+  const before = a.model.text()
+  const after = `// top\n${before}`
+  debug.saved(before, after)
+  for (const each of [a, b]) {
+    each.model.replaceAll(after)
+    await each.controller.rebase(textLines(after))
+  }
+  assert.deepEqual(debug.lines.get(PATH), [5])
+  assert.deepEqual([a.gutter(), b.gutter()], [['5:bp-idle'], ['5:bp-idle']])
+})
+
+test('finding 5: a breakpoint’s line deleted whole hides it, undo brings it back, and a save drops it', async () => {
+  const { debug, model, controller, gutter } = setup([4])
+  controller.setFile(FILE)
+  await controller.refresh()
+  model.setSelection({ line: 3, col: 0 }, { line: 4, col: 0 })
+  model.cut()
+  assert.deepEqual(gutter(), [])
+  model.undo()
+  assert.deepEqual(gutter(), ['4:bp-idle'])
+  model.setSelection({ line: 3, col: 0 }, { line: 4, col: 0 })
+  model.cut()
+  controller.flushed()
+  debug.saved(SCRIPT, model.text())
+  await controller.savedOwn()
+  assert.deepEqual(debug.lines.get(PATH), [])
+})
+
+test('finding 6: the value pop-up asks nothing in a template, only in a script', async () => {
+  const { debug, controller } = setup([])
+  debug.session = 'halted'
+  debug.stopped = { line: 2, name: 'show()', frameId: 1, top: true }
+  controller.setFile({ workspaceId: 'w1', path: 'cartridges/app_example/cartridge/templates/default/page.isml' })
+  await controller.refresh()
+  assert.equal(await controller.hoverValue('basket.items'), null)
+  assert.deepEqual(debug.hovers, [])
+  controller.setFile(FILE)
+  await controller.refresh()
+  await controller.hoverValue('basket.items')
+  assert.deepEqual(debug.hovers, ['basket.items'])
 })
 
 test('the stopped line shows with its frame’s name while halted here, comes into view once, and goes on continue', async () => {

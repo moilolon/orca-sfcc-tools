@@ -1,10 +1,14 @@
 // Starts the editor's debugging features (phase 7.3) on a surface: the controller over Orca's
 // requests, the gutter's clicks and F9 (Orca binds no F9), the stopped line, and the value pop-up
-// under the pointer while a thread is halted in the file. app.ts calls `attachDebug` once and tells
-// it of a flush and of the editor's own save; the rest it listens to itself.
+// under the pointer while a thread is halted in a script. app.ts calls `attachDebug` once and tells
+// it of a flush and of the editor's own save; the rest it listens to itself: which text is on disk
+// after a write from outside (the document sync's replace) or a save of a text it holds.
 import type { OrcaFrameApi } from 'orca/frame'
 import { t } from '../../../core/i18n'
+import { textLines } from '../../debugger/line-diff'
 import type { IdentityStore } from '../identity'
+import { sha256Hex } from '../locate-client'
+import type { DocumentSync } from '../sync'
 import type { EditorModel } from '../surface/model'
 import type { SurfaceView } from '../surface/view'
 import { DebugController, type DebugWords } from './controller'
@@ -21,14 +25,13 @@ export type AttachedDebug = {
   saved(): void
 }
 
-export function attachDebug(options: { api: OrcaFrameApi; view: SurfaceView; model: EditorModel; identity: IdentityStore; notify: (text: string) => void }): AttachedDebug {
-  const { api, view, model, identity } = options
+export function attachDebug(options: { api: OrcaFrameApi; view: SurfaceView; model: EditorModel; identity: IdentityStore; sync: DocumentSync; notify: (text: string) => void }): AttachedDebug {
+  const { api, view, model, identity, sync } = options
   const word: DebugWords = (key, vars) => t(debugMessages, api.locale, key, vars)
   const controller = new DebugController(
     {
       file: (input) => api.plugin.request('debugger.file', input),
       breakpoint: (input) => api.plugin.request('debugger.breakpoint', input),
-      setBreakpoints: (input) => api.plugin.request('debugger.setBreakpoints', input),
       hover: (input) => api.plugin.request('debugger.hover', input)
     },
     {
@@ -42,7 +45,7 @@ export function attachDebug(options: { api: OrcaFrameApi; view: SurfaceView; mod
       notify: options.notify
     },
     word,
-    () => model.buffer.lineCount
+    () => model.buffer.lines
   )
 
   const follow = () => {
@@ -54,6 +57,24 @@ export function attachDebug(options: { api: OrcaFrameApi; view: SurfaceView; mod
   model.buffer.onChange((fromLine, oldEnd, newEnd, change) => controller.bufferChanged(fromLine, oldEnd, newEnd, change))
   // Any change of the session or the store: the file's state is asked again.
   api.plugin.on('debugger.state', () => void controller.refresh())
+  // A write from outside: its text is the file now (the outside side of a merge, else the text
+  // given), and the marks stay on the store's lines.
+  let lastMerge = sync.lastMerge()
+  sync.onReplace((text) => {
+    const merge = sync.lastMerge()
+    const outside = merge && merge !== lastMerge ? merge.outside : text
+    lastMerge = merge
+    void controller.rebase(textLines(outside))
+  })
+  // A save of this file from any tab whose text this editor holds: that text is the file now.
+  api.plugin.on('editor.saved', (payload) => {
+    const current = identity.value
+    if (current.state !== 'identified' || payload?.workspaceId !== current.workspaceId || payload.path !== current.path) return
+    const text = model.text()
+    void sha256Hex(text).then((hash) => {
+      if (hash === payload.hash && model.text() === text) void controller.rebase([...model.buffer.lines])
+    })
+  })
 
   const hover = valuePopup(view, model, controller, word)
   view.addKeyHandler((event) => {
@@ -67,7 +88,7 @@ export function attachDebug(options: { api: OrcaFrameApi; view: SurfaceView; mod
 
   return {
     flushed: () => controller.flushed(),
-    saved: () => void controller.saved()
+    saved: () => void controller.savedOwn()
   }
 }
 

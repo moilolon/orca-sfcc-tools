@@ -1,12 +1,20 @@
 // The breakpoints of the file the editor shows, as the gutter draws them. The store
 // (src/pieces/debugger/breakpoints.ts, through the worker) keeps lines of the file as saved, which
-// is what the sandbox runs once `code watch` uploads it; the editor shows them where their text is
-// now (line-map.ts). A breakpoint set on a line written since the save has no saved line yet: it
-// is held here (`pending`) and written with the others on the editor's next save of the file, when
-// every line the person sees becomes the line the store holds. Lines are 0-based here, 1-based in
-// the store. Pure: no DOM, no Orca.
+// is what the sandbox runs once `code watch` uploads it, and the worker moves them on every save
+// with the same line diff (src/pieces/debugger/line-diff.ts). The editor keeps the text it believes
+// is on disk (`baseline`) and shows each stored line where the diff from that text to the text now
+// puts it: what it shows before a save is what the store holds after it, a line deleted whole hides
+// its mark (and undo brings both back), and the stopped line and a click use the store's numbers.
+//
+// The baseline is the text of the last save of the file this editor saw (its own, or any save
+// whose text it holds), or the text of the last write from outside (an agent, Orca's own editor):
+// marks never move with an outside write, they stay on the store's lines, which is what runs. A
+// click on a line written since (no saved line under it) is held (`pending`, moved with the edits)
+// and set once a save makes it a line of the file. Lines are 0-based here, 1-based in the store.
+// Pure: no DOM, no Orca.
 import type { DebuggerFileState } from '../../debugger/protocol'
-import { LineMap, moveLine, movesLines, type LineChange } from './line-map'
+import { mapLines } from '../../debugger/line-diff'
+import { moveLine, movesLines, type LineChange } from './line-map'
 
 /** How a breakpoint draws: verified by the session, not verified, no session on its workspace, or not saved yet. */
 export type MarkState = 'verified' | 'unverified' | 'idle' | 'pending'
@@ -21,20 +29,25 @@ type Pending = { line: number }
 export class BreakpointMarks {
   private stored: StoredLine[] = []
   private session: DebuggerFileState['session'] = 'none'
-  private map: LineMap
+  private baseline: string[]
   private pending: Pending[] = []
-  /** What was shown when Orca flushed the editor for a save, and the edits since. */
-  private flush: { lines: number[]; included: Set<Pending>; since: LineMap } | null = null
+  /** The map from the baseline to the text now, kept until either changes. */
+  private cache: { version: number; map: Int32Array } | null = null
+  private version = 0
+  /** The text Orca was about to save, and where each pending breakpoint was in it. */
+  private flush: { lines: string[]; pending: Map<Pending, number> } | null = null
 
-  constructor(lineCount: number) {
-    this.map = new LineMap(lineCount)
+  /** `lines` gives the editor's lines now (the buffer's own array, read only). */
+  constructor(private readonly lines: () => readonly string[]) {
+    this.baseline = [...lines()]
   }
 
-  /** A new file, or the text read again as saved: lines are where the store says. */
-  reset(lineCount: number): void {
-    this.map = new LineMap(lineCount)
+  /** A new file: the text shown is taken as the file on disk, and nothing is held. */
+  reset(): void {
+    this.baseline = [...this.lines()]
     this.pending = []
     this.flush = null
+    this.changed()
   }
 
   /** The store's lines of this file and whether a session runs on its workspace, as the worker answered. */
@@ -43,31 +56,38 @@ export class BreakpointMarks {
     this.session = session
   }
 
-  /** Where a saved line (1-based) is now (0-based); null past the saved file's end. */
-  current(savedLine: number): number | null {
-    return this.map.current(savedLine - 1)
+  private changed(): void {
+    this.version++
   }
 
-  /** Follows one change of the buffer; false when it moved nothing. */
-  change(fromLine: number, oldEnd: number, newEnd: number, change: LineChange): boolean {
-    if (!movesLines(fromLine, oldEnd, newEnd)) return false
-    this.map.apply(fromLine, oldEnd, newEnd, change)
-    this.flush?.since.apply(fromLine, oldEnd, newEnd, change)
+  private map(): Int32Array {
+    if (!this.cache || this.cache.version !== this.version) this.cache = { version: this.version, map: mapLines(this.baseline, this.lines()) }
+    return this.cache.map
+  }
+
+  /** Where a saved line (1-based) is now (0-based); null when it was deleted or is past the file's end. */
+  current(savedLine: number): number | null {
+    const map = this.map()
+    const at = savedLine >= 1 && savedLine <= map.length ? map[savedLine - 1] : -1
+    return at >= 0 ? at : null
+  }
+
+  /** Follows one change of the buffer: pending breakpoints move with it, the map is drawn again. */
+  change(fromLine: number, oldEnd: number, newEnd: number, change: LineChange): void {
+    this.changed()
+    if (!movesLines(fromLine, oldEnd, newEnd)) return
     for (const each of this.pending) each.line = moveLine(each.line, fromLine, oldEnd, newEnd, change)
-    // Two pending breakpoints joined on one line are one.
     const seen = new Set<number>()
     this.pending = this.pending.filter((each) => (seen.has(each.line) ? false : (seen.add(each.line), true)))
-    return true
   }
 
   /** Every breakpoint where it is shown now (0-based), with how it draws. */
   shown(): Map<number, MarkState> {
     const marks = new Map<number, MarkState>()
     for (const each of this.stored) {
-      const line = this.map.current(each.line - 1)
+      const line = this.current(each.line)
       if (line === null) continue
       const state: MarkState = each.verified === true ? 'verified' : each.verified === false || this.session !== 'none' ? 'unverified' : 'idle'
-      // Joined lines show once: verified only when every one of them is.
       const before = marks.get(line)
       marks.set(line, before && before !== 'verified' ? before : state)
     }
@@ -77,19 +97,19 @@ export class BreakpointMarks {
 
   /**
    * A click on a line (0-based): removes what is shown there, or sets one. A saved line is asked of
-   * the store at once (and shown so already); a line written since the save is held until the save.
+   * the store at once (and shown so already); a line written since the save is held until a save.
    */
   toggle(line: number): ToggleAction {
-    const stored = this.stored.filter((each) => this.map.current(each.line - 1) === line)
+    const stored = this.stored.filter((each) => this.current(each.line) === line)
     const pending = this.pending.filter((each) => each.line === line)
     if (stored.length > 0 || pending.length > 0) {
       this.stored = this.stored.filter((each) => !stored.includes(each))
       this.pending = this.pending.filter((each) => !pending.includes(each))
       return stored.map((each) => ({ line: each.line, on: false }))
     }
-    // The text now on this line: the last saved line joined into it (its tail is what is here).
-    const saved = this.map.savedAt(line).at(-1)
-    if (saved === undefined) {
+    const map = this.map()
+    const saved = map.indexOf(line)
+    if (saved < 0) {
       this.pending.push({ line })
       return []
     }
@@ -97,31 +117,42 @@ export class BreakpointMarks {
     return [{ line: saved + 1, on: true }]
   }
 
-  /** Orca is about to save this editor's text: what it shows now is what the store gets if the save is this file's. */
-  flushed(lineCount: number): void {
-    this.flush = { lines: [...this.shown().keys()].sort((a, b) => a - b), included: new Set(this.pending), since: new LineMap(lineCount) }
+  /** Orca is about to save this editor's text. */
+  flushed(): void {
+    this.flush = { lines: [...this.lines()], pending: new Map(this.pending.map((each) => [each, each.line])) }
   }
 
   /**
-   * The editor's save of this file happened: the lines to write (1-based, where they were shown
-   * when it was flushed), or null when nothing changed or no flush preceded it. From now on the
-   * saved file is that text.
+   * The save after the flush was this editor's, of this file: the text it flushed is the file now.
+   * Answers the held breakpoints that became lines of it (1-based), to set in the store.
    */
-  saved(): number[] | null {
+  savedOwn(): number[] {
     const flush = this.flush
-    if (!flush) return null
+    if (!flush) return []
     this.flush = null
-    const lines = flush.lines.map((line) => line + 1)
-    const before = this.stored.map((each) => each.line)
-    this.map = flush.since
-    this.pending = this.pending.filter((each) => !flush.included.has(each))
-    if (sameLines(before, lines)) return null
-    // Whether the session verified a moved line is asked again once the store has it.
-    this.stored = lines.map((line) => ({ line, verified: null }))
-    return lines
+    this.baseline = flush.lines
+    this.changed()
+    const written: number[] = []
+    for (const [each, line] of flush.pending) {
+      if (!this.pending.includes(each)) continue
+      this.pending = this.pending.filter((other) => other !== each)
+      written.push(line + 1)
+    }
+    return written
   }
-}
 
-function sameLines(a: readonly number[], b: readonly number[]): boolean {
-  return a.length === b.length && a.every((line, i) => line === b[i])
+  /**
+   * The file on disk is now `lines` (a save of a text this editor holds, or a write from outside).
+   * When that is the text shown, the held breakpoints are lines of the file: they are answered
+   * (1-based) to set in the store.
+   */
+  rebase(lines: readonly string[]): number[] {
+    this.baseline = [...lines]
+    this.changed()
+    const now = this.lines()
+    if (lines.length !== now.length || lines.some((line, i) => line !== now[i])) return []
+    const written = this.pending.map((each) => each.line + 1)
+    this.pending = []
+    return written
+  }
 }

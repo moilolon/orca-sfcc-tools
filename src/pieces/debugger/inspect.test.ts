@@ -24,7 +24,7 @@ test('a name, `this`, and chains of property reads pass, rebuilt from the tree',
     ['_cache.$entry', '_cache.$entry'],
     ['customer.profile.custom.loyaltyTier', 'customer.profile.custom.loyaltyTier']
   ]
-  for (const [text, sent] of accepted) assert.equal(plainRead(text), sent, text)
+  for (const [text, sent] of accepted) assert.equal(plainRead(text)?.expression, sent, text)
 })
 
 test('calls, new, assignments, updates, deletes, operators and expression indexes are refused', () => {
@@ -86,6 +86,15 @@ test('calls, new, assignments, updates, deletes, operators and expression indexe
 
 test('a chain longer than the limit is refused; one at it passes', () => {
   const chain = (links: number) => ['a', ...Array.from({ length: links }, (_, i) => `p${i}`)].join('.')
-  assert.equal(plainRead(chain(MAX_INSPECT_LINKS)), chain(MAX_INSPECT_LINKS))
+  assert.equal(plainRead(chain(MAX_INSPECT_LINKS))?.expression, chain(MAX_INSPECT_LINKS))
   assert.equal(plainRead(chain(MAX_INSPECT_LINKS + 1)), null)
+})
+
+test('what passes is a path of names to walk in the variables, never a text to evaluate', () => {
+  assert.deepEqual(plainRead('basket.totalGrossPrice'), { expression: 'basket.totalGrossPrice', path: ['basket', 'totalGrossPrice'] })
+  assert.deepEqual(plainRead("items[0]['shipping-method'].ID"), { expression: 'items[0]["shipping-method"].ID', path: ['items', '0', 'shipping-method', 'ID'] })
+  assert.deepEqual(plainRead('this.orderNo')?.path, ['this', 'orderNo'])
+  // A documented getter with a side effect is a name like any other: whether its value is read is
+  // up to what the variables tree lists (worker.test.ts), never an evaluation.
+  assert.deepEqual(plainRead('BasketMgr.currentOrNewBasket')?.path, ['BasketMgr', 'currentOrNewBasket'])
 })

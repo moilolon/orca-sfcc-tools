@@ -166,7 +166,7 @@ async function main(kind: EditorKind): Promise<void> {
     if (located.line) view.revealLine(located.line, located.column)
   }
   // 7.3: breakpoints in the margin, the stopped line and values while halted (debug/).
-  const debug = attachDebug({ api, view, model, identity, notify: (text) => showNotice(notice, { text, dismissible: true }) })
+  const debug = attachDebug({ api, view, model, identity, sync, notify: (text) => showNotice(notice, { text, dismissible: true }) })
   // A save names this editor's file only when this editor was the one flushed for it.
   api.on('editor.flush', () => {
     client.flushed(model.text())
