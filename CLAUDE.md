@@ -27,10 +27,11 @@ Changing it needs the owner's yes.
       namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
       with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish),
       `open-file.ts` (opens a file of a workspace at a line through `orca file open`).
-      `b2c.ts` and `open-file.ts` are the only modules that start a process: `open-file.ts`
-      imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe` (or `orca`) directly,
-      never through a shell or a `.cmd`, with the worker's environment plus `APPDATA`,
-      `LOCALAPPDATA` and `USERPROFILE`, and opens only a file inside the workspace.
+      `b2c.ts`, `open-file.ts` and the engine's `checkout/git.ts` are the only modules that start
+      a process: `open-file.ts` imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe`
+      (or `orca`) directly, never through a shell or a `.cmd`, with the worker's environment plus
+      `APPDATA`, `LOCALAPPDATA` and `USERPROFILE`, and opens only a file inside the workspace.
+      `git.ts` is held to the same (see the engine below).
       `test-support.ts` holds the invented `dw.json` and the fake process the tests use;
       `b2c-commands-fixture.ts` lists every command of the b2c the allow list was checked
       against, for the tests that walk it.
@@ -117,9 +118,10 @@ Changing it needs the owner's yes.
       breakpoint here* on a frame. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
-    - `src/pieces/engine/` (phase 6, still `delivered: false`): so far the syntax layer, pure
-      modules with no Node and no Orca imports (a test checks it) that the editor will load in
-      its frame too, exported with their types by `index.ts`, the contract of 6.3 and 6.4.
+    - `src/pieces/engine/` (phase 6, still `delivered: false`): the syntax layer and the
+      checkout index (below), pure modules with no Node and no Orca imports (a test checks it)
+      that the editor will load in its frame too, exported with their types by `index.ts`, the
+      contract of 6.3 and 6.4.
       `js/lexer.ts` and `js/parser.ts` read SFCC scripts (ES5 plus what Rhino accepts, `for
       each` and conditional `catch` included) into an ESTree-shaped tree (`js/ast.ts`) with
       `start` and `end` offsets on every node; they never throw, report problems by code
@@ -146,6 +148,48 @@ Changing it needs the owner's yes.
       invented and read with LF (`fixtures/read.ts`); `line-endings.test.ts` runs each with LF,
       CRLF and CR, and `limits.test.ts` holds the inputs that once broke a bound or took
       quadratic time. `fixtures/generate.ts` makes the large script and the seeded mutations.
+    - `src/pieces/engine/checkout/` (phase 6.3): the checkout index, which 6.4 and 6.5 read.
+      `checkout.ts` (`CheckoutIndex`) and the readers it uses (`xml.ts`, `properties.ts`,
+      `sites.ts`, `metadata.ts`, `scan.ts`) are pure like the syntax layer (a test checks it):
+      they read files only through `CheckoutFiles` (`files.ts`: list a folder, read a file, a
+      file's time; paths relative, `/` between parts, never leaving the root) and a git ref only
+      through `RefReader`. `memory.ts` is a checkout in memory; `disk.ts` (the real disk, no
+      link followed, and the watcher) and `git.ts` are worker only. A cartridge is a folder with
+      `.project` and `cartridge/` (`modules` with `.project` is SFRA's module folder); the walk
+      skips dot folders and `node_modules`, within `MAX_WALK_DEPTH` and `MAX_FILES`. Server
+      scripts are the `.js`/`.ds` under `cartridge/` but `static/` and `client/`; controllers
+      are those directly in `controllers/`. Per file it keeps only what `scan.ts` takes (the
+      literal `require`s, template and `Resource.msg`/`msgf` uses with their ranges,
+      `module.superModule`, a controller's route operations, `extend` and export) with the
+      file's time: a build reads again only a file whose time changed, `update(paths)` only the
+      paths named (a folder is walked again), and everything derived (cartridges, paths,
+      bundles, metadata, route tables, counts) is recomputed in memory. A `.project`, a site
+      archive or a setting changed rebuilds the paths. The cartridge path, per storefront: the
+      `cartridgePath` setting (one path, storefront `setting`); else each `sites/<site>/site.xml`
+      `<custom-cartridges>` of the checkout; else the same at the `metadataRef` ref; each
+      storefront says its `source`. Metadata (custom attributes per object type, site
+      preferences as `SitePreferences`', custom object types) comes from `meta/*.xml` of the
+      checkout, else of the ref. Resolution: `*/` the first cartridge of each storefront's path
+      that has it (with every copy as a candidate), `~/` the file's cartridge, relative,
+      `<cartridge>/…` (and `/<cartridge>/…`), a bare name in `modules`, else a cartridge's name
+      to the `main` of its `package.json`; `dw/…` a class or a package of the `dw.*` index;
+      `module.superModule` the next cartridge after the file's own on each path. Templates and
+      bundles go locale (`fr_FR`, `fr`, `default`) first, then cartridge. A route chain applies
+      the deepest base first (`extend(module.superModule)` or a required controller): a
+      `get`/`post`/`use` declares, `prepend` runs before and `append` after in the order
+      applied, `replace` drops the chain; `route_missing`, `route_redefined`, `base_missing`
+      and `not_exported` are kept for 6.5. `git.ts` runs only `rev-parse --verify --quiet
+      <ref>^{commit}`, `ls-tree -r --name-only <ref> -- <path>` and `show <ref>:<path>`, at the
+      commit (never the moving ref), each refused before git starts unless the ref matches
+      `REF_PATTERN` (no leading `-`, `..` or `@{`) and the path is relative with no leading `-`
+      or `..`; `git.exe` only, no shell, in the workspace, with `GIT_OPTIONAL_LOCKS=0`, a
+      timeout and an output cap; stderr is never kept, a failure is a code (`GitFailure`). It
+      writes nothing. The worker (`worker.ts`) indexes the uploading workspace, else the
+      focused one, when local; `engine.index.status` answers at once and starts a build on its
+      own when the target changed; a watcher feeds changed paths after `DEBOUNCE_MS`, and a
+      change of `.git/HEAD`, `packed-refs` or `refs/` reads the ref again. `checkout/testing.ts`
+      reads the invented checkout of `fixtures/checkout/` (two storefronts, three cartridges and
+      `modules`) and generates large ones.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

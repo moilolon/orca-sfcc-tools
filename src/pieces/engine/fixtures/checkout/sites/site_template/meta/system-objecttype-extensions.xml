@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://www.demandware.com/xml/impex/metadata/2006-10-31">
+    <type-extension type-id="Product">
+        <system-attribute-definitions>
+            <attribute-definition attribute-id="name">
+                <display-name xml:lang="x-default">Name</display-name>
+            </attribute-definition>
+        </system-attribute-definitions>
+        <custom-attribute-definitions>
+            <attribute-definition attribute-id="gardenColour">
+                <display-name xml:lang="x-default">Colour</display-name>
+                <type>string</type>
+                <mandatory-flag>false</mandatory-flag>
+            </attribute-definition>
+            <attribute-definition attribute-id="gardenBadge">
+                <display-name xml:lang="x-default">Badge</display-name>
+                <type>enum-of-string</type>
+                <value-definitions>
+                    <value-definition>
+                        <value>new</value>
+                    </value-definition>
+                </value-definitions>
+            </attribute-definition>
+        </custom-attribute-definitions>
+        <group-definitions>
+            <attribute-group group-id="garden">
+                <attribute attribute-id="gardenColour"/>
+            </attribute-group>
+        </group-definitions>
+    </type-extension>
+    <type-extension type-id="SitePreferences">
+        <custom-attribute-definitions>
+            <attribute-definition attribute-id="gardenCurrency">
+                <display-name xml:lang="x-default">Currency label</display-name>
+                <type>string</type>
+            </attribute-definition>
+            <attribute-definition attribute-id="gardenShowBadges">
+                <type>boolean</type>
+            </attribute-definition>
+        </custom-attribute-definitions>
+    </type-extension>
+</metadata>

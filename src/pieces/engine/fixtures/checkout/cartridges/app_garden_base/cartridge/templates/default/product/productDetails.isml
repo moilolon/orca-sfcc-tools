@@ -1,0 +1,9 @@
+<isdecorate template="common/layout/page">
+    <isscript>
+        var priceHelper = require('*/cartridge/scripts/helpers/priceHelper');
+    </isscript>
+    <h1>${pdict.product.name}</h1>
+    <span class="label">${Resource.msg('label.price', 'product', null)}</span>
+    <isinclude template="product/components/price" />
+    <p>${Resource.msgf('label.stock', 'product', null, 3)}</p>
+</isdecorate>

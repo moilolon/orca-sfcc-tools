@@ -1,1 +1,22 @@
-{}
+{
+  "contributes": {
+    "settings": [
+      {
+        "key": "cartridgePath",
+        "title": "Analysis: cartridge path",
+        "description": "The cartridge path the analysis uses for every storefront, first cartridge first, separated by colons. Empty: each site's path from the site archives of the checkout (sites/<site>/site.xml), else from the git ref below.",
+        "type": "string",
+        "default": "",
+        "placeholder": "app_custom:app_storefront_base"
+      },
+      {
+        "key": "metadataRef",
+        "title": "Analysis: metadata git ref",
+        "description": "A git ref (a branch or tag) whose site archives and metadata the analysis reads, without checking it out, when the checkout has none. Empty: not read.",
+        "type": "string",
+        "default": "",
+        "placeholder": "origin/main"
+      }
+    ]
+  }
+}

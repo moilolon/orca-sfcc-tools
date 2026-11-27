@@ -1,0 +1,4 @@
+{
+    "description": "The outlet cartridge: require(\"app_garden_outlet\") loads its main module.",
+    "main": "./cartridge/scripts/outlet.js"
+}

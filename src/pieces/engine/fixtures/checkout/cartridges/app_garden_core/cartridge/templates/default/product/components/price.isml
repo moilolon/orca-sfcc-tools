@@ -1,0 +1,2 @@
+<span class="price price-core">${pdict.price}</span>
+<span class="vat">${Resource.msg('label.vat', 'product', null)}</span>

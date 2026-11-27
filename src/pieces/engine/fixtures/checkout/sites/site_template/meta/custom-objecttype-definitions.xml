@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://www.demandware.com/xml/impex/metadata/2006-10-31">
+    <custom-type type-id="GardenWishlist">
+        <staging-mode>source-to-target</staging-mode>
+        <storage-scope>site</storage-scope>
+        <key-definition attribute-id="id">
+            <type>string</type>
+        </key-definition>
+        <attribute-definitions>
+            <attribute-definition attribute-id="items">
+                <type>set-of-string</type>
+            </attribute-definition>
+        </attribute-definitions>
+    </custom-type>
+</metadata>

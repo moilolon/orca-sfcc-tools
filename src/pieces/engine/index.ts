@@ -79,3 +79,45 @@ export {
   type Text
 } from './isml/parser'
 export { templateScript, type TemplateFragment, type TemplateScript } from './isml/embedded'
+
+// The checkout index (phase 6.3): what parts 6.4 and 6.5 read. Pure like the syntax layer; the
+// worker gives it the disk (`checkout/disk.ts`) and git (`checkout/git.ts`), which stay out of
+// this file.
+export {
+  CheckoutIndex,
+  GitError,
+  localeFallbacks,
+  splitRouteId,
+  templateName,
+  type Cartridge,
+  type CartridgeKind,
+  type CheckoutOptions,
+  type CheckoutSettings,
+  type Copy,
+  type GitFailure,
+  type IndexCounts,
+  type IndexStatus,
+  type MetadataSource,
+  type ModuleResolution,
+  type ObjectType,
+  type RefReader,
+  type ResourceCopy,
+  type ResourceKey,
+  type ResourceResolution,
+  type RouteChain,
+  type RouteProblem,
+  type RouteProblemCode,
+  type RouteResolution,
+  type RouteStep,
+  type Storefront,
+  type SuperModuleCopy,
+  type SuperModuleResolution,
+  type TemplateCopy,
+  type TemplateResolution
+} from './checkout/checkout'
+export { type CheckoutFiles, type DirEntry, type EntryKind } from './checkout/files'
+export { MemoryFiles } from './checkout/memory'
+export { SITE_PREFERENCES, type AttributeDefinition, type ObjectTypeKind } from './checkout/metadata'
+export { type PropertyKey } from './checkout/properties'
+export { SETTING_STOREFRONT, type PathSource, type SiteArchive } from './checkout/sites'
+export { type ControllerBase, type ControllerFacts, type RequireUse, type ResourceUse, type RouteMethod, type RouteOperation, type ScriptFileFacts, type TemplateFileFacts, type TemplateUse, type TemplateVia } from './checkout/scan'
