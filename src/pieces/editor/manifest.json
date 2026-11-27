@@ -1,1 +1,25 @@
-{}
+{
+  "contributes": {
+    "customEditors": [
+      {
+        "id": "sfcc",
+        "title": "SFCC",
+        "extensions": [".isml"],
+        "priority": "default",
+        "entry": "src/pieces/editor/main.ts",
+        "frame": "isolated"
+      },
+      {
+        "id": "sfcc-view",
+        "title": "SFCC",
+        "extensions": [".js", ".xml", ".properties"],
+        "priority": "option",
+        "entry": "src/pieces/editor/main-view.ts",
+        "frame": "isolated"
+      }
+    ],
+    "commands": [{ "id": "editor.openInEditor", "title": "SFCC: Open in SFCC editor", "when": "workspace" }],
+    "keybindings": [{ "command": "editor.openInEditor", "key": "Alt+Shift+E", "when": "workspace" }],
+    "hooks": [{ "event": "editor.save.before" }]
+  }
+}

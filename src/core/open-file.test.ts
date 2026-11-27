@@ -1,9 +1,11 @@
-// Opening a file through `orca file open`, over a fake process: the executable it picks, the
+// Opening a file through `orca file open`, or in the plugin's own editor through `orca plugin
+// open --editor`, over a fake process: the executable it picks, the
 // environment and the arguments it gives, and the paths it refuses.
 import { assert, test } from 'orca/testing'
 import { fakeSpawner } from './test-support'
 import { readFileSync } from 'node:fs'
-import { createOpenFile, isInside, openArguments, orcaEnvironment, type OpenFileDeps, type OpenFileSpawnOptions } from './open-file'
+import { createOpenFile, EditorOpens, editorTakes, isInside, openArguments, orcaEnvironment, pluginKeyIn, pluginOpenArguments, type OpenFileDeps, type OpenFileSpawnOptions } from './open-file'
+import type { SpawnCall } from './test-support'
 
 const WINDOWS_ORCA = 'C:\\Program Files\\Orca\\resources\\bin\\orca.exe'
 const WINDOWS_ROOT = 'C:\\work\\shop'
@@ -188,3 +190,122 @@ function baseLinux(): OpenFileDeps {
     realPath: async (path) => path
   }
 }
+
+// ---- In the plugin's own editor ----
+
+const TEMPLATE = 'C:\\work\\shop\\cartridges\\app_x\\cartridge\\templates\\default\\cart.isml'
+
+/** What `orca plugin list --json` prints: this plugin running under `key`, beside others. */
+function listed(plugins: { pluginKey: string; status: string }[]): string {
+  return JSON.stringify({ ok: true, result: { plugins: [{ pluginKey: 'stablyai.orca-github-vscode-theme', status: 'idle' }, ...plugins] } })
+}
+
+/** A Windows machine where `plugin list` prints `list` and `plugin open` exits with `openCode`. */
+function editorMachine(list: string, openCode = 0) {
+  const script = (call: SpawnCall) => {
+    if (call.args[0] === 'plugin' && call.args[1] === 'list') call.child.finish(0, list)
+    else if (call.args[0] === 'plugin' && call.args[1] === 'open') call.child.finish(openCode, '{"ok":true}')
+    else call.child.finish(0, '{"ok":true}')
+  }
+  const spawner = fakeSpawner(script)
+  const opens = new EditorOpens()
+  const open = createOpenFile({
+    spawn: spawner.spawn,
+    platform: 'win32',
+    execPath: 'C:\\Program Files\\Orca\\Orca.exe',
+    env: { PATH: 'C:\\Windows\\system32' },
+    homedir: 'C:\\Users\\someone',
+    isFile: async (path) => [WINDOWS_ORCA, FILE, TEMPLATE, 'C:\\work\\shop\\package.json'].includes(path),
+    realPath: async (path) => (path === WINDOWS_ROOT || [FILE, TEMPLATE, 'C:\\work\\shop\\package.json'].includes(path) ? path : null),
+    editorOpens: opens,
+    now: () => 5
+  })
+  return { open, calls: spawner.calls, opens }
+}
+
+test('inEditor: the plugin’s key is found in the list of running plugins, the open recorded, then plugin open --editor', async () => {
+  const { open, calls, opens } = editorMachine(listed([{ pluginKey: 'local.sfcc-tools', status: 'running' }]))
+  assert.deepEqual(await open({ root: WINDOWS_ROOT, path: 'cartridges\\app_x\\cartridge\\templates\\default\\cart.isml', line: 12, column: 3, focus: true, inEditor: true }), { opened: true })
+  assert.deepEqual(
+    calls.map((call) => call.args),
+    [
+      ['plugin', 'list', '--json'],
+      ['plugin', 'open', 'local.sfcc-tools', '--editor', TEMPLATE, '--json']
+    ]
+  )
+  for (const call of calls) {
+    assert.equal(call.file, WINDOWS_ORCA, 'orca.exe directly')
+    const options = call.options as unknown as OpenFileSpawnOptions
+    assert.equal(options.shell, false)
+    assert.equal(options.windowsVerbatimArguments, false)
+    assert.equal(options.cwd, WINDOWS_ROOT)
+    assert.equal(options.env.APPDATA, 'C:\\Users\\someone\\AppData\\Roaming')
+  }
+  assert.deepEqual(opens.under(WINDOWS_ROOT, 'win32'), [{ root: WINDOWS_ROOT, file: TEMPLATE, line: 12, column: 3, at: 5 }])
+  // The key is asked once; an installed plugin's key works the same.
+  await open({ root: WINDOWS_ROOT, path: FILE, inEditor: true })
+  assert.equal(calls.filter((call) => call.args[1] === 'list').length, 1)
+  assert.deepEqual(calls[2].args, pluginOpenArguments('local.sfcc-tools', FILE))
+  assert.equal(pluginKeyIn(listed([{ pluginKey: 'moilolon.sfcc-tools', status: 'running' }])), 'moilolon.sfcc-tools')
+})
+
+test('inEditor: no running copy, or two, or a list that does not parse: the file opens in Orca’s editor at its line', async () => {
+  const lists = [
+    listed([{ pluginKey: 'local.sfcc-tools', status: 'idle' }]),
+    listed([
+      { pluginKey: 'local.sfcc-tools', status: 'running' },
+      { pluginKey: 'moilolon.sfcc-tools', status: 'running' }
+    ]),
+    listed([{ pluginKey: 'local.sfcc-tools-extra', status: 'running' }]),
+    'not json'
+  ]
+  for (const list of lists) {
+    const { open, calls, opens } = editorMachine(list)
+    assert.deepEqual(await open({ root: WINDOWS_ROOT, path: TEMPLATE, line: 4, inEditor: true }), { opened: true })
+    assert.deepEqual(calls[1].args, ['file', 'open', TEMPLATE, '--worktree', `path:${WINDOWS_ROOT}`, '--line', '4', '--json'], list)
+    assert.equal(opens.under(WINDOWS_ROOT, 'win32').length, 0, 'nothing recorded')
+    // The failed search is not repeated on the next jump (the clock has not moved).
+    await open({ root: WINDOWS_ROOT, path: TEMPLATE, inEditor: true })
+    assert.equal(calls.filter((call) => call.args[1] === 'list').length, 1)
+  }
+})
+
+test('inEditor: a plugin open that fails falls back to orca file open; a file type the editor does not take never asks', async () => {
+  const failing = editorMachine(listed([{ pluginKey: 'local.sfcc-tools', status: 'running' }]), 1)
+  assert.deepEqual(await failing.open({ root: WINDOWS_ROOT, path: TEMPLATE, line: 2, inEditor: true }), { opened: true })
+  assert.deepEqual(
+    failing.calls.map((call) => call.args[0] + ' ' + call.args[1]),
+    ['plugin list', 'plugin open', 'file open']
+  )
+  assert.deepEqual(failing.opens.under(WINDOWS_ROOT, 'win32'), [], 'no line left behind for a later editor')
+  const other = editorMachine(listed([{ pluginKey: 'local.sfcc-tools', status: 'running' }]))
+  await other.open({ root: WINDOWS_ROOT, path: 'package.json', inEditor: true })
+  assert.deepEqual(other.calls.map((call) => call.args[0] + ' ' + call.args[1]), ['file open'])
+  assert.ok(editorTakes('a/B.ISML') && editorTakes('x.properties') && !editorTakes('x.json') && !editorTakes('x.isml.bak'))
+})
+
+test('inEditor keeps every condition: outside the workspace or missing is refused before anything starts, a shim too', async () => {
+  const { open, calls } = editorMachine(listed([{ pluginKey: 'local.sfcc-tools', status: 'running' }]))
+  for (const path of ['..\\other\\a.isml', 'D:\\elsewhere\\a.isml']) {
+    assert.deepEqual(await open({ root: WINDOWS_ROOT, path, inEditor: true }), { opened: false, reason: 'outside_workspace' })
+  }
+  assert.deepEqual(await open({ root: WINDOWS_ROOT, path: 'missing.isml', inEditor: true }), { opened: false, reason: 'not_found' })
+  assert.equal(calls.length, 0)
+  const shim = windows({ env: { PATH: 'C:\\tools' } }, ['C:\\tools\\orca.cmd', TEMPLATE])
+  assert.deepEqual(await shim.open({ root: WINDOWS_ROOT, path: TEMPLATE, inEditor: true }), { opened: false, reason: 'orca_shim_refused' })
+  assert.equal(shim.calls.length, 0)
+})
+
+test('the recorded opens are bounded, newest first, per workspace', () => {
+  const opens = new EditorOpens()
+  for (let i = 0; i < EditorOpens.MAX + 5; i++) opens.record({ root: 'C:\\work\\shop', file: `C:\\work\\shop\\f${i}.isml`, at: i })
+  opens.record({ root: 'C:\\work\\other', file: 'C:\\work\\other\\x.isml', at: 99 })
+  const mine = opens.under('c:\\WORK\\shop', 'win32')
+  assert.equal(mine.length, EditorOpens.MAX - 1)
+  assert.equal(mine[0].file, `C:\\work\\shop\\f${EditorOpens.MAX + 4}.isml`)
+  const entry = { root: '/w', file: '/w/a.isml', line: 3, column: 2, at: 1 }
+  opens.record(entry)
+  assert.equal(opens.under('/w', 'linux').length, 1)
+  opens.forget(entry)
+  assert.deepEqual(opens.under('/w', 'linux'), [])
+})

@@ -439,7 +439,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     const path = await frames.resolve(root, frame.file)
     if (path === null) return { opened: false, reason: 'not_in_workspace' }
     // The person pressed the link to see the file: it is brought forward.
-    const result = await openFile({ root, path, line: frame.line ?? undefined, focus: true })
+    // A file of a type the plugin's editor takes opens there, at the frame's line.
+    const result = await openFile({ root, path, line: frame.line ?? undefined, focus: true, inEditor: true })
     return result.opened ? { opened: true } : { opened: false, reason: result.reason }
   }
 

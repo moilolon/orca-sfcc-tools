@@ -748,7 +748,7 @@ test('a frame opens its file when its script is in a cartridge of the workspace'
     assert.ok(job?.frames.every((frame) => !frame.openable))
 
     assert.deepEqual(await worker.request('errors.open', { role: 'sandbox', signature: cart.signature, frame: 0 }), { opened: true })
-    assert.deepEqual(opened, [{ root, path: join(script, 'cartHelper.js'), line: cart.frames[0].line ?? undefined, focus: true }])
+    assert.deepEqual(opened, [{ root, path: join(script, 'cartHelper.js'), line: cart.frames[0].line ?? undefined, focus: true, inEditor: true }])
     assert.deepEqual(await worker.request('errors.open', { role: 'sandbox', signature: cart.signature, frame: 2 }), { opened: false, reason: 'not_in_workspace' })
     assert.deepEqual(await worker.request('errors.open', { role: 'sandbox', signature: cart.signature, frame: 9 }), { opened: false, reason: 'not_found' })
     assert.deepEqual(await worker.request('errors.open', { role: 'sandbox', signature: 'nope', frame: 0 }), { opened: false, reason: 'not_found' })
