@@ -247,15 +247,25 @@ control, ASCII boxes).
   detail in place of the list, with a back button (`collapse`) at its top and the bar still
   above. Orca gives a components panel no second window, dialog or editor tab to put it in. The
   item open is kept in a persisted atom, so a scenario can open it.
-- **Size and paging:** Orca refuses a whole panel past 512 KiB of tree, and every draw after it.
-  So:
-  - a list draws `PAGE_SIZE` (25) rows, and *Show more* adds a page up to `MAX_ROWS` (100);
-    past that, one muted line says how many are not drawn;
-  - a script's lines are a window of `WINDOW_LINES` (200), moved by page, by a line number or by
-    a search, never a table that grows;
-  - a variable's children are cut at `MAX_CHILDREN` (200), with an item saying how many more;
-  - the shell estimates each view's tree (`treeSizeOver`) and, past `VIEW_BUDGET` (256 KiB), shows
-    that view's error state instead, so the bar, the status line and the other views still draw.
+- **Size and paging:** Orca refuses a whole panel past 512 KiB or 5,000 nodes, and every draw
+  after it. It counts each node as 32 bytes plus its props as JSON (escapes included, a handler
+  as `{"$callback":"<id>"}`), and each text as 8 bytes plus its length and as a node. So:
+  - what can grow is capped where it is drawn, never left to the guard:
+    - a list draws `PAGE_SIZE` (25) rows, and *Show more* adds a page up to `MAX_ROWS` (100); past
+      that, one muted line says how many are not drawn. The breakpoints and the left-behind
+      versions are lists too.
+    - an open folder of the list of scripts draws `FOLDER_ENTRIES` (50), then an item that draws
+      50 more, and the whole tree holds at most `TREE_ITEMS` (600), past which it says to search.
+    - a script's lines are a window of `WINDOW_LINES` (200), moved by page, by a line number or by
+      a search, never a table that grows.
+    - a variable's children are cut at `MAX_CHILDREN` (200), with an item saying how many more,
+      and only an open variable sends its children.
+  - the shell measures each view's tree by Orca's rule (`treeCost`) and, past `VIEW_BUDGET` (448
+    KiB or 4,500 nodes), shows that view's error state instead, so the bar, the status line and
+    the other views still draw. A section's optional `reset()` closes what is open in its view,
+    kept or not (open folders, pages drawn, windows, open variables), never its data; the error
+    state's one button is then *Reset view*, which resets and draws again, so a view is never
+    locked by state it keeps across opens.
 - **Cost:** a render reads atoms and draws; it never awaits a request. What is computed from a
   long list (a script's rows, the tree of scripts) is a `derived` atom, computed once per change
   (one per language when it holds words); a worker post or answer that changes nothing sets
