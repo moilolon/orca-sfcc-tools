@@ -20,12 +20,16 @@
 // A code version is deleted only when its workspace's `workspace.removed` event arrives, or when
 // a person deletes a version left behind by hand: a workspace missing from a list is never taken
 // as removed. The active version cannot be deleted, so it waits until another one is active.
+// A version is deleted with the dw.json of its own workspace (the folder it was picked from,
+// kept per workspace), taken when it is queued; when that folder no longer configures the
+// sandbox (a removed worktree), with the one in force when it was queued. Every call of its
+// deletion names that folder, so moving the focus meanwhile changes nothing.
 //
 // Whether each workspace's last full deploy ended is stored, always before the owner: a version
 // whose deploy failed or was cut short by a restart is never reloaded, and after a restart it
 // shows as needing a deploy instead of being watched.
 import type { JsonValue } from 'orca'
-import type { B2c, Running } from '../../core/b2c'
+import type { B2c, ConfigChoice, Running } from '../../core/b2c'
 import type { Logger, Workspace, Workspaces } from '../../core/piece'
 import type { Store } from '../../core/store'
 import { isLocal, type ListedWorkspace } from '../../core/workspaces'
@@ -44,7 +48,12 @@ const RELOAD_TIMEOUT_MS = 5 * 60_000
 const DELETE_TIMEOUT_MS = 2 * 60_000
 
 /** What is kept in the piece's storage. */
-const KEYS = { owner: 'owner', versions: 'versions', pending: 'pending', deploys: 'deploys', projects: 'projects' } as const
+const KEYS = { owner: 'owner', versions: 'versions', pending: 'pending', deploys: 'deploys', projects: 'projects', roots: 'roots', pendingRoots: 'pendingRoots' } as const
+
+/** The option that names a folder to b2c; none (the runner's own choice) for a version queued before folders were kept. */
+function choiceOf(root: string | undefined): ConfigChoice {
+  return root === undefined ? {} : { configRoot: root }
+}
 
 /** The workspace that uploads, as stored: its id, its version and its name when it was picked. */
 export type Owner = { workspaceId: string; codeVersion: string; name: string }
@@ -64,7 +73,7 @@ export type OwnershipDeps = {
   b2c: B2c
   store: Store
   /** Only `setUploading` is used: ownership never asks which workspace is focused. */
-  workspaces: Pick<Workspaces, 'setUploading'>
+  workspaces: Pick<Workspaces, 'setUploading' | 'configRoot'>
   /** The list; `signal` is aborted when the step stops waiting for it. */
   listing(signal?: AbortSignal): Promise<Listing>
   timers: Timers
@@ -144,7 +153,11 @@ export class Ownership {
   /** The project of each workspace with a version, when Orca named one. */
   private projects: Record<string, string> = {}
   private deploys: Record<string, DeployRecord> = {}
+  /** The folder each workspace with a version was picked from: its dw.json names its sandbox. */
+  private roots: Record<string, string> = {}
   private pending: string[] = []
+  /** The folder whose dw.json each queued version is deleted with, taken when it was queued. */
+  private pendingRoots: Record<string, string> = {}
   /** Raised by every pick, release and removal: work started before it is stale. */
   private generation = 0
   /** Raised by every release: a pick, redeploy or restore queued or running before it stops. */
@@ -257,6 +270,8 @@ export class Ownership {
       this.projects = readStrings(await live(store.get<JsonValue>(KEYS.projects, {})))
       const pending = await live(store.get<JsonValue>(KEYS.pending, []))
       this.pending = Array.isArray(pending) ? pending.filter((v): v is string => typeof v === 'string') : []
+      this.roots = readStrings(await live(store.get<JsonValue>(KEYS.roots, {})))
+      this.pendingRoots = readStrings(await live(store.get<JsonValue>(KEYS.pendingRoots, {})))
       this.deploys = readDeploys(await live(store.get<JsonValue>(KEYS.deploys, {})))
       const owner = readOwner(await live(store.get<JsonValue>(KEYS.owner, null)))
       if (owner) {
@@ -308,6 +323,11 @@ export class Ownership {
           name = derived.name
           this.versions = derived.names
           await live(this.deps.store.set(KEYS.versions, { ...this.versions }))
+        }
+        // The folder whose dw.json this version's sandbox comes from, for its deletion later.
+        if (this.roots[workspace.id] !== workspace.path) {
+          this.roots = { ...this.roots, [workspace.id]: workspace.path }
+          await live(this.deps.store.set(KEYS.roots, { ...this.roots }))
         }
         const projectId = workspace.projectId ?? null
         if (projectId && this.projects[workspace.id] !== projectId) {
@@ -438,12 +458,18 @@ export class Ownership {
       await live(this.deps.store.delete(KEYS.owner))
       await live(this.deps.workspaces.setUploading(null))
     }
-    // The version is queued first, so a step stopped halfway never forgets a version undeleted.
+    // The version is queued first, so a step stopped halfway never forgets a version undeleted,
+    // with the folder whose dw.json it is deleted with.
     if (version && !this.pending.includes(version)) {
+      const root = await this.deletionRoot(live, workspaceId)
+      if (typeof root === 'string') {
+        this.pendingRoots = { ...this.pendingRoots, [version]: root }
+        await live(this.deps.store.set(KEYS.pendingRoots, { ...this.pendingRoots }))
+      }
       this.pending = [...this.pending, version]
       await live(this.deps.store.set(KEYS.pending, [...this.pending]))
     }
-    for (const key of ['versions', 'deploys', 'projects'] as const) {
+    for (const key of ['versions', 'deploys', 'projects', 'roots'] as const) {
       const map = this[key] as Record<string, unknown>
       if (!(workspaceId in map)) continue
       const { [workspaceId]: _gone, ...rest } = map
@@ -452,6 +478,29 @@ export class Ownership {
     }
     this.deps.onChange()
     void this.deletePending()
+  }
+
+  /**
+   * The folder a workspace's version is deleted with: the one it was picked from while its
+   * dw.json still configures the sandbox, else the one in force now (a removed worktree's folder
+   * is gone). Taken once, when the version is queued.
+   */
+  private async deletionRoot(live: Live, workspaceId: string): Promise<string | null> {
+    const own = this.roots[workspaceId]
+    if (own !== undefined) {
+      try {
+        const { instances } = await live(this.deps.b2c.instances({ configRoot: own }), HOST_LIMIT)
+        if (instances.sandbox === 'ready') return own
+      } catch (error) {
+        if (codeOf(error) === 'disposed' || codeOf(error) === 'superseded') throw error
+      }
+    }
+    try {
+      return await live(this.deps.workspaces.configRoot(), HOST_LIMIT)
+    } catch (error) {
+      if (codeOf(error) === 'disposed' || codeOf(error) === 'superseded') throw error
+      return null
+    }
   }
 
   /**
@@ -467,29 +516,40 @@ export class Ownership {
 
   private async deleteNow(): Promise<void> {
     if (this.pending.length === 0 || this.disposed) return
-    let listed: Record<string, unknown>[]
-    try {
-      const { json } = await this.bounded(this.deps.b2c.run(['code', 'list'], { role: 'sandbox', timeoutMs: LIST_TIMEOUT_MS }), CODE_LIST_LIMIT)
-      listed = listedVersions(json)
-    } catch (error) {
-      this.deps.onProblem('delete', codeOf(error))
-      return
+    // One list per folder in a pass: versions queued with the same dw.json share it.
+    const lists = new Map<string, Promise<Record<string, unknown>[]>>()
+    const listWith = (root: string | undefined) => {
+      const key = root ?? ''
+      let listed = lists.get(key)
+      if (!listed) {
+        listed = this.listVersions(root)
+        lists.set(key, listed)
+      }
+      return listed
     }
     let failure: string | null = null
     for (const version of [...this.pending]) {
       if (this.disposed) return
+      const root = this.pendingRoots[version]
+      let listed: Record<string, unknown>[]
+      try {
+        listed = await listWith(root)
+      } catch (error) {
+        failure = codeOf(error)
+        continue
+      }
       const entry = isBeingDeleted(version) ? undefined : listed.find((item) => item.id === version)
       if (entry?.active === true) continue
       if (entry) {
         try {
-          await this.bounded(this.deps.b2c.run(['code', 'delete', version, '--force'], { role: 'sandbox', timeoutMs: DELETE_TIMEOUT_MS }), {
+          await this.bounded(this.deps.b2c.run(['code', 'delete', version, '--force'], { role: 'sandbox', timeoutMs: DELETE_TIMEOUT_MS, ...choiceOf(root) }), {
             ms: DELETE_TIMEOUT_MS,
             code: 'b2c_timeout'
           })
           this.deps.log(`deleted the code version ${version}`)
         } catch (error) {
           if (this.disposed) return
-          if (await this.stillListed(version)) {
+          if (await this.stillListed(version, root)) {
             failure = codeOf(error)
             continue
           }
@@ -497,20 +557,29 @@ export class Ownership {
         }
       }
       this.pending = this.pending.filter((item) => item !== version)
+      const { [version]: _done, ...rest } = this.pendingRoots
+      this.pendingRoots = rest
     }
     await this.bounded(this.deps.store.set(KEYS.pending, [...this.pending]), HOST_LIMIT).catch(() => undefined)
+    await this.bounded(this.deps.store.set(KEYS.pendingRoots, { ...this.pendingRoots }), HOST_LIMIT).catch(() => undefined)
     this.deps.onProblem('delete', failure)
     this.deps.onChange()
   }
 
+  /** The versions on the sandbox the dw.json of `root` names. */
+  private async listVersions(root: string | undefined): Promise<Record<string, unknown>[]> {
+    const { json } = await this.bounded(this.deps.b2c.run(['code', 'list'], { role: 'sandbox', timeoutMs: LIST_TIMEOUT_MS, ...choiceOf(root) }), CODE_LIST_LIMIT)
+    return listedVersions(json)
+  }
+
   /**
-   * Whether `version` is still on the sandbox under its own name, after a delete that failed. A
-   * list that cannot be read says it may be: the version stays queued.
+   * Whether `version` is still on the sandbox under its own name, after a delete that failed, with
+   * the same dw.json as the delete. A list that cannot be read says it may be: the version stays
+   * queued.
    */
-  private async stillListed(version: string): Promise<boolean> {
+  private async stillListed(version: string, root: string | undefined): Promise<boolean> {
     try {
-      const { json } = await this.bounded(this.deps.b2c.run(['code', 'list'], { role: 'sandbox', timeoutMs: LIST_TIMEOUT_MS }), CODE_LIST_LIMIT)
-      return listedVersions(json).some((item) => item.id === version)
+      return (await this.listVersions(root)).some((item) => item.id === version)
     } catch {
       return true
     }

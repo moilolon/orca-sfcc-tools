@@ -5,7 +5,7 @@
 import { assert, test } from 'orca/testing'
 import { HOST_TIMEOUT_MS, LIST_TIMEOUT_MS, Ownership, type Notice } from './ownership'
 import type { SandboxAction } from './protocol'
-import { coded, FakeB2c, FakeTimers, FIX, fakeWorkspaces, memoryStorage, pieceStore, REMOTE, settle, SHOP, type Listed } from './testing'
+import { coded, FakeB2c, FakeTimers, FIX, fakeWorkspaces, memoryStorage, pieceStore, REMOTE, SANDBOX_HOST, settle, SHOP, type Listed } from './testing'
 
 function setup(options: { listed?: Listed[]; storage?: ReturnType<typeof memoryStorage>; b2c?: FakeB2c } = {}) {
   const b2c = options.b2c ?? new FakeB2c()
@@ -372,6 +372,63 @@ test('a delete that times out while Salesforce goes on deleting counts as done; 
   await settle()
   assert.equal(ownership.pendingCount(), 0, 'retried')
   assert.ok(!b2c.codeVersions.some((v) => v.id === 'ws-checkout-fix-2' || v.id === 'ws-checkout-fix'))
+})
+
+test('a version is deleted with its own workspace’s dw.json, taken when it is queued, whatever the focus does next', async () => {
+  const { b2c, ownership, host } = setup()
+  b2c.files = { configRoot: () => host.workspaces.configRoot(), hosts: { [SHOP.path]: SANDBOX_HOST, [FIX.path]: SANDBOX_HOST } }
+  host.state.focused = SHOP.id
+  await ownership.pick(FIX.id)
+  await settle()
+  await ownership.pick(SHOP.id)
+  await settle()
+
+  // The delete times out and the version is still there: the list, the delete and the check all
+  // name the fix's folder, though Shop uploads.
+  b2c.fail.set('code delete', 'b2c_timeout')
+  const before = b2c.runs.length
+  await ownership.removed(FIX.id)
+  await settle()
+  assert.equal(ownership.pendingCount(), 1)
+  const deletion = b2c.runs.slice(before)
+  assert.deepEqual(deletion.map((run) => run.args.join(' ')), ['code list', 'code delete ws-checkout-fix --force', 'code list'])
+  assert.ok(deletion.every((run) => run.root === FIX.path), 'every call used the fix’s dw.json')
+
+  // Nothing uploads now and the focus is on a workspace whose folder has no dw.json: the retry
+  // still uses the fix's.
+  await ownership.release()
+  host.state.focused = REMOTE.id
+  b2c.fail.clear()
+  const retry = b2c.runs.length
+  await ownership.deletePending()
+  assert.equal(ownership.pendingCount(), 0)
+  assert.ok(b2c.runs.slice(retry).every((run) => run.root === FIX.path))
+  assert.ok(!b2c.codeVersions.some((v) => v.id === 'ws-checkout-fix'))
+})
+
+test('a removed worktree whose folder no longer configures the sandbox is deleted with the dw.json in force when it was queued', async () => {
+  const { b2c, ownership, host } = setup()
+  const files = { [SHOP.path]: SANDBOX_HOST, [FIX.path]: SANDBOX_HOST }
+  b2c.files = { configRoot: () => host.workspaces.configRoot(), hosts: files }
+  await ownership.pick(FIX.id)
+  await settle()
+  await ownership.pick(SHOP.id)
+  await settle()
+  // The worktree's folder is gone with its dw.json.
+  delete files[FIX.path]
+  b2c.fail.set('code delete', 'b2c_timeout')
+  await ownership.removed(FIX.id)
+  await settle()
+  assert.equal(ownership.pendingCount(), 1)
+  assert.equal(b2c.runs.at(-1)?.root, SHOP.path, 'Shop uploaded when it was queued')
+
+  await ownership.release()
+  host.state.focused = REMOTE.id
+  b2c.fail.clear()
+  const retry = b2c.runs.length
+  await ownership.deletePending()
+  assert.equal(ownership.pendingCount(), 0)
+  assert.ok(b2c.runs.slice(retry).length > 0 && b2c.runs.slice(retry).every((run) => run.root === SHOP.path))
 })
 
 test('a version left by a workspace removed unheard is deleted only by hand, and only from a whole list', async () => {
