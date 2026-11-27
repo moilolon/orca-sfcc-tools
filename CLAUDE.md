@@ -370,12 +370,14 @@ Changing it needs the owner's yes.
       never what or where, a file at most once per `NOTICE_INTERVAL_MS`, nothing before the first
       pass. The fixtures are `fixtures/problems/`, laid over `fixtures/checkout/`
       (`problems/testing.ts`).
-    - `src/pieces/editor/` (phase 7.1, the surface): the plugin's editor, `customEditors` of its
+    - `src/pieces/editor/` (phase 7.1, the surface; 7.2, the language features): the plugin's
+      editor, `customEditors` of its
       manifest, `frame: "isolated"`: the default for `.isml`, an option of the view toggle for
       `.js`, `.xml` and `.properties` (Orca keeps `.js` for its own editor whatever the manifest
       says). Each editor has its entry, `main.ts` (`.isml`) and `main-view.ts` (the others), both
       starting `app.ts`: the frame imports only relative files (a test walks them: the piece's
-      frame modules, `core/i18n.ts` and the engine's `js/` and `isml/`, never Node or worker code).
+      frame modules, `core/i18n.ts`, the engine's `js/` and `isml/` and its texts (`i18n.ts`),
+      never Node or worker code).
       `surface/` is the editing surface written here (spike S9): `buffer.ts` (lines with the break
       written after each, so CRLF, LF and mixed breaks come back as read), `history.ts` (its own
       undo: Orca keeps none for a plugin's editor), `model.ts` (selection and every command, no
@@ -384,8 +386,10 @@ Changing it needs the owner's yes.
       during an IME composition is held and merged with what the composition commits),
       `view.ts` (a hidden textarea at the caret takes keys, IME and the clipboard; only the lines
       in view and `OVERSCAN` around them are in the DOM; a gutter with numbers and a mark column
-      for 7.3; for 7.2 a layer of underlines drawn from ranges, a pop-up layer, `caretBox()` and
-      `onCaretMove`, without their features). `highlight/` colours line by line with a state
+      for 7.3; for 7.2 a layer of underlines drawn from ranges, a pop-up layer, `boxAt()` (a
+      place on screen), `hitTest()` (the place under the pointer, null off the text) and
+      `onCaretMove`; the features take keys and clicks before it, in the capture phase on its
+      root). `highlight/` colours line by line with a state
       carried from line to line, cached per line and re-lexed only from a change until the state
       agrees again, never past what is drawn: JavaScript through the engine's own `Lexer`, ISML
       (tags, values, `${…}` also inside values and among attributes, comments, `<isscript>` and
@@ -412,6 +416,35 @@ Changing it needs the owner's yes.
       text on Windows, so Orca never matches it on a Spanish layout) opens the file last saved in
       the focused workspace in the editor: no host call gives the focused tab's path. The errors'
       and the debugger's jumps open their file with `inEditor`. The piece has no panel view.
+      **The language features** (`features/`, phase 7.2) ask the engine through the worker
+      (`requests.ts`: `engine.complete`, `.hover`, `.definition`, `.references`, `.signature`,
+      `.problems`, and the editor's own `editor.open`) and draw the answers. `features.ts` routes
+      what the surface hears to one controller per feature (`completion.ts`, `hover.ts`,
+      `problems.ts`, `navigation.ts` for definition and references, `signature.ts`), all with no
+      DOM and tested in Node against a fake engine and the real one over the engine's fixtures;
+      `dom.ts` turns the frame's events into their calls and draws what they decide (`ui.ts`) in
+      the surface's pop-up and underline layers, every text with `textContent`; `words.ts` words
+      the engine's data from the engine's `i18n.ts` and the editor's. `document.ts`: the text is
+      sent without its BOM (as the engine reads files, so a query's and a problem's offsets are
+      both the buffer's), joined once per change for every feature, and every answer is drawn
+      only while it is the newest of its feature and the text and offset are the ones it was asked
+      on (`Latest`); typing never waits for one. A file 7.1 could not name is asked under no
+      workspace (`NO_WORKSPACE`) and a stand-in name (`STAND_IN`, none for XML or `.properties`):
+      only what needs no other file answers, nothing is opened, and no problems are asked. Keys,
+      read in the frame (no manifest keybinding): `Ctrl+Space` completion (it also opens by itself
+      after `.`, `<`, an ISML tag's name, a quote opening an argument or a value, `${`),
+      `Ctrl+Shift+Space` signature help (and after `(` and `,`), `Mod+I` the hover at the caret
+      (the pointer's after `HOVER_DELAY_MS`), `F12` and `Mod+click` go to definition,
+      `Shift+F12` references; none is one of Orca's shortcuts. A list takes arrows, Page keys,
+      Enter (and Tab for completion) and Escape; every other key goes to the surface. One place
+      in this file moves the caret; another file opens in this editor at its line through
+      `editor.open` (src/core/open-file.ts, `inEditor`, a path inside a local workspace only);
+      several are a list labelled with their storefronts. Problems are asked `PROBLEMS_DELAY_MS`
+      after typing pauses, only for a named file, and between answers the squiggles move with the
+      text. A `dw.*` description the worker did not read in time is said as being read and asked
+      once more. The index not ready, another workspace indexed, or a file too large is said once
+      per state in a hint at the caret. `latency.test.ts` prints the time from the key to the
+      drawn answer on 3,000-line files, with canned answers and with the real engine.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

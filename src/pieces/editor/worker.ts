@@ -1,6 +1,7 @@
 // The editor piece's worker half, listed in src/worker/pieces.ts. It names the file an editor
 // frame shows (`editor.locate`, locate.ts), keeps the person's choice among identical files
-// (`editor.choose`), hears every explicit save from an editor tab (`editor.save.before`, observed
+// (`editor.choose`), opens another file of the workspace in the editor at a line for go to
+// definition and references (`editor.open`, through src/core/open-file.ts), hears every explicit save from an editor tab (`editor.save.before`, observed
 // only: it never changes or refuses a save) and runs the command that opens a file in the
 // plugin's editor.
 //
@@ -13,7 +14,7 @@ import type { Disposable, PieceContext, WorkerPiece, Workspace } from '../../cor
 import { isLocal } from '../../core/workspaces'
 import { messages } from './i18n'
 import { hashText, Locator } from './locate'
-import type { EditorLocated, EditorText } from './protocol'
+import type { EditorLocated, EditorOpenResult, EditorText } from './protocol'
 
 /** The command that opens the last saved file in the plugin's editor. */
 export const OPEN_COMMAND = 'editor.openInEditor'
@@ -97,6 +98,20 @@ export function createEditorPiece(deps: EditorDeps = {}): WorkerPiece {
 
       const word = (key: keyof (typeof messages)['en'], vars?: Record<string, string>) => ctx.t(messages, key, vars)
 
+      /** A file of the frame's workspace opened in this editor at a line: go to definition, a reference. */
+      async function openAt(input: { workspaceId?: unknown; path?: unknown; line?: unknown; column?: unknown } | null | undefined): Promise<EditorOpenResult> {
+        const raw = input ?? {}
+        // A path relative to the workspace, as the engine names it; open-file.ts refuses one outside it.
+        if (typeof raw.path !== 'string' || !raw.path || /^([A-Za-z]:|[\\/])/.test(raw.path)) return { opened: false, reason: 'invalid_path' }
+        const workspace = await workspaceById(raw.workspaceId)
+        if (!workspace) return { opened: false, reason: 'no_workspace' }
+        const line = typeof raw.line === 'number' && Number.isInteger(raw.line) && raw.line > 0 ? raw.line : undefined
+        const column = line && typeof raw.column === 'number' && Number.isInteger(raw.column) && raw.column > 0 ? raw.column : undefined
+        // The person asked to go there: the file is brought forward, in this editor.
+        const result = await open({ root: workspace.path, path: raw.path, line, column, inEditor: true, focus: true })
+        return result.opened ? { opened: true } : { opened: false, reason: result.reason }
+      }
+
       async function openLastSaved(): Promise<string> {
         const workspace = await ctx.workspaces.focused()
         if (!workspace || !isLocal(workspace)) return word('cmdNoWorkspace')
@@ -120,6 +135,7 @@ export function createEditorPiece(deps: EditorDeps = {}): WorkerPiece {
       const orca: OrcaWorkerApi = ctx.orca
       const handles = [
         orca.panels.handle('editor.locate', (input) => locate(input ?? { workspaceId: null })),
+        orca.panels.handle('editor.open', (input) => openAt(input)),
         orca.panels.handle('editor.choose', async (input) => {
           const hash = hashOf(input)
           if (typeof input?.path !== 'string' || !input.path) throw invalid()

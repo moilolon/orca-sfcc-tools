@@ -3,9 +3,10 @@
 // only the lines in view and `OVERSCAN` around them are in the DOM, each line's element kept while
 // its tokens stay the same. No contenteditable: the browser never edits the DOM, so the text, the
 // history and the colours stay the model's. A gutter holds the line numbers and a column for
-// marks (the breakpoints of 7.3). The hooks of 7.2 are here without their features: a layer of
-// underlines drawn from ranges, a layer for pop-ups, the caret's place on screen, and a callback
-// when the caret moves.
+// marks (the breakpoints of 7.3). The hooks the language features (7.2, ../features/) draw with: a
+// layer of underlines drawn from ranges, a layer for pop-ups, a place's box on screen, the place
+// under the pointer, and a callback when the caret moves. The features take keys and clicks before
+// the surface does, in the capture phase on `root`, so the surface knows nothing of them.
 import { comparePos, type Pos } from './buffer'
 import { Highlighter } from '../highlight/highlighter'
 import { CLASSES, type LineLexer } from '../highlight/tokens'
@@ -152,10 +153,24 @@ export class SurfaceView implements Geometry {
 
   /** The caret's box in the editor's own coordinates (for a pop-up). */
   caretBox(): { x: number; y: number; height: number } {
-    const head = this.model.selection.head
+    return this.boxAt(this.model.selection.head)
+  }
+
+  /** A place's box in the editor's own coordinates (a pop-up over a name, a list under it). */
+  boxAt(at: Pos): { x: number; y: number; height: number } {
     const text = this.textLayer.getBoundingClientRect()
     const root = this.root.getBoundingClientRect()
-    return { x: text.left - root.left + this.x(head.line, head.col), y: text.top - root.top + head.line * this.lineHeight, height: this.lineHeight }
+    return { x: text.left - root.left + this.x(at.line, at.col), y: text.top - root.top + at.line * this.lineHeight, height: this.lineHeight }
+  }
+
+  /** The place under a point of the window; null off the text (the gutter, past a line's end, below the last line). */
+  hitTest(clientX: number, clientY: number): Pos | null {
+    const box = this.textLayer.getBoundingClientRect()
+    const x = clientX - box.left
+    const line = Math.floor((clientY - box.top) / this.lineHeight)
+    if (x < 0 || line < 0 || line >= this.model.buffer.lineCount) return null
+    if (x > this.x(line, this.model.buffer.line(line).length)) return null
+    return { line, col: this.colAt(line, x) }
   }
 
   // ---- language, typography, theme ----
