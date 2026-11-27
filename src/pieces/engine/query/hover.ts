@@ -10,12 +10,12 @@ import type { Range } from '../js/ast'
 import { isSuperModule } from '../js/facts'
 import type { ModuleResolution, RouteProblemCode, SuperModuleCopy, TemplateCopy } from '../checkout/checkout'
 import { SITE_PREFERENCES, type ObjectTypeKind } from '../checkout/metadata'
-import { DEFINING_METHODS, type ExportedMember, type RouteMethod } from '../checkout/scan'
+import { DEFINING_METHODS, type ExportedMember, type RouteMethod, type RouteOperation } from '../checkout/scan'
 import { signature, type DwMemberKind } from '../dw/index'
 import { pathAt, rootAt, type Analysis, type Root } from './analysis'
 import { callRole, customTags, elementAt, stringArgumentAt } from './complete'
 import { ISML_TAG_ATTRIBUTES, TEMPLATE_ATTRIBUTE_TAGS } from './isml-tags'
-import { moduleMember, SUPER_MODULE, type QueryContext } from './modules'
+import { moduleMember, storefrontsOf, SUPER_MODULE, type QueryContext } from './modules'
 import { cartridgeRoutes } from './routes'
 import { guessedClass, isListedConstant, isStaticMember, memberName, membersFor, metadataTypeOf, subPackages, Types } from './types'
 
@@ -46,7 +46,7 @@ export type HoverContent =
   | { kind: 'tag'; name: string; custom: boolean; attributes: string[]; template: string | null; copies: TemplateCopy[] }
 
 export type MemberDefinitionEntry = {
-  /** The storefronts the definition runs on; null when the module is a file named directly. */
+  /** The storefronts the definition runs on; null when no storefront can be named (see `ModuleCopy`). */
   storefronts: string[] | null
   path: string
   line: number
@@ -55,7 +55,8 @@ export type MemberDefinitionEntry = {
   doc: string | null
 }
 
-export type RouteStepEntry = { method: RouteMethod; name: string; path: string; cartridge: string; line: number }
+/** A step of a route; `handler`, for an `exports.Name` route, is where the function that handles it is declared. */
+export type RouteStepEntry = { method: RouteMethod; name: string; path: string; cartridge: string; line: number; handler: { start: number; end: number; line: number } | null }
 
 export type RouteEntry = {
   storefront: string
@@ -246,7 +247,10 @@ function moduleHover(ctx: QueryContext, from: string, module: string): HoverCont
     return ctx.dw.packageClasses(id).length > 0 ? packageHover(ctx, id) : null
   }
   if (resolved.kind === 'file') return { kind: 'module', module, form: resolved.form, copies: [{ storefront: null, path: resolved.path }], candidates: [] }
-  return { kind: 'module', module, form: resolved.form, copies: cap(resolved.copies), candidates: cap(resolved.candidates) }
+  // Only the storefronts that load the reading file run its require (all of them for a file on no path).
+  const on = storefrontsOf(ctx, from)
+  const copies = on ? resolved.copies.filter((copy) => on.has(copy.storefront)) : resolved.copies
+  return { kind: 'module', module, form: resolved.form, copies: cap(copies), candidates: cap(resolved.candidates) }
 }
 
 function moduleMemberHover(ctx: QueryContext, from: string, module: string, name: string): HoverContent | null {
@@ -285,7 +289,7 @@ function attributeHover(ctx: QueryContext, typeId: string, id: string, guessed: 
 function routeHover(ctx: QueryContext, id: string): HoverContent | null {
   const resolved = ctx.index.route(id)
   if (!resolved) return null
-  const step = (each: { method: RouteMethod; name: string; path: string; cartridge: string; line: number }): RouteStepEntry => ({ method: each.method, name: each.name, path: each.path, cartridge: each.cartridge, line: each.line })
+  const step = (each: RouteOperation & { path: string; cartridge: string }): RouteStepEntry => ({ method: each.method, name: each.name, path: each.path, cartridge: each.cartridge, line: each.line, handler: each.handler ?? null })
   if (resolved.storefronts.length === 0) {
     // No storefront path: what each cartridge's controller declares, the chain unknown.
     const declared = cartridgeRoutes(ctx).get(`${resolved.controller}-${resolved.name}`) ?? []

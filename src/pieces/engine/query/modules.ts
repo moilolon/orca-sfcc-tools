@@ -2,7 +2,7 @@
 // and the members each copy exports, its `module.superModule` and the modules it re-exports
 // followed. Pure: no Node, no Orca.
 import type { CheckoutIndex } from '../checkout/checkout'
-import type { ExportedMember, ModuleExports } from '../checkout/scan'
+import { SUPER_MODULE, type ExportedMember, type ModuleExports } from '../checkout/scan'
 import type { DwIndex } from '../dw/index'
 
 /** What every query is given besides the file: the checkout index and the `dw.*` index. */
@@ -11,16 +11,36 @@ export type QueryContext = { index: CheckoutIndex; dw: DwIndex | null }
 /** How many copies along `module.superModule` and re-exports are followed. */
 export const MAX_MODULE_DEPTH = 8
 
-/** A file a module reaches: on one storefront, or on every one (`storefront: null`, a file named directly). */
+/**
+ * A file a module reaches, and the storefront it is reached on. `null` means no storefront can be
+ * named, for one of two reasons: the place does not depend on one (a file named directly: `~/`,
+ * relative, a cartridge or `modules` name), or the reading file is loaded from no storefront path
+ * (its cartridge is on none, or the checkout gives no path), so it runs wherever code loads it by
+ * name. Never "every storefront".
+ */
 export type ModuleCopy = { storefront: string | null; path: string }
 
 /** The module name `module.superModule` is given: the next copy of the file itself, per storefront. */
-export const SUPER_MODULE = 'module.superModule'
+export { SUPER_MODULE }
 
 /**
- * The files `require(module)` from `from` reaches. A `*\/…` module gives the copy of each
- * storefront that has one; with no storefront paths at all, every cartridge's copy, unlabelled.
- * `SUPER_MODULE` gives the copy `module.superModule` reaches on each storefront.
+ * The storefronts that load a file: those whose path holds its cartridge. Null when its cartridge
+ * is on no path (or it is in none, or `modules`): then which storefront runs it is not known.
+ */
+export function storefrontsOf(ctx: QueryContext, from: string): ReadonlySet<string> | null {
+  const cartridge = ctx.index.cartridgeOf(from)
+  if (!cartridge || cartridge.kind !== 'cartridge') return null
+  const on = ctx.index.storefronts().filter((storefront) => storefront.cartridges.includes(cartridge.name))
+  return on.length > 0 ? new Set(on.map((storefront) => storefront.id)) : null
+}
+
+/**
+ * The files `require(module)` from `from` reaches. A `*\/…` module gives, for each storefront
+ * whose path holds the file's own cartridge, the copy that path loads: a storefront that never
+ * loads the file never runs its `require`. For a file whose cartridge is on no path, the copies
+ * the paths reach, unlabelled: it may be loaded by name from any of them, so each copy may run
+ * but no storefront can be named. With no storefront path at all, every cartridge's copy,
+ * unlabelled. `SUPER_MODULE` gives the copy `module.superModule` reaches on each storefront.
  */
 export function moduleCopies(ctx: QueryContext, from: string, module: string): ModuleCopy[] {
   if (module === SUPER_MODULE) return ctx.index.superModule(from).copies.flatMap((copy) => (copy.path ? [{ storefront: copy.storefront, path: copy.path }] : []))
@@ -28,7 +48,10 @@ export function moduleCopies(ctx: QueryContext, from: string, module: string): M
   if (resolved.kind === 'file') return resolved.path ? [{ storefront: null, path: resolved.path }] : []
   if (resolved.kind === 'dw') return []
   if (resolved.copies.length === 0) return resolved.candidates.map((path) => ({ storefront: null, path }))
-  return resolved.copies.flatMap((copy) => (copy.path ? [{ storefront: copy.storefront, path: copy.path }] : []))
+  const on = storefrontsOf(ctx, from)
+  if (on) return resolved.copies.flatMap((copy) => (copy.path && on.has(copy.storefront) ? [{ storefront: copy.storefront, path: copy.path }] : []))
+  const paths = [...new Set(resolved.copies.flatMap((copy) => (copy.path ? [copy.path] : [])))]
+  return paths.map((path) => ({ storefront: null, path }))
 }
 
 /** What a script exports, from the index; null for a file it does not hold as a script. */
@@ -49,7 +72,25 @@ export function fileMembers(ctx: QueryContext, path: string, storefront: string 
   const exports = exportsOf(ctx, path)
   if (!exports || depth > MAX_MODULE_DEPTH || seen.has(path)) return []
   seen.add(path)
-  const out: MemberDefinition[] = exports.members.map((member) => ({ storefront, path, member }))
+  // A member that re-exports another module's (`tax: base.tax`) is that member, where it is defined.
+  // Followed only when every copy the file may load agrees on one definition: read without a
+  // storefront, a `*/` alias may reach a different copy on each, and naming one would be a guess.
+  // When they disagree, or one lacks the member, the answer is the export line itself.
+  const own = (member: ExportedMember): MemberDefinition => {
+    const written = { storefront, path, member }
+    if (!member.alias) return written
+    const alias = member.alias
+    let agreed: MemberDefinition | null = null
+    for (const copy of moduleCopies(ctx, path, alias.module)) {
+      if (storefront !== null && copy.storefront !== null && copy.storefront !== storefront) continue
+      const target = fileMembers(ctx, copy.path, storefront ?? copy.storefront, depth + 1, new Set(seen)).find((each) => each.member.name === alias.member)
+      if (!target) return written
+      if (agreed && (agreed.path !== target.path || agreed.member.start !== target.member.start)) return written
+      agreed ??= target
+    }
+    return agreed ? { ...agreed, storefront, member: { ...agreed.member, name: member.name } } : written
+  }
+  const out: MemberDefinition[] = exports.members.map(own)
   const names = new Set(out.map((each) => each.member.name))
   const add = (more: MemberDefinition[]) => {
     for (const each of more) {
@@ -88,7 +129,7 @@ export function moduleMembers(ctx: QueryContext, from: string, module: string): 
   return out
 }
 
-/** A definition of a member, with the storefronts it runs on; `null` when the module is a file named directly. */
+/** A definition of a member, with the storefronts it runs on; `null` when no storefront can be named (see `ModuleCopy`). */
 export type MemberPlace = { storefronts: string[] | null; path: string; member: ExportedMember }
 
 /** Where one member of `require(module)` is defined, one entry per definition: empty when no copy exports it. */

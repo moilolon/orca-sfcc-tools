@@ -14,7 +14,7 @@ import type { CheckoutFiles } from './checkout/files'
 import { MemoryFiles } from './checkout/memory'
 import { fixtureFiles, FakeRef } from './checkout/testing'
 import { createDescriber, type Describer } from './dw/describe'
-import type { EngineCompletion, EngineHover, EngineIndexStatus } from './protocol'
+import type { EngineCompletion, EngineDefinition, EngineHover, EngineIndexStatus, EngineReferences, EngineSignature } from './protocol'
 import { MAX_COMPLETION_ITEMS } from './query/complete'
 import { committedDw } from './query/testing'
 import { createEnginePiece, DEBOUNCE_MS, DESCRIBE_WAIT_MS, loadDw, MAX_WAIT_MS, REF_CHECK_MS, START_DELAY_MS, type EngineDeps } from './worker'
@@ -377,4 +377,29 @@ test('a query is bounded and checked: at most 200 items; a path that leaves the 
   // A file the engine does not read: nothing, and no error.
   const other = await complete({ workspaceId: 'w-shop', path: 'README.md', text: 'a.b', offset: 2 })
   assert.deepEqual([other.error, other.completion.items], [null, []])
+})
+
+test('engine.definition, engine.references and engine.signature answer on the editor’s text, checked like the others', async () => {
+  const { worker, ready } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw() })
+  await ready()
+  const text = "var priceHelper = require('*/cartridge/scripts/helpers/priceHelper');\npriceHelper.price(product);"
+  const query = { workspaceId: 'w-shop', path: SCRIPT, text, offset: text.indexOf('price(') + 2 }
+  const found = (await worker.request('engine.definition', query)) as EngineDefinition
+  assert.deepEqual([found.index, found.error, found.definition?.kind], ['ready', null, 'member'])
+  assert.deepEqual(found.definition?.range, { start: text.indexOf('price('), end: text.indexOf('price(') + 5 })
+  assert.deepEqual(found.definition?.targets.map((each) => [each.path, each.line, each.storefronts]), [['cartridges/app_garden_core/cartridge/scripts/helpers/priceHelper.js', 11, ['GardenOutlet', 'GardenShop']]])
+  const used = (await worker.request('engine.references', query)) as EngineReferences
+  assert.deepEqual(used.references?.references.filter((each) => each.kind === 'use').map((each) => each.path), [SCRIPT, 'cartridges/app_garden_base/cartridge/controllers/Product.js'])
+  const help = (await worker.request('engine.signature', { ...query, offset: text.indexOf('product);') })) as EngineSignature
+  assert.deepEqual([help.signature?.signatures.map((each) => each.label), help.signature?.activeParameter], [['price(product)'], 0])
+  // Another workspace: an empty index, nothing of the checkout.
+  const other = (await worker.request('engine.definition', { ...query, workspaceId: 'w-fix' })) as EngineDefinition
+  assert.deepEqual([other.index, other.definition], ['none', null])
+  // Checked like the others.
+  for (const name of ['engine.definition', 'engine.references', 'engine.signature'] as const) {
+    const bad = (await worker.request(name, { ...query, path: '../outside.js' } as never)) as { error: string | null }
+    assert.equal(bad.error, 'file_invalid', name)
+    const far = (await worker.request(name, { ...query, offset: text.length + 1 } as never)) as { error: string | null }
+    assert.equal(far.error, 'offset_invalid', name)
+  }
 })

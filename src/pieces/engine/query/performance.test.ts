@@ -1,14 +1,18 @@
-// The time of a completion and a hover on a 5,000-line script and a 5,000-line template of the
-// invented checkout, once its index is built: the first query on a text (which reads it) and the
-// next ones (which reuse what was read, as the worker does). The numbers are in the log.
+// The time of each query (completion, hover, definition, references, signature help) on a
+// 5,000-line script and a 5,000-line template of the invented checkout, once its index is built:
+// the first query on a text (which reads it) and the next ones (which reuse what was read, as the
+// worker does). The numbers are in the log.
 import { assert, test } from 'orca/testing'
 import { CheckoutIndex } from '../checkout/checkout'
 import { fixtureFiles } from '../checkout/testing'
 import { largeScript } from '../fixtures/generate'
 import { analyse, type Analysis } from './analysis'
 import { complete } from './complete'
+import { definition } from './definition'
 import { hover } from './hover'
 import type { QueryContext } from './modules'
+import { references } from './references'
+import { signatureHelp } from './signature'
 import { BASE, committedDw, dwLookup } from './testing'
 
 /**
@@ -19,6 +23,8 @@ import { BASE, committedDw, dwLookup } from './testing'
 const BUSY_BOUND_MS = 150
 /** What reusing a text read costs: far under the bound even when busy. */
 const NEXT_BOUND_MS = 50
+
+type Kind = 'complete' | 'hover' | 'definition' | 'references' | 'signature'
 
 /** An invented template of at least `lines` lines: includes, conditions, loops, keys and custom tags. */
 function largeTemplate(lines: number): string {
@@ -55,7 +61,7 @@ function measure(run: () => unknown): number {
   return performance.now() - started
 }
 
-test('timings: a completion and a hover on a 5,000-line script and template, once the index is built, the best of several rounds', async () => {
+test('timings: every query on a 5,000-line script and template, once the index is built, the best of several rounds', async () => {
   const script = largeScript(5000)
   const template = largeTemplate(5000)
   const scriptPath = `${BASE}/cartridge/scripts/helpers/large.js`
@@ -70,7 +76,7 @@ test('timings: a completion and a hover on a 5,000-line script and template, onc
 
   // Places in the middle of each file.
   const middle = (text: string, snippet: string, shift: number) => text.indexOf(snippet, Math.floor(text.length / 2)) + shift
-  const queries: { name: string; path: string; text: string; offset: number; kind: 'complete' | 'hover'; expect: (answer: unknown) => boolean }[] = [
+  const queries: { name: string; path: string; text: string; offset: number; kind: Kind; expect: (answer: unknown) => boolean }[] = [
     { name: 'members of ProductMgr', path: scriptPath, text: script, offset: middle(script, 'ProductMgr.getProduct', 'ProductMgr.'.length), kind: 'complete', expect: (a) => (a as ReturnType<typeof complete>).items.some((item) => item.label === 'getProduct') },
     { name: 'custom attributes of a product', path: scriptPath, text: script, offset: middle(script, 'product.custom.excluded', 'product.custom.'.length), kind: 'complete', expect: (a) => (a as ReturnType<typeof complete>).context === 'custom' },
     { name: 'members of a JSDoc parameter', path: scriptPath, text: script, offset: middle(script, 'basket.productLineItems', 'basket.'.length), kind: 'complete', expect: (a) => (a as ReturnType<typeof complete>).items.some((item) => item.label === 'productLineItems') },
@@ -79,8 +85,19 @@ test('timings: a completion and a hover on a 5,000-line script and template, onc
     { name: 'template keys', path: templatePath, text: template, offset: middle(template, "'label.price'", 1), kind: 'complete', expect: (a) => (a as ReturnType<typeof complete>).context === 'resource-key' },
     { name: 'tag attributes', path: templatePath, text: template, offset: middle(template, 'var="row"', 0), kind: 'complete', expect: (a) => (a as ReturnType<typeof complete>).context === 'tag-attribute' },
     { name: 'hover of a template', path: templatePath, text: template, offset: middle(template, 'product/components/price', 3), kind: 'hover', expect: (a) => (a as ReturnType<typeof hover>)?.kind === 'template' },
-    { name: 'hover of a route', path: templatePath, text: template, offset: middle(template, 'Product-Show', 3), kind: 'hover', expect: (a) => (a as ReturnType<typeof hover>)?.kind === 'route' }
+    { name: 'hover of a route', path: templatePath, text: template, offset: middle(template, 'Product-Show', 3), kind: 'hover', expect: (a) => (a as ReturnType<typeof hover>)?.kind === 'route' },
+    { name: 'definition of a module member', path: scriptPath, text: `${script}\ncollections.map([], String);\n`, offset: script.length + 'collections.m'.length + 1, kind: 'definition', expect: (a) => (a as ReturnType<typeof definition>)?.kind === 'member' },
+    { name: 'definition of a template', path: templatePath, text: template, offset: middle(template, 'product/components/price', 3), kind: 'definition', expect: (a) => (a as ReturnType<typeof definition>)?.kind === 'template' },
+    { name: 'references of an export', path: scriptPath, text: script, offset: middle(script, 'module.exports.total', 'module.exports.to'.length), kind: 'references', expect: (a) => (a as ReturnType<typeof references>) !== null },
+    { name: 'signature of getProduct', path: scriptPath, text: script, offset: middle(script, 'getProduct(item', 'getProduct('.length), kind: 'signature', expect: (a) => (a as ReturnType<typeof signatureHelp>)?.signatures.length === 1 }
   ]
+  const run = (kind: Kind, analysis: Analysis, offset: number): unknown => {
+    if (kind === 'complete') return complete(ctx, analysis, offset)
+    if (kind === 'hover') return hover(ctx, analysis, offset)
+    if (kind === 'definition') return definition(ctx, analysis, offset)
+    if (kind === 'references') return references(ctx, analysis, offset)
+    return signatureHelp(ctx, analysis, offset)
+  }
   const lines: string[] = []
   for (const query of queries) {
     const first: number[] = []
@@ -91,10 +108,10 @@ test('timings: a completion and a hover on a 5,000-line script and template, onc
       // The first query on a text reads it; the worker keeps what it read for the next ones.
       first.push(measure(() => {
         analysis = analyse(query.path, query.text)
-        answer = query.kind === 'complete' ? complete(ctx, analysis, query.offset) : hover(ctx, analysis, query.offset)
+        answer = run(query.kind, analysis, query.offset)
       }))
       assert.ok(query.expect(answer), query.name)
-      next.push(measure(() => (query.kind === 'complete' ? complete(ctx, analysis as unknown as Analysis, query.offset) : hover(ctx, analysis as unknown as Analysis, query.offset))))
+      next.push(measure(() => run(query.kind, analysis as unknown as Analysis, query.offset)))
     }
     lines.push(`${query.name}: first ${median(first).toFixed(1)} ms (best ${Math.min(...first).toFixed(1)}, worst ${Math.max(...first).toFixed(1)}), then ${median(next).toFixed(2)} ms`)
     assert.ok(Math.min(...first) < BUSY_BOUND_MS, `${query.name}: the first query took at best ${Math.min(...first)} ms`)

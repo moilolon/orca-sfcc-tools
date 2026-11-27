@@ -227,9 +227,14 @@ Changing it needs the owner's yes.
       `x_fr` or `x_fr_FR` is a locale of `x`, `x_tile` is a bundle of its own. A route chain
       applies the deepest base first (`extend(module.superModule)` or a required controller): a
       `get`/`post`/`use` declares, `prepend` runs before and `append` after in the order applied,
-      `replace` drops the chain. What SFRA refuses when the controller loads is a problem and not
-      applied: `route_redefined` (a declaration of a name that exists) and `route_missing` (an
-      `append`, `prepend` or `replace` of one that does not); `base_missing` and `not_exported`
+      `replace` drops the chain. A controller with no `require('server')` (written before SFRA)
+      declares a route by exporting it (`exports.Show = guard.ensure([…], show)`, a function, a
+      name of one, `module.exports = { Show: … }`): method `export`, its `handler` the function. A
+      call is a route only when it wraps a function (`guard.ensure([…], show)`), never a value
+      (`exports.Total = compute()`); a plain exported function is one whether or not it sets
+      `.public`. What SFRA refuses when the controller loads is a problem and not applied:
+      `route_redefined` (a declaration of a name that exists) and `route_missing` (an `append`,
+      `prepend` or `replace` of one that does not); `base_missing` and `not_exported`
       too, all for 6.5. `git.ts` runs only `rev-parse --verify --quiet <ref>^{commit}`, `ls-tree
       --full-tree -r --name-only <ref> -- <path>` (from the repository's root, as `show` takes
       paths, whatever folder of it the workspace is) and `show <ref>:<path>` (null for a file the
@@ -269,8 +274,13 @@ Changing it needs the owner's yes.
       property static, so a property is static when its getter is (`Site.current`). Statics are
       read off the class (`Object`'s own aside), the rest off an instance. `modules.ts`: the
       copies a `require` reaches and the members each exports, its re-exports and
-      `module.superModule` followed (`MAX_MODULE_DEPTH`). `complete.ts` decides where the offset
-      is, then offers at most `MAX_COMPLETION_ITEMS` filtered by what is typed: ISML tags (custom
+      `module.superModule` followed (`MAX_MODULE_DEPTH`), and a member exported as another
+      module's (`tax: base.tax`, `alias` in `scan.ts`; never through a name written again) read
+      as that one when every copy it may reach agrees, else as the export line. A `*/` read
+      resolves only for the storefronts whose path holds the reading file's cartridge
+      (`storefrontsOf`); a file on no path gets every copy the paths reach, unlabelled (it may be
+      loaded by name from any of them, so a storefront would be a guess). `complete.ts` decides
+      where the offset is, then offers at most `MAX_COMPLETION_ITEMS` filtered by what is typed: ISML tags (custom
       ones of the template and of what it includes, one level) and their attributes
       (`isml-tags.ts`), template paths, `dw.*` members, custom attributes and site preferences,
       a module's members, resource keys and bundles, `require` paths, route ids; each item has a
@@ -283,11 +293,29 @@ Changing it needs the owner's yes.
       `describe`, a module and its copy per storefront, a member and where each copy defines it,
       `module.superModule`, a route (its steps in the order they run and the one that serves),
       a template, a resource key, a custom attribute, a tag; lists cut at `MAX_HOVER_ENTRIES`.
-      The worker answers `engine.complete` and `engine.hover` (`{ workspaceId, path, text,
-      offset }`, the path checked by `checkQuery`) with the index of the workspace indexed, else
-      an empty one (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to
-      `DESCRIBE_WAIT_MS` for a description read through `dw/describe.ts`.
-      `query/performance.test.ts` times both on a 5,000-line script and template.
+      `definition.ts`: where the thing at the offset is defined, one `Target` per place with the
+      storefronts it serves (`null` when none can be named: the place does not depend on one,
+      or the reading file is on no storefront path; never "every storefront"): a template's copy per
+      storefront, a `require`'s file, a key's line in the bundle each storefront reads, a module
+      member's declaration in each copy (along `module.superModule` too), the declaration that
+      serves a route, a custom attribute's metadata (only from the checkout, not the ref), a
+      custom tag's template, a name's declaration in the file; with no storefront path, every
+      copy (for a route, every cartridge's declaration of it). `references.ts`: the references
+      of a function a script exports, asked on the export, on the function it names, or on a
+      read of it: every member read the index keeps per file (`MemberUse` of `scan.ts`: through
+      a name bound to a `require`, `require(…).x`, a pattern's names, `module.superModule`; never
+      a member assigned to) whose `require` reaches a file that defines it, labelled with the
+      storefronts that reach it, the file asked on read from its text; at most
+      `MAX_REFERENCES`. `signature.ts`: inside a call's parentheses (not inside a function written
+      as an argument), the `dw.*` method's overloads (the one that fits the arguments chosen), a
+      `dw.*` constructor, a module function per copy, a model's constructor, or a function of the
+      file, with the active parameter.
+      The worker answers `engine.complete`, `engine.hover`, `engine.definition`,
+      `engine.references` and `engine.signature` (`{ workspaceId, path, text, offset }`, the path
+      checked by `checkQuery`) with the index of the workspace indexed, else an empty one
+      (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to `DESCRIBE_WAIT_MS` for
+      a description read through `dw/describe.ts`. `query/performance.test.ts` times each on a
+      5,000-line script and template.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
