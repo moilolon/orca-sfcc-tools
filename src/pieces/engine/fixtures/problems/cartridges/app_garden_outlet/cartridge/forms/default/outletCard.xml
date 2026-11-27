@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<form xmlns="http://www.demandware.com/xml/form/2008-04-19">
+    <field formid="number" label="label.card" type="string" mandatory="true" min-length="8" max-length="20" regexp="^[0-9]+$" missing-error="error.card" />
+    <field formid="subscribe" label="label.subscribe" type="boolean" checked-value="true" unchecked-value="false" />
+    <list formid="extras">
+        <field formid="note" type="string" />
+    </list>
+    <action formid="apply" valid-form="true" />
+</form>

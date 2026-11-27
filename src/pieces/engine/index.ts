@@ -168,3 +168,32 @@ export { ISML_TAG_ATTRIBUTES } from './query/isml-tags'
 export { cartridgeRoutes, type CartridgeRoute } from './query/routes'
 export { moduleCopies, moduleMember, moduleMembers, type MemberPlace, type ModuleCopy, type QueryContext } from './query/modules'
 export { GUESSED_NAMES, guessedClass, metadataTypeOf, Types, type QType, type TypeContext } from './query/types'
+
+// The problems (phase 6.5): pure like the rest. `readUses` reads what a file names, `checkUses`
+// checks it against the checkout (`Lookup`); `CheckoutProblems` keeps them per file for a whole
+// checkout, read through `CheckoutFiles`. A problem is `AnalysisProblem` here, apart from the syntax
+// layer's `Problem`. The editor of phase 7 words them from `i18n.ts`.
+export { checkUses, MAX_FILE_PROBLEMS, problemFileKind, readUses, type FileUses, type ProblemFileKind } from './problems/analyse'
+export { CheckoutProblems, SLICE_MS, type ProblemsOptions } from './problems/checkout'
+export { DEFAULT_LISTED_PROBLEMS, FILE_PROBLEMS_SHOWN, listPage, listQuery, matchProblems, MAX_LISTED_PROBLEMS, type ListedFile, type ListPage, type ListQuery, type SeverityFilter } from './problems/list'
+export { bundleBase, Lookup, type Presence } from './problems/lookup'
+export {
+  countProblems,
+  emptyCounts,
+  Lines,
+  newProblems,
+  PROBLEM_CODES as ANALYSIS_PROBLEM_CODES,
+  PROBLEM_SEVERITY,
+  problemKey,
+  SEVERITIES,
+  sortProblems,
+  type Problem as AnalysisProblem,
+  type ProblemArgs as AnalysisProblemArgs,
+  type ProblemCode as AnalysisProblemCode,
+  type ProblemCounts,
+  type Severity,
+  type Spot
+} from './problems/problem'
+export { FORM_ELEMENTS } from './problems/forms'
+export { readJson, type JsonFault, type JsonRead, type JsonValue } from './problems/json'
+export { readXml, type XmlElement, type XmlFault, type XmlRead } from './problems/xml'

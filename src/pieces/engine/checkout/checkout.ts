@@ -151,6 +151,17 @@ export type RouteProblemCode =
 
 export type RouteProblem = { code: RouteProblemCode; path: string; start: number; end: number }
 
+/** A problem of a route chain on one storefront: see `routeProblems()`. */
+export type RouteProblemEntry = {
+  storefront: string
+  controller: string
+  route: string
+  line: number
+  /** The range of the route's name in the call, quotes excluded; null for a problem of the whole file. */
+  name: { start: number; end: number } | null
+  problem: RouteProblem
+}
+
 export type RouteChain = {
   storefront: string
   /** The controller copy that runs on the storefront; null when none does. */
@@ -408,6 +419,7 @@ export class CheckoutIndex {
   /** Lists the queries read often, computed once per published state. */
   private lists: { templates?: TemplateEntry[]; scripts?: ScriptEntry[]; bundles?: string[] } = {}
   private countsCache: IndexCounts | null = null
+  private publishedGeneration = 0
   private builtAt: number | null = null
   private buildMs: number | null = null
   private updatedAt: number | null = null
@@ -657,6 +669,12 @@ export class CheckoutIndex {
     this.routeTables = new Map()
     this.lists = {}
     this.countsCache = null
+    this.publishedGeneration++
+  }
+
+  /** How many states have been published: it changes with every build, update and change of settings that ends. */
+  get generation(): number {
+    return this.publishedGeneration
   }
 
   private deriveCartridges(next: Published): void {
@@ -1162,6 +1180,31 @@ export class CheckoutIndex {
       return { storefront: storefront.id, controller, steps: [], applied: [], problems: [] }
     })
     return { controller: parts.controller, name: parts.name, storefronts }
+  }
+
+  /**
+   * Every problem of the route chains that run, per storefront: the controller whose chain it was
+   * found in (the copy that runs there), the route, and the problem with its line (1 for a problem
+   * of the whole file). A problem found in several routes of one storefront is listed once.
+   */
+  routeProblems(): RouteProblemEntry[] {
+    const out: RouteProblemEntry[] = []
+    for (const storefront of this.storefrontList) {
+      const seen = new Set<string>()
+      for (const routes of this.routeTable(storefront).values()) {
+        for (const [route, chain] of routes) {
+          for (const problem of chain.problems) {
+            const key = `${problem.code} ${problem.path} ${problem.start} ${problem.end}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            const operation = this.controllerRecord(problem.path)?.operations.find((each) => each.start === problem.start && each.end === problem.end)
+            const name = operation ? { start: operation.nameStart, end: operation.nameEnd } : null
+            out.push({ storefront: storefront.id, controller: chain.controller ?? problem.path, route, line: operation?.line ?? 1, name, problem: { ...problem } })
+          }
+        }
+      }
+    }
+    return out
   }
 
   /** Every `Controller-Name` served on a storefront, sorted. */

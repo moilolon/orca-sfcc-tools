@@ -159,10 +159,10 @@ Changing it needs the owner's yes.
       breakpoint here* on a frame. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
-    - `src/pieces/engine/` (phase 6, still `delivered: false`): the syntax layer and the
-      checkout index (below), pure modules with no Node and no Orca imports (a test checks it)
-      that the editor will load in its frame too, exported with their types by `index.ts`, the
-      contract of 6.3 and 6.4.
+    - `src/pieces/engine/` (phase 6, delivered with its **Problems** view since 6.5): the syntax
+      layer, the checkout index, the queries and the problems (below), pure modules with no Node
+      and no Orca imports (a test checks it) that the editor will load in its frame too,
+      exported with their types by `index.ts`, the contract of 6.3 to 6.5.
       `js/lexer.ts` and `js/parser.ts` read SFCC scripts (ES5 plus what Rhino accepts, `for
       each` and conditional `catch` included) into an ESTree-shaped tree (`js/ast.ts`) with
       `start` and `end` offsets on every node; they never throw, report problems by code
@@ -288,6 +288,36 @@ Changing it needs the owner's yes.
       an empty one (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to
       `DESCRIBE_WAIT_MS` for a description read through `dw/describe.ts`.
       `query/performance.test.ts` times both on a 5,000-line script and template.
+    - `src/pieces/engine/problems/` (phase 6.5): the warnings, pure like the rest (a test
+      checks it), each a code with its severity (`PROBLEM_SEVERITY`: `error` what the platform
+      refuses, `warning` a name that exists nowhere, `info` one some storefronts lack), a range,
+      its line and column, and the names its message needs (`args`), worded by `i18n.ts`
+      (`problemMessage`). Each rule is written beside its code: `code.ts` (unknown custom
+      attribute and site preference, template, resource key and bundle), `routes.ts` (the
+      checkout index's route problems, on the route's name in the controller where they happen),
+      `forms.ts` (over the strict `xml.ts`) and `steptypes.ts` (over `json.ts`, which keeps
+      positions). **No false warnings:** a type is only one the types of 6.4 know, never a
+      guess; metadata counts for a type only when a site import defines some of its attributes
+      (a `meta/` beside a `sites/` folder) or the `metadataRef` ref does, never a cartridge's own
+      metadata or loose files; a name is looked for only along the storefronts whose path holds
+      the file's cartridge (`lookup.ts`, `presence`), a storefront whose path names a cartridge
+      the checkout lacks counts neither way, a file of a cartridge on no path gets no warning,
+      and a route chain that extends past such a cartridge is not read on that storefront.
+      `analyse.ts` splits a file in two steps: `readUses` (what the text names, parsed once per
+      change) and `checkUses` (against `Lookup`, read once per state of the index, its
+      `generation`). `checkout.ts` (`CheckoutProblems`) keeps them per file: a pass reads every
+      file whose time changed after a build, only the paths named after an update, and checks
+      every file again, pausing every `SLICE_MS`. `list.ts` pages them for the view. The worker
+      runs one pass at a time after each build, update and change of settings (a ref that did
+      not move runs none), posts `engine.problems.changed` when the results changed, and answers
+      `engine.problems` (a text, now), `engine.problems.list`, `.file`, `.open` (through
+      `src/core/open-file.ts`) and `.refresh`, every name masked. The `editor.save.before` hook
+      only schedules an analysis of the text saved and returns at once, never changing or
+      refusing a save; a save, or a watcher's batch, that brings a file new problems
+      (`newProblems`: by code and names, not place) is told in one notification of how many,
+      never what or where, a file at most once per `NOTICE_INTERVAL_MS`, nothing before the first
+      pass. The fixtures are `fixtures/problems/`, laid over `fixtures/checkout/`
+      (`problems/testing.ts`).
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

@@ -17,6 +17,11 @@
         "default": "",
         "placeholder": "origin/main"
       }
+    ],
+    "hooks": [
+      {
+        "event": "editor.save.before"
+      }
     ]
   }
 }

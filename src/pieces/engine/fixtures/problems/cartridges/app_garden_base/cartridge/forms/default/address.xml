@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<form xmlns="http://www.demandware.com/xml/form/2008-04-19" secure="false">
+    <field formid="street" label="label.street" type="string" mandatory="true" max-length="60" />
+    <field formid="city" label="label.city" type="string" required="true" />
+    <field formid="city" label="label.city" type="string" mandatory="true" />
+    <group formid="contact">
+        <field formid="phone" type="string" />
+        <include formid="newsletter" name="newsletter" />
+        <include formid="billing" name="billing" />
+        <include formid="card" name="outletCard" />
+    </group>
+    <section formid="extra" />
+    <field formid="country" type="string">
+        <options>
+            <option optionid="FR" value="FR" label="country.fr" />
+        </options>
+    </field>
+    <action formid="save" valid-form="true" />
+</form>

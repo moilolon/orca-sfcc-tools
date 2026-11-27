@@ -1,0 +1,8 @@
+{
+    "step-types": {
+        "script-module-step": {
+            "@type-id": "custom.Garden.Export",
+            "module": "app_garden_core/cartridge/scripts/helpers/priceHelper.js"
+        }
+    }
+}
