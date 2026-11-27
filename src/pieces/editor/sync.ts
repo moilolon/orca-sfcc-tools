@@ -10,7 +10,8 @@ import { merge3, type MergeResult } from './merge'
 /** Milliseconds the session waits after the last change before sending it. */
 export const SEND_DEBOUNCE_MS = 150
 
-export type MergeReport = MergeResult & { at: number }
+/** A merge: its result, what came from outside (the file's text then), and when. */
+export type MergeReport = MergeResult & { outside: string; at: number }
 
 export type DocumentSync = {
   /** The text when the editor opened. */
@@ -38,7 +39,7 @@ export async function startSync(api: OrcaFrameApi, options: { debounceMs?: numbe
     debounceMs: options.debounceMs ?? SEND_DEBOUNCE_MS,
     merge: (base, outside, mine) => {
       const result = merge3(base, outside, mine)
-      merged = { ...result, at: now() }
+      merged = { ...result, outside, at: now() }
       return result.text
     }
   })

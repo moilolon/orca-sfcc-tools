@@ -171,6 +171,11 @@
         "title": "SFCC: Stop sandbox"
       }
     ],
+    "hooks": [
+      {
+        "event": "editor.save.before"
+      }
+    ],
     "customEditors": [
       {
         "id": "sfcc",
@@ -200,11 +205,6 @@
         "command": "editor.openInEditor",
         "key": "Alt+Shift+E",
         "when": "workspace"
-      }
-    ],
-    "hooks": [
-      {
-        "event": "editor.save.before"
       }
     ],
     "statusBarItems": [

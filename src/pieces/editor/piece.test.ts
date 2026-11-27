@@ -71,12 +71,13 @@ function frameModules(): string[] {
   return [...seen].map((file) => relative(ROOT, file).replace(/\\/g, '/'))
 }
 
-test('the editor frame loads only relative, pure modules: no Node, no worker code, no piece but the engine’s syntax layer', () => {
+test('the editor frame loads only relative, pure modules: no Node, no worker code, no piece but the engine’s syntax layer and the debugger’s line diff', () => {
   const modules = frameModules()
   assert.ok(modules.includes('src/pieces/engine/js/lexer.ts'), 'the engine’s lexer colours the text')
   for (const module of modules) {
     // work.ts is the parsers' clock-free work counter: no imports, no state between parses.
-    assert.ok(/^src\/(pieces\/(editor|engine\/(js\/|isml\/|work\.ts$))|core\/i18n\.ts$)/.test(module), `${module} is loaded by the editor frame`)
+    // debugger/line-diff.ts is the debugger's pure line diff, the one its worker moves the store's lines with.
+    assert.ok(/^src\/(pieces\/(editor|engine\/(js\/|isml\/|work\.ts$)|debugger\/line-diff\.ts$)|core\/i18n\.ts$)/.test(module), `${module} is loaded by the editor frame`)
     assert.ok(!/(locate|worker)\.ts$/.test(module) || module.endsWith('locate-client.ts'), `${module} is worker code`)
     const source = readFileSync(join(ROOT, module), 'utf8')
     assert.ok(!/from\s*['"]node:/.test(source), `${module} imports Node`)

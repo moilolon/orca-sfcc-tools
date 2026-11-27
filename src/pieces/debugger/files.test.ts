@@ -1,7 +1,7 @@
 // The scripts a breakpoint can go in: inside a cartridge (a folder with a .project file), found
 // by name.
 import { assert, test } from 'orca/testing'
-import { byCartridge, scriptFiles, type ReadDir } from './files'
+import { byCartridge, isScriptPath, scriptFiles, type ReadDir } from './files'
 
 type Tree = { [name: string]: Tree | string }
 
@@ -55,4 +55,26 @@ test('scripts are grouped by the cartridge that holds them, the longest cartridg
   ])
   // A workspace that is itself a cartridge holds every file.
   assert.deepEqual(byCartridge(['a.js', 'x/b.js'], ['']), [{ path: '', files: ['a.js', 'x/b.js'] }])
+})
+
+test('a path is a script a breakpoint can go in when it is a .js or .ds inside a cartridge and outside a skipped folder', () => {
+  const cartridges = ['cartridges/app_example', 'cartridges/plugin_example']
+  for (const path of ['cartridges/app_example/cartridge/controllers/Page.js', 'cartridges/plugin_example/cartridge/scripts/job.ds', 'cartridges/app_example/cartridge/scripts/NEW.JS']) {
+    assert.equal(isScriptPath(path, cartridges), true, path)
+  }
+  for (const path of [
+    'cartridges/app_example/cartridge/templates/default/page.isml',
+    'cartridges/app_example/cartridge/forms/default/profile.xml',
+    'scripts/build.js',
+    'cartridges/other/cartridge/x.js',
+    'cartridges/app_example/node_modules/lib/index.js',
+    'cartridges/app_example/cartridge/.git/hook.js',
+    'cartridges/app_example/../app_other/x.js',
+    'cartridges/app_example//x.js',
+    `cartridges/app_example/${'d/'.repeat(12)}deep.js`
+  ]) {
+    assert.equal(isScriptPath(path, cartridges), false, path)
+  }
+  // A workspace that is itself a cartridge.
+  assert.equal(isScriptPath('cartridge/controllers/Page.js', ['']), true)
 })
