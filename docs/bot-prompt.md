@@ -1,6 +1,6 @@
 # Morning error report: the bot's prompt
 
-The prompt the automation of the bot `sfcc` gives it each morning. The automation's own prompt
+The prompt the automation of the bot `sfcc-tools` gives it each weekday morning. The automation's own prompt
 only points here (`Follow <checkout>/docs/bot-prompt.md`), so a change to this file reaches the
 next run. `<checkout>` is the main checkout of this repository and `<dw.json>` the project's
 `dw.json`, both absolute paths on the owner's machine: they are written in the automation, never
