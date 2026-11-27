@@ -37,10 +37,17 @@ test('a 100,000-link chain past the bound reports too_deep once', () => {
   assert.ok(problems.length < 20, `${problems.length} problems`)
 })
 
-/** The best of three runs, in milliseconds. */
-function time(run: () => void): number {
+/** One run, in milliseconds. */
+function time1(run: () => void): number {
+  const started = performance.now()
+  run()
+  return performance.now() - started
+}
+
+/** The best of `runs` runs, in milliseconds. */
+function time(run: () => void, runs = 3): number {
   let best = Infinity
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < runs; i++) {
     const started = performance.now()
     run()
     best = Math.min(best, performance.now() - started)
@@ -82,17 +89,17 @@ const build = (size: number, unit: string, prefix = '', suffix = '') => prefix +
 
 test('a 1 MB line of values with an unclosed ${ parses in well under a second', () => {
   const text = build(1_000_000, 'b="${(x" ', '<a ', '>')
-  const took = time(() => templateScript(text, parseTemplate(text).document))
+  const took = time(() => templateScript(text, parseTemplate(text).document), 5)
   console.log(`1 MB line of b="\${(x": ${took.toFixed(0)} ms`)
   assert.ok(took < 1000, `${took.toFixed(0)} ms`)
   const tags = build(1_000_000, '<a b="${(x">')
-  const tagsTook = time(() => templateScript(tags, parseTemplate(tags).document))
+  const tagsTook = time(() => templateScript(tags, parseTemplate(tags).document), 5)
   console.log(`1 MB line of <a b="\${(x">: ${tagsTook.toFixed(0)} ms`)
   assert.ok(tagsTook < 1000, `${tagsTook.toFixed(0)} ms`)
 })
 
 test('no input shape grows worse than linear', () => {
-  // Each shape at 64 KB and at four times that. Linear work grows about 4 times, quadratic 16:
+  // Each shape at 128 KB and at four times that. Linear work grows about 4 times, quadratic 16:
   // the bound (8 times, plus room for a busy machine and its garbage collector) tells them apart.
   const templates: [string, string, string?, string?][] = [
     ['values with an unclosed ${ on one line', 'b="${(x" ', '<a ', '>'],
@@ -125,12 +132,18 @@ test('no input shape grows worse than linear', () => {
     ['many exports of one name', 'module.exports = base;\nbase.x = function () {};\nObject.assign(base, { y: 1 });\n', 'var base = {};\n'],
     ['one name declared many times', 'var v = v + 1;\n']
   ]
-  const SIZE = 64_000
+  const SIZE = 128_000
   const check = (label: string, run: (text: string) => void, make: (size: number) => string) => {
     const small = make(SIZE)
     const large = make(SIZE * 4)
-    const tSmall = time(() => run(small))
-    const tLarge = time(() => run(large))
+    // Interleaved, best of five each: a pause of the machine (other test files run alongside,
+    // and the garbage collector) then spoils one sample, not the comparison.
+    let tSmall = Infinity
+    let tLarge = Infinity
+    for (let i = 0; i < 5; i++) {
+      tSmall = Math.min(tSmall, time1(() => run(small)))
+      tLarge = Math.min(tLarge, time1(() => run(large)))
+    }
     console.log(`${label}: ${tSmall.toFixed(1)} ms, ×4: ${tLarge.toFixed(1)} ms`)
     assert.ok(tLarge < tSmall * 8 + 50, `${label}: ${tSmall.toFixed(1)} ms then ${tLarge.toFixed(1)} ms`)
   }
