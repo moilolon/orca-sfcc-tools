@@ -378,3 +378,23 @@ test('a temporary file a writer killed before its rename left behind is swept on
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('a moved lock and a breaker a killed taker left behind are swept once old', async () => {
+  const root = folder()
+  try {
+    const path = join(root, 'seen.json')
+    const old = (Date.now() - STALE_LOCK_MS - 5_000) / 1000
+    for (const name of ['seen.json.lock.4242.abcdef.stale', 'seen.json.lock.break']) {
+      writeFileSync(join(root, name), '4242.abcdef')
+      utimesSync(join(root, name), old, old)
+    }
+    // A fresh one may belong to a takeover going on now, and another file's are not this one's.
+    writeFileSync(join(root, 'seen.json.lock.4243.abcdef.stale'), 'x')
+    writeFileSync(join(root, 'report.json.lock.break'), 'x')
+    utimesSync(join(root, 'report.json.lock.break'), old, old)
+    await updateDataFile<number>(path, () => ({ version: 1, roles: { sandbox: 1 } }))
+    assert.deepEqual(readdirSync(root).sort(), ['report.json.lock.break', 'seen.json', 'seen.json.lock.4243.abcdef.stale'])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

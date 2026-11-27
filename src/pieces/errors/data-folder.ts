@@ -17,8 +17,10 @@
 //   3. the new text is written to `<file>.<pid>.<random>.tmp` (owner-only), flushed to disk, then
 //      renamed over the file, so a reader sees the old file or the new one, never half of one, and
 //      a writer cut off halfway leaves only its temporary file behind;
-//   4. the lock is removed, only if it is still this writer's. Temporary files a writer killed
-//      between its write and its rename left behind are swept, once they are old.
+//   4. the lock is removed, only if it is still this writer's. What a killed process left
+//      behind is swept once old: a writer's temporary file (killed between its write and its
+//      rename), a taker's moved lock `<file>.lock.<token>.stale` (killed before removing it) and
+//      its breaker `<file>.lock.break`.
 // On Windows a rename over a file another process has open, and a read of a file being renamed,
 // can fail for a moment (EPERM, EBUSY, EACCES): both are retried.
 //
@@ -253,15 +255,18 @@ async function lock(path: string, io: DataIo, now: () => number, timeoutMs: numb
 }
 
 /**
- * Removes the temporary files of `path` that a writer killed between its write and its rename
- * left behind, once older than `staleMs`. Runs under the lock; never fails the write.
+ * Removes what a killed process left beside `path`, once older than `staleMs`: a writer's
+ * temporary file, a taker's moved lock (`.stale`) and its breaker (`.lock.break`). A live one is
+ * milliseconds old. Runs under the lock; never fails the write.
  */
 async function sweepTemps(path: string, io: DataIo, now: () => number, staleMs: number): Promise<void> {
   const folder = dirname(path)
-  const prefix = `${path.slice(folder.length + 1)}.`
+  const base = path.slice(folder.length + 1)
+  const leftOver = (name: string) =>
+    (name.startsWith(`${base}.`) && name.endsWith('.tmp')) || (name.startsWith(`${base}.lock.`) && name.endsWith('.stale')) || name === `${base}.lock.break`
   const names = await io.list(folder).catch(() => [] as string[])
   for (const name of names) {
-    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue
+    if (!leftOver(name)) continue
     const temp = join(folder, name)
     const modified = await io.modifiedAt(temp).catch(() => null)
     if (modified !== null && now() - modified > staleMs) await io.unlink(temp).catch(() => undefined)
