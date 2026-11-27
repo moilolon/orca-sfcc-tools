@@ -114,6 +114,7 @@ export const CORE_MESSAGES = defineMessages(
     'error.unsafe_argument': 'A command argument was refused.',
     'error.cwd_not_found': 'The folder to run b2c in does not exist.',
     'error.config_invalid': 'The dw.json file could not be read.',
+    'error.config_root_refused': 'That folder is not a workspace Orca lists, so its dw.json is not read.',
     'error.timeout': 'The plugin took too long to answer.',
     'error.action_failed': 'The action could not be completed.',
     'error.unknown': 'Unexpected error ({code}).'
@@ -193,6 +194,7 @@ export const CORE_MESSAGES = defineMessages(
     'error.unsafe_argument': 'Se ha rechazado un argumento de la orden.',
     'error.cwd_not_found': 'La carpeta donde ejecutar b2c no existe.',
     'error.config_invalid': 'No se ha podido leer el fichero dw.json.',
+    'error.config_root_refused': 'Esa carpeta no es un workspace que Orca liste, así que no se lee su dw.json.',
     'error.timeout': 'El plugin ha tardado demasiado en responder.',
     'error.action_failed': 'No se ha podido completar la acción.',
     'error.unknown': 'Error inesperado ({code}).'

@@ -16,7 +16,7 @@ import type { PanelSection } from '../../core/piece'
 import { openSetup } from '../../panel/navigation'
 import { Empty, ErrorState, Group, LabelledRow, ListRow, MaskedText, Notice, NoticeLine, PAGE_SIZE, ShowMore, StateBadge, StateMark } from '../../panel/ui'
 import { messages, openFailureKey, ROLE_KEYS, type ErrorsMessageKey } from './i18n'
-import type { ErrorFrame, ErrorRow, RoleErrors } from './protocol'
+import { isOlderAnswer, type ErrorFrame, type ErrorRow, type RoleErrors } from './protocol'
 
 /** The environment picked, kept across runs of the plugin. */
 const pickedRole = atom<string>('errorsRole', 'sandbox', { persist: 'plugin' })
@@ -51,7 +51,9 @@ function currentRole(): Role {
   return isRole(role) ? role : 'sandbox'
 }
 
+/** Keeps an answer, unless it shows an older state than the one kept: answers can cross. */
 function keep(role: Role, answer: RoleErrors): void {
+  if (isOlderAnswer(answer, read(answers)[role])) return
   const json = JSON.stringify(answer)
   if (lastJson[role] !== json) {
     lastJson[role] = json

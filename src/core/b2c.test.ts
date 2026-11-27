@@ -1672,6 +1672,102 @@ test('isHost() is true for the whole host of the role in any letter case, false 
     assert.equal(calls.length, 0, 'it starts no process')
   }, ADMIN_DW))
 
+test('a call that names its config root reads that folder’s dw.json, whatever configRoot() names; one that does not follows it', async () => {
+  const first = makeWorkspace(ADMIN_DW)
+  const second = makeWorkspace({ hostname: 'other-box.example.com', 'client-id': 'invented-other-client-id', 'client-secret': 'invented-other-secret' })
+  const empty = makeWorkspace({})
+  rmSync(join(empty, 'dw.json'), { force: true })
+  try {
+    let root: string | null = second
+    const spawn = fakeSpawner()
+    const { b2c, calls } = runner(null, spawn, { configRoot: async () => root, knownRoots: async () => [first, second, empty] })
+    // Named: the first folder's file, though configRoot() names the second.
+    assert.equal(await b2c.isHost('sandbox', 'Sandbox-41.Example.com', { configRoot: first }), true)
+    assert.equal(await b2c.isHost('sandbox', 'Sandbox-41.Example.com'), false)
+    assert.equal(await b2c.isHost('sandbox', 'other-box.example.com'), true)
+    assert.deepEqual((await b2c.instances({ configRoot: empty })).config, 'missing')
+    assert.deepEqual((await b2c.instances({ configRoot: null })).config, 'missing')
+    assert.deepEqual((await b2c.instances({ configRoot: first })).config, 'ok')
+    await b2c.run(['sandbox', 'list'], { role: 'sandbox', configRoot: first })
+    assert.equal(calls.at(-1)?.options.env?.SFCC_SERVER, 'Sandbox-41.Example.com')
+    await b2c.run(['sandbox', 'list'], { role: 'sandbox' })
+    assert.equal(calls.at(-1)?.options.env?.SFCC_SERVER, 'other-box.example.com')
+    const running = await b2c.start(['logs', 'tail'], { role: 'sandbox', configRoot: first })
+    assert.equal(calls.at(-1)?.options.env?.SFCC_SERVER, 'Sandbox-41.Example.com')
+    running.stop()
+    // A named folder with no file configures no role, whatever configRoot() names.
+    root = first
+    assert.equal(await failureOf(b2c.run(['sandbox', 'list'], { role: 'sandbox', configRoot: empty })).then((error) => (error instanceof B2cError ? error.code : error)), 'role_not_configured')
+    assert.equal(await failureOf(b2c.run(['sandbox', 'list'], { role: 'sandbox', configRoot: null })).then((error) => (error instanceof B2cError ? error.code : error)), 'role_not_configured')
+    // What a named file holds is masked like any other read.
+    assert.equal(await b2c.mask('other-box.example.com'), '***')
+  } finally {
+    for (const dir of [first, second, empty]) rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a call may name only a listed workspace’s folder or its main checkout: any other is refused, coded, before anything is read', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'sfcc-tools-roots-'))
+  try {
+    // A main checkout with a dw.json, a worktree of it with none, a workspace with its own, and a
+    // folder Orca does not list.
+    const main = join(base, 'main')
+    const worktree = join(base, 'worktrees', 'feature')
+    const own = join(base, 'own')
+    const stranger = join(base, 'stranger')
+    mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+    mkdirSync(worktree, { recursive: true })
+    mkdirSync(own, { recursive: true })
+    mkdirSync(stranger, { recursive: true })
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'commondir'), '../..\n')
+    writeFileSync(join(worktree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, 'dw.json'), JSON.stringify(ADMIN_DW))
+    writeFileSync(join(own, 'dw.json'), JSON.stringify(INVENTED_DW))
+    writeFileSync(join(stranger, 'dw.json'), JSON.stringify(INVENTED_DW))
+    let listed = [worktree, own]
+    const { b2c, calls } = runner(own, fakeSpawner(), { knownRoots: async () => listed })
+    const code = (promise: Promise<unknown>) => failureOf(promise).then((error) => (error instanceof B2cError ? error.code : error))
+
+    // A listed workspace, and the main checkout of a listed worktree, may be named.
+    assert.equal((await b2c.instances({ configRoot: own })).config, 'ok')
+    assert.equal((await b2c.instances({ configRoot: main })).config, 'ok')
+    assert.equal(await b2c.isHost('sandbox', ADMIN_DW.hostname, { configRoot: worktree }), true, 'a worktree reads its main checkout’s file')
+    // The folder a call naming each reads from: its own, or its main checkout's.
+    assert.equal(await b2c.configFolder(own), own)
+    assert.equal(await b2c.configFolder(worktree), main)
+
+    // Any other folder is refused, and nothing is read or started.
+    assert.equal(await code(b2c.run(['sandbox', 'list'], { role: 'sandbox', configRoot: stranger })), 'config_root_refused')
+    assert.equal(await code(b2c.instances({ configRoot: stranger })), 'config_root_refused')
+    assert.equal(await code(b2c.configFolder(stranger)), 'config_root_refused')
+    assert.equal(await code(b2c.start(['logs', 'tail'], { role: 'sandbox', configRoot: join(own, '..') })), 'config_root_refused')
+    assert.equal(await b2c.isHost('sandbox', INVENTED_DW.hostname, { configRoot: stranger }), false, 'isHost never throws')
+    assert.equal(calls.length, 0)
+
+    // A worktree no longer listed (removed): neither it nor, through it, its main checkout.
+    listed = [own]
+    assert.equal(await code(b2c.instances({ configRoot: worktree })), 'config_root_refused')
+    assert.equal(await code(b2c.instances({ configRoot: main })), 'config_root_refused')
+    // No list at all: no folder may be named; a call that names none reads configRoot() as ever.
+    const unlisted = runner(own, fakeSpawner()).b2c
+    assert.equal(await code(unlisted.instances({ configRoot: own })), 'config_root_refused')
+    assert.equal((await unlisted.instances()).config, 'ok')
+    assert.equal((await unlisted.instances({ configRoot: null })).config, 'missing', 'null names no folder: nothing to refuse')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('on Windows, a named folder is matched whatever its slashes and letter case', async () => {
+  const listed = 'C:\\Work\\Shop'
+  const files: FileSystem = { readText: async (path) => (path.toLowerCase().replace(/\\/g, '/') === 'c:/work/shop/dw.json' ? JSON.stringify(INVENTED_DW) : null) }
+  const { b2c } = runner(null, fakeSpawner(), { platform: 'win32', fs: files, knownRoots: async () => [listed] })
+  for (const named of ['C:\\Work\\Shop', 'c:/work/shop', 'C:\\WORK\\SHOP\\', 'C:/Work/Shop/']) {
+    assert.notEqual(await failureOf(b2c.instances({ configRoot: named })).then((e) => (e instanceof B2cError ? e.code : 'ok')), 'config_root_refused', named)
+  }
+  assert.equal(await failureOf(b2c.instances({ configRoot: 'C:\\Work\\Shop2' })).then((e) => (e instanceof B2cError ? e.code : 'ok')), 'config_root_refused')
+})
+
 test('a piece finds its own sandbox in a list b2c returns, and shows the list with nothing of the file unmasked', () =>
   withWorkspace(async (root) => {
     // What `sandbox list --json` might answer: run() hands it over as b2c printed it.

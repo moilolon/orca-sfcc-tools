@@ -61,11 +61,15 @@ Changing it needs the owner's yes.
       uploading, failed; deletes the version of a removed workspace, deferred while active),
       `code-version.ts` (`<prefix><slug>`, kept per workspace id), `uploader.ts` (reads
       `code watch --jsonl` lines), `status.ts` (the sandbox state from `sandbox list`, start and
-      stop followed on it), `status-bar.ts` (its two items' texts), `worker.ts` (requests,
-      commands, `workspace.removed`; its state gives each workspace's branch and whether it is
-      of a project in use, which only chooses what the view lists first: the uploading
-      workspace's project; else the focused one's when it has a configuration file; else every
-      project with one; else all); `testing.ts` holds the fakes its tests share.
+      stop followed on it: each takes the configuration in force when it is asked, the folder
+      whose `dw.json` is read and the id the list gives under it, and every call of its follow
+      names that folder (`configRoot` of a call), so moving the focus never loses the sandbox;
+      an answer made with another `dw.json` does not count for it), `status-bar.ts` (its two
+      items' texts), `worker.ts` (requests, commands, `workspace.removed`; its state gives each
+      workspace's branch and whether it is of a project in use, which only chooses what the
+      view lists first: the uploading workspace's project; else the focused one's when it has a
+      configuration file; else every project with one; else all); `testing.ts` holds the fakes
+      its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
       beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
       line; `frames.ts` finds which stack frames are files of a local cartridge (such a frame
@@ -76,7 +80,18 @@ Changing it needs the owner's yes.
       for in is chosen by `frameRoot()` in its `worker.ts`. A read passes `--level ERROR` and
       `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
       reduced to its path, its locale segment to `<locale>`, and a host written without a scheme
-      to `<host>` (never a file name, a `dw.*` name or a Java package). Numbers become `#`, but
+      to `<host>`, in any letter case (never a file name, a `dw.*` name or a Java package);
+      where the text around says it is one, two labels do: inside brackets (in a list there
+      too) or quotes, on any country or common ending but one that reads as a property
+      (`(item.id)`), and after `domain`, `host`, `hostname`, `server`, `url`, `@` or `//` on
+      any known ending, with a port or a path after it; a script expression stays. A read that
+      cannot run with the `dw.json` read now (the role is not ready there) answers at once with
+      why, keeps the time of the last read and starts nothing. A read is marked as asked in
+      storage until it ends, so one a worker restart cut short runs again when the worker
+      starts (within ten minutes of being asked; such a read may notify with nobody there, and
+      may count again what the cut one recorded before its cursor was written). Every answer
+      carries its version (the worker, and a number raised on each change of the role), and the
+      view keeps only the newest, since two answers can cross. Numbers become `#`, but
       an HTTP status after `status`, `statusCode` or `HTTP` and an error code after `error code`:
       an order, a gift card, a product or a one-time code is never kept, and a `LETTERS-digits`
       token becomes `<code>`. **The limit of `b2c logs get`:**
@@ -139,6 +154,12 @@ Changing it needs the owner's yes.
       `.cmd` or `.bat` none may hold `" % ^ & | < > !` or a control character
       (`unsafe_argument`, with the position of the argument): a version manager's shim would
       let it run another command.
+    - A call of `run()`, `start()`, `instances()` or `isHost()` may name the folder whose
+      `dw.json` it reads (`configRoot`); left out, it is the one `configRoot()` names at that
+      moment. Only an operation followed over several calls names it (a sandbox start or stop,
+      a deletion), so a focus change in between does not give it another file. Only the folder
+      of a local workspace Orca lists (`knownRoots`), or the main checkout of one, may be named;
+      any other is refused with `config_root_refused` before anything is read.
     - `run()` is for one-shot commands and adds `--json`. `start()` is for long-lived ones: it
       hands over stderr line by line and stdout in raw chunks, takes `write()` and `end()` for
       stdin, always reads both streams, and adds `--jsonl` only with `jsonl: true`; its `exited`
@@ -186,7 +207,18 @@ Changing it needs the owner's yes.
       and after `dispose()` nothing queued starts and nothing is deployed. A version is deleted only on its workspace's
       `workspace.removed` event (once another version is active) or by a person's hand, from a
       whole list and never for a project hidden from the sidebar; a workspace missing from a
-      list is never taken as removed. A worker restart restarts the
+      list is never taken as removed. A delete that fails is checked in `code list`: Salesforce
+      can answer a timeout and go on deleting, renaming the version `.deleted_<n>_<name>`, so a
+      version gone or renamed counts as deleted and one still there waits for the next
+      activation; a `.deleted_…` version is never shown as a workspace's or deleted again.
+      A version is deleted only with the `dw.json` of its own workspace: the folder that file
+      was read from when the workspace was picked (its root, or its main checkout's,
+      `b2c.configFolder()`), kept with its version and named in every call of its deletion.
+      When there is none, or it no longer holds a ready sandbox role (a removed worktree whose
+      file went with it), nothing is deleted: the version stays queued and the view lists it as
+      not deletable, for a person to forget. Never the focused workspace's file, which may name
+      another sandbox holding a version of the same name. A
+      worker restart restarts the
       watcher without a redeploy, but only for a version whose last full deploy ended; the
       others show that a deploy is needed and are never reloaded.
     - **Public repo:** nothing of a project it is used on. No hosts, sandbox names, credentials
@@ -322,6 +354,21 @@ control, ASCII boxes).
   the copies as one development plugin: load one copy at a time. Before loading another,
   `orca plugin dev unload <the other folder>`; `orca plugin list --json` shows which folder is
   loaded.
+- **Loading the plugin for a live check:** never from the repository's checkout. Orca watches
+  the whole development folder, `.claude/worktrees/` included, so a plugin loaded from the
+  checkout reloads, and its worker restarts (dropping a debugger session, cutting a log read
+  short and restarting `code watch`), every time an agent saves a file in any worktree. Load
+  it from a clean copy of the branch outside the repository instead:
+    1. `git archive <ref> | tar -x -C <dir>`, with `<dir>` a new, empty folder outside the
+       repository (no `.claude/`, no worktrees, no `.git`);
+    2. `npm install` in `<dir>`;
+    3. `orca plugin dev unload` the copy loaded before, if any, then the owner loads `<dir>`
+       (`orca plugin dev load <dir>`). It is a folder Orca has not seen, so it needs the owner's
+       approval once; never pass `--approve`.
+  For the next round, extract the new ref into the same `<dir>` (empty it first, keep
+  `node_modules` or run `npm install` again): Orca reloads it once.
+- `orca plugin inspect .` is refused in a checkout whose worktrees push the folder over its
+  size limit; run it on such a clean copy (`orca plugin inspect <dir> --json`).
 
 ## Git
 

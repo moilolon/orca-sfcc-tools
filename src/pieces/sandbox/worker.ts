@@ -79,7 +79,8 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     void orca.host.call('notifications.show', params).catch(() => undefined)
   }
 
-  const sandbox = new SandboxWatch({ b2c, timers, onChange: () => changed(), onProblem })
+  // A start or stop takes the dw.json in force when it is asked, and keeps it until it settles.
+  const sandbox = new SandboxWatch({ b2c, timers, onChange: () => changed(), onProblem, configRoot: () => workspaces.configRoot() })
   const ownership = new Ownership({
     b2c,
     store: ctx.store,
@@ -158,6 +159,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
         owner: workspace.id === upload.workspaceId
       })),
       pendingDeletes: ownership.pendingCount(),
+      stuckDeletes: ownership.stuckVersions(),
       leftovers,
       problem
     }
@@ -213,6 +215,8 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
   }
 
   async function refresh(): Promise<void> {
+    // A start or stop being followed reads with its own dw.json, not the one in force now.
+    if (sandbox.isFollowing()) return sandbox.refresh()
     try {
       await ensureReady()
     } catch (error) {
@@ -299,6 +303,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     orca.panels.handle('sandbox.pick', (input) => answer(() => actions.pick(String(input?.workspaceId ?? '')))),
     orca.panels.handle('sandbox.release', () => answer(actions.release)),
     orca.panels.handle('sandbox.forget', (input) => answer(() => ownership.forget(String(input?.workspaceId ?? '')))),
+    orca.panels.handle('sandbox.dropDelete', (input) => answer(() => ownership.dropStuck(String(input?.codeVersion ?? '')))),
     orca.panels.handle('sandbox.deploy', () => answer(actions.deploy)),
     orca.panels.handle('sandbox.reload', () => answer(actions.reload)),
     orca.panels.handle('sandbox.start', () => answer(actions.start)),

@@ -59,6 +59,7 @@ const CODES = [
   'unsafe_argument',
   'cwd_not_found',
   'config_invalid',
+  'config_root_refused',
   'timeout',
   'action_failed'
 ]

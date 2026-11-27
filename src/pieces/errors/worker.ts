@@ -5,11 +5,13 @@
 //
 // The sandbox is read on a timer (Settings, in minutes; 0, the default, is off), the other three
 // only when a person asks. Two reads of one environment never overlap: asking during a read joins
-// it. Each read asks for the ERROR and FATAL entries (`--level`) of the files a setting names
-// (`--filter`), since a few minutes before the newest entry already read (`cursor.<role>`), at
-// most `MAX_ENTRIES`; an entry counts once, by the newest time read from its own file. What is
-// stored, in the plugin's own storage: per signature its counters and one bounded sample, masked;
-// never a raw entry.
+// it, and the next read after it ends runs on its own. A read stays marked as asked
+// (`asked.<role>`) until it ends, so one a worker restart cut short runs again when the worker
+// starts, within `RESUME_MS` of being asked. Each read asks for the ERROR and FATAL entries
+// (`--level`) of the files a setting names (`--filter`), since a few minutes before the newest
+// entry already read (`cursor.<role>`), at most `MAX_ENTRIES`; an entry counts once, by the
+// newest time read from its own file. What is stored, in the plugin's own storage: per signature
+// its counters and one bounded sample, masked; never a raw entry.
 //
 // b2c's `logs get` reads only the last 64 KB of each log file (not a flag) and keeps at most
 // `--count` entries, so a busy log can hold entries no read ever sees. That cannot be fixed here;
@@ -21,9 +23,10 @@
 //     each read for the same files: whatever the level of its lines, so a window that warnings
 //     or info lines filled counts too. A file not seen before counts when it is already larger
 //     than its window and was written since the read's start.
+import { randomUUID } from 'node:crypto'
 import { relative } from 'node:path'
-import { B2cError } from '../../core/b2c'
-import { isRole, type Role } from '../../core/instances'
+import { B2cError, type InstancesState } from '../../core/b2c'
+import { isRole, ROLES, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
 import { isLocal } from '../../core/workspaces'
@@ -46,8 +49,14 @@ export const OVERLAP_MS = 5 * 60 * 1000
 const FILE_CURSOR_MS = 2 * 24 * 60 * 60 * 1000
 /** How far back the first read of an environment looks. */
 export const FIRST_READ_MS = 24 * 60 * 60 * 1000
-/** How long after the worker starts the timer's first read runs. */
+/** How long after the worker starts the timer's first read runs, and a read cut short is run again. */
 export const START_DELAY_MS = 5_000
+/**
+ * How long after it was asked a read cut short by a worker restart is run again when the worker
+ * starts. Orca restarts a development plugin's worker whenever a file of its folder is saved, so a
+ * read that was running then never ended and moved nothing.
+ */
+export const RESUME_MS = 10 * 60_000
 // How long each b2c call of a read may take. A read runs on its own, never inside a panel's
 // request (`errors.refresh` starts it and answers at once), so the two calls together may take
 // longer than a request may wait.
@@ -187,6 +196,11 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   const seen = createSeenList(store)
   const reads = new Map<Role, Promise<void>>()
   let stopped = false
+  // Each answer says which state it shows: this worker, and a number raised on every change of a
+  // role, so the panel can drop an answer that arrives after a newer one.
+  const worker = randomUUID()
+  const versions = new Map<Role, number>()
+  const bump = (role: Role) => void versions.set(role, (versions.get(role) ?? 0) + 1)
 
   async function rawSettings(): Promise<Record<string, unknown>> {
     try {
@@ -211,6 +225,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
 
   const statusKey = (role: Role) => `status.${role}`
   const cursorKey = (role: Role) => `cursor.${role}`
+  /** When the read running now was asked; kept until it ends, so a restarted worker runs it again. */
+  const askedKey = (role: Role) => `asked.${role}`
 
   async function readStatus(role: Role): Promise<ReadStatus> {
     const value = await ctx.store.get<SeenJson>(statusKey(role), null)
@@ -237,6 +253,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   async function changed(role: Role): Promise<void> {
+    bump(role)
     if (stopped) return
     const newCount = await seen.newCount(role)
     ctx.orca.panels.post('errors.changed', { role, newCount })
@@ -297,9 +314,27 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     return new Map(twice.map((sample, index) => [plan[index].signature, sample]))
   }
 
-  async function read(role: Role): Promise<void> {
-    const { instances } = await ctx.b2c.instances()
-    if (instances[role] !== 'ready') return
+  /**
+   * Why a role's log cannot be read with the dw.json read now, as a code the panel words; null
+   * when it can. Never a value of the file.
+   */
+  function refusalOf({ config, instances }: InstancesState, role: Role): string | null {
+    if (config === 'invalid') return 'config_invalid'
+    if (instances[role] === 'ready') return null
+    return instances[role] === 'incomplete' ? 'credentials_missing' : 'role_not_configured'
+  }
+
+  /** A read that could not run: why, kept with the last read's time untouched. */
+  async function refused(role: Role, code: string): Promise<void> {
+    ctx.log(`the ${role} log was not read: ${code}`)
+    await ctx.store.set(statusKey(role), { ...(await readStatus(role)), error: code })
+  }
+
+  async function read(role: Role, askedAt: number | undefined): Promise<void> {
+    const refusal = refusalOf(await ctx.b2c.instances(), role)
+    if (refusal) return refused(role, refusal)
+    // Kept until the read ends: a worker restarted meanwhile runs it again.
+    await ctx.store.set(askedKey(role), askedAt ?? now())
     const settings = await rawSettings()
     const cursor = cursorOf(await ctx.store.get<SeenJson>(cursorKey(role), null))
     const since = cursor?.at != null ? cursor.at - OVERLAP_MS : now() - FIRST_READ_MS
@@ -370,17 +405,22 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     }
   }
 
-  /** Reads a role's log now, or joins the read already running. */
-  function refresh(role: Role): Promise<void> {
+  /**
+   * Reads a role's log now, or joins the read already running. `askedAt` is when a read cut short
+   * by a restart was first asked: it is kept, so such a read is run again only within `RESUME_MS`.
+   */
+  function refresh(role: Role, askedAt?: number): Promise<void> {
     const running = reads.get(role)
     if (running) return running
     const reading = (async () => {
       try {
-        await read(role)
+        await read(role, askedAt)
       } catch (error) {
         ctx.log(`reading the ${role} log failed: ${error instanceof B2cError ? error.code : 'error'}`)
       } finally {
         reads.delete(role)
+        // A read the worker's stop may have cut short stays asked, for the next worker.
+        if (!stopped) await ctx.store.delete(askedKey(role)).catch(() => undefined)
         await changed(role).catch(() => undefined)
       }
     })()
@@ -390,8 +430,10 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   async function list(role: Role): Promise<RoleErrors> {
-    // Taken first: an answer that says it is not reading holds nothing older than the last read.
+    // Taken first: an answer that says it is not reading holds nothing older than the last read,
+    // and nothing older than its version.
     const reading = reads.has(role)
+    const version = { worker, seq: versions.get(role) ?? 0 }
     const [{ instances }, rows, status, settings, root] = await Promise.all([ctx.b2c.instances(), seen.list(role), readStatus(role), rawSettings(), frameRoot()])
     const out: ErrorRow[] = []
     for (const row of rows) {
@@ -424,7 +466,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
       error: status.error,
       missedSince: status.missedSince,
       intervalMinutes: role === 'sandbox' ? intervalOf(settings[SETTING_INTERVAL]) : 0,
-      rows: out
+      rows: out,
+      version
     }
   }
 
@@ -465,8 +508,15 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
 
   const disposables: Disposable[] = [
     ctx.orca.panels.handle('errors.list', (input) => list(roleOf(input))),
-    ctx.orca.panels.handle('errors.refresh', (input) => {
+    ctx.orca.panels.handle('errors.refresh', async (input) => {
       const role = roleOf(input)
+      // A read that cannot run says why at once, and starts nothing.
+      const refusal = reads.has(role) ? null : refusalOf(await ctx.b2c.instances(), role)
+      if (refusal) {
+        await refused(role, refusal)
+        await changed(role)
+        return list(role)
+      }
       // Started, not awaited: the answer says it is reading, and `errors.changed` brings the rest.
       void refresh(role)
       return list(role)
@@ -497,8 +547,25 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     })
   ]
 
+  /** Runs again, shortly after the start, each read a restart cut short not long ago. */
+  async function resumeCutReads(): Promise<void> {
+    for (const role of ROLES) {
+      const askedAt = await ctx.store.get<SeenJson>(askedKey(role), null)
+      if (typeof askedAt !== 'number') continue
+      const age = now() - askedAt
+      if (age >= 0 && age < RESUME_MS) {
+        ctx.log(`the ${role} read was cut short by a restart: it runs again`)
+        resumed.push(setTimer(() => void (stopped || refresh(role, askedAt)), START_DELAY_MS))
+      } else {
+        await ctx.store.delete(askedKey(role))
+      }
+    }
+  }
+  const resumed: unknown[] = []
+
   void updateStatusBar()
   void schedule(START_DELAY_MS)
+  void resumeCutReads().catch(() => undefined)
 
   return {
     dispose() {
@@ -506,6 +573,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
       generation++
       if (timer !== null) clearTimer(timer)
       timer = null
+      for (const handle of resumed) clearTimer(handle)
       for (const disposable of disposables) disposable.dispose()
     }
   }

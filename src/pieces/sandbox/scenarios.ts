@@ -39,6 +39,7 @@ export const IDLE: SandboxStatus = {
   },
   workspaces: WORKSPACES,
   pendingDeletes: 0,
+  stuckDeletes: [],
   leftovers: [],
   problem: null
 }
@@ -93,6 +94,8 @@ export const scenarios: PieceScenarios = {
   sandboxNotReady: status({ ...IDLE, role: 'incomplete', sandbox: { state: 'unknown', following: null, reason: 'sandbox_not_ready', checkedAt: null } }),
   /** A removed workspace's version waits until another one is active; its last delete failed. */
   sandboxPendingDelete: status({ ...WATCHING, pendingDeletes: 1, problem: { action: 'delete', code: 'b2c_failed' } }),
+  // A removed worktree whose dw.json went with it: its version cannot be deleted, only forgotten.
+  sandboxDeleteConfigGone: status({ ...WATCHING, stuckDeletes: ['ws-old-checkout'] }),
   /** No workspace is listed. */
   sandboxNoWorkspaces: status({ ...IDLE, workspaces: [] }),
   /** Watching again after a restart, with no deploy since: the hint that changes meanwhile wait. */

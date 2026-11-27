@@ -4,7 +4,7 @@
 // example.com.
 import type { JsonValue } from 'orca'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { B2cError, type B2c, type B2cEvent, type Exit, type InstancesState, type RunOptions, type RunResult, type Running, type StartOptions } from '../../core/b2c'
+import { B2cError, type B2c, type B2cEvent, type ConfigChoice, type Exit, type InstancesState, type RunOptions, type RunResult, type Running, type StartOptions } from '../../core/b2c'
 import { createStore, type Store } from '../../core/store'
 import { createWorkspaces, listWorkspaces } from '../../core/workspaces'
 import type { Workspaces } from '../../core/piece'
@@ -14,6 +14,23 @@ import type { Timers } from './status'
 export const SANDBOX_HOST = 'sandbox-01.example.com'
 
 export const READY: InstancesState = { config: 'ok', instances: { sandbox: 'ready', development: 'absent', staging: 'absent', production: 'absent' } }
+export const MISSING: InstancesState = { config: 'missing', instances: { sandbox: 'absent', development: 'absent', staging: 'absent', production: 'absent' } }
+
+/**
+ * The dw.json of each folder, as `configRoot()` names one: only its sandbox host. With it, a
+ * FakeB2c reads its state, its host and its credentials from the folder a call names
+ * (`configRoot` option), else from the one `configRoot()` answers at that call, as the real
+ * runner does; a folder with none has no dw.json. `mains` gives a worktree's main checkout, whose
+ * dw.json it reads when it has none of its own. With `known`, a named folder that is neither one
+ * of those nor the main checkout of one is refused (`config_root_refused`), as the runner refuses
+ * a folder that is not a listed local workspace.
+ */
+export type ConfigFiles = {
+  configRoot: () => Promise<string | null>
+  hosts: Record<string, string>
+  mains?: Record<string, string>
+  known?: () => Promise<string[]>
+}
 
 /** For `assert.rejects`: the error carries this code. */
 export function coded(code: string): (error: unknown) => boolean {
@@ -54,7 +71,9 @@ export class FakeRunning implements Running {
 }
 
 export class FakeB2c implements B2c {
-  readonly runs: { args: string[]; options: RunOptions }[] = []
+  readonly runs: { args: string[]; options: RunOptions; root?: string | null }[] = []
+  /** Reads dw.json per folder instead of `state` (see `ConfigFiles`). */
+  files: ConfigFiles | null = null
   readonly watchers: FakeRunning[] = []
   readonly held: Deferred[] = []
   state: InstancesState = READY
@@ -66,6 +85,8 @@ export class FakeB2c implements B2c {
   hold = new Set<string>()
   /** Commands that fail, by their first words, with a code. */
   fail = new Map<string, string>()
+  /** What a command does on the sandbox before it fails (`fail`): a delete that times out goes on. */
+  sideEffects = new Map<string, (args: readonly string[]) => void>()
   /** The workspace folders that have a configuration file. */
   configured = new Set<string>()
 
@@ -81,9 +102,48 @@ export class FakeB2c implements B2c {
     return this.runs.map((run) => run.args.join(' '))
   }
 
+  /** The sandbox host of the dw.json a call reads, in `files` mode; undefined when there is none. */
+  private async fileHost(choice: ConfigChoice = {}): Promise<{ root: string | null; host: string | undefined }> {
+    if (typeof choice.configRoot === 'string') await this.checkRoot(choice.configRoot)
+    const root = choice.configRoot !== undefined ? choice.configRoot : this.files ? await this.files.configRoot() : null
+    if (root === null || !this.files) return { root, host: undefined }
+    const main = this.files.mains?.[root]
+    return { root, host: this.files.hosts[root] ?? (main !== undefined ? this.files.hosts[main] : undefined) }
+  }
+
+  /** As the runner: a named folder must be a known one or the main checkout of one. */
+  private async checkRoot(root: string): Promise<void> {
+    if (!this.files?.known) return
+    const known = await this.files.known()
+    if (known.includes(root) || known.some((folder) => this.files?.mains?.[folder] === root)) return
+    throw new B2cError('config_root_refused')
+  }
+
+  async configFolder(root: string): Promise<string | null> {
+    if (!this.files) return root
+    await this.checkRoot(root)
+    if (this.files.hosts[root] !== undefined) return root
+    const main = this.files.mains?.[root]
+    return main !== undefined && this.files.hosts[main] !== undefined ? main : null
+  }
+
   async run(args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-    this.runs.push({ args: [...args], options })
-    for (const [key, code] of this.fail) if (this.matches(args, key)) throw new B2cError(code as never)
+    // Recorded at once, in the order called; the folder its dw.json came from once it is read.
+    const record: (typeof this.runs)[number] = { args: [...args], options }
+    this.runs.push(record)
+    if (this.files) {
+      // A named folder is recorded at once, so a call not awaited still shows which it named.
+      if (options.configRoot !== undefined) record.root = options.configRoot
+      const { root, host } = await this.fileHost(options)
+      record.root = root
+      // The runner refuses a role that dw.json does not configure, before starting anything.
+      if (options.role === 'sandbox' && host === undefined) throw new B2cError('role_not_configured')
+    }
+    for (const [key, code] of this.fail) {
+      if (!this.matches(args, key)) continue
+      for (const [effectKey, effect] of this.sideEffects) if (this.matches(args, effectKey)) effect(args)
+      throw new B2cError(code as never)
+    }
     if ([...this.hold].some((key) => this.matches(args, key))) {
       let resolve!: (json?: unknown) => void
       let reject!: (code: string) => void
@@ -134,14 +194,16 @@ export class FakeB2c implements B2c {
   async version(): Promise<string | null> {
     return '2.11.0'
   }
-  async instances(): Promise<InstancesState> {
+  async instances(options: ConfigChoice = {}): Promise<InstancesState> {
+    if (this.files) return (await this.fileHost(options)).host === undefined ? MISSING : READY
     return this.state
   }
   async mask(text: string): Promise<string> {
     return text
   }
-  async isHost(role: string, value: unknown): Promise<boolean> {
-    return role === 'sandbox' && typeof value === 'string' && value.toLowerCase() === SANDBOX_HOST
+  async isHost(role: string, value: unknown, options: ConfigChoice = {}): Promise<boolean> {
+    const host = this.files ? (await this.fileHost(options).catch(() => ({ host: undefined }))).host : SANDBOX_HOST
+    return role === 'sandbox' && typeof value === 'string' && host !== undefined && value.toLowerCase() === host
   }
 }
 

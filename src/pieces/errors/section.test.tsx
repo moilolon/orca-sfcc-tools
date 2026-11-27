@@ -247,6 +247,35 @@ test('Read now shows the read running at once, and its rows when the worker tell
   assert.ok(panel.find({ type: 'Button', text: 'Read now' }))
 })
 
+test('an older answer that arrives after a newer one is dropped: Read now never sticks on Reading…', async () => {
+  const version = (seq: number) => ({ worker: 'worker-a', seq })
+  let latest = answer('sandbox', { version: version(1) })
+  const host = mockHost({
+    capabilities: CAPABILITIES,
+    requests: {
+      'core.status': () => READY_STATUS,
+      'errors.list': () => latest,
+      // The answer to Read now is slow: it was made while the read ran (still reading, the old
+      // time), and comes back after the newer list.
+      'errors.refresh': () => new Promise<RoleErrors>((resolve) => setTimeout(() => resolve(answer('sandbox', { reading: true, version: version(2) })), 50))
+    }
+  })
+  panel = await mount(panelModule, { host, locale: 'en', persisted: { plugin: { view: 'errors' } } })
+  const pressing = panel.press({ type: 'Button', text: 'Read now' })
+  // The read ends first: the event brings the newer list at once.
+  latest = answer('sandbox', { lastRead: NOW, rows: [row('late')], version: version(3) })
+  await Promise.all([pressing, panel.post('errors.changed', { role: 'sandbox', newCount: 1 })])
+  // The older answer arrived last, still reading, with the old time: it was dropped.
+  assert.ok(panel.find({ type: 'Button', text: 'Read now' }), 'not stuck on Reading…')
+  assert.equal(panel.find({ type: 'Button', text: 'Reading…' }), null)
+  assert.ok(panel.find({ text: 'TypeError: late is undefined' }))
+
+  // An answer of another worker (Orca restarted it) is always kept, whatever its number.
+  latest = answer('sandbox', { rows: [row('restarted')], version: { worker: 'worker-b', seq: 1 } })
+  await panel.post('errors.changed', { role: 'sandbox', newCount: 1 })
+  assert.ok(panel.find({ text: 'TypeError: restarted is undefined' }))
+})
+
 test('the worker telling of a change redraws the environment on screen', async () => {
   let rows: ErrorRow[] = []
   const { panel } = await open((role) => answer(role, { rows }))

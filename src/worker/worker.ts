@@ -7,7 +7,7 @@ import { translator } from '../core/i18n'
 import { PIECE_IDS, type Disposable, type PieceContext, type PieceId, type WorkerPiece } from '../core/piece'
 import { createSettings } from '../core/settings'
 import { createStore } from '../core/store'
-import { createWorkspaces } from '../core/workspaces'
+import { createWorkspaces, isLocal } from '../core/workspaces'
 import type { CoreStatus } from '../protocol'
 import { WORKER_PIECES } from './pieces'
 
@@ -47,7 +47,9 @@ export function createActivate(overrides: WorkerOverrides = {}) {
     logLine = log
     // The bound was read above; the rest of the overrides describe the machine b2c runs on.
     const { pieces = WORKER_PIECES, disposeBoundMs: _bound, ...machine } = overrides
-    const b2c = createB2c({ ...machine, settings, configRoot: () => workspaces.configRoot(), log: (message) => log(`[core] ${message}`) })
+    // A call may name only the folder of a local workspace Orca lists (or its main checkout).
+    const knownRoots = async () => (await workspaces.list()).filter(isLocal).map((workspace) => workspace.path)
+    const b2c = createB2c({ ...machine, settings, configRoot: () => workspaces.configRoot(), knownRoots, log: (message) => log(`[core] ${message}`) })
     const t = translator(() => locale)
 
     const handlers: Disposable[] = [

@@ -116,6 +116,19 @@ export async function locateConfig(root: string, configFile: string, fs: FileSys
 }
 
 /**
+ * The folder whose dw.json `locateConfig` reads for `root`: `root` itself (always, when the
+ * `configFile` setting names a file), else its main checkout when only that one holds a
+ * `dw.json`; null when neither does.
+ */
+export async function configFolderOf(root: string, configFile: string, fs: FileSystem = nodeFiles): Promise<string | null> {
+  if (configFile.trim()) return root
+  if ((await fs.readText(join(root, 'dw.json'))) !== null) return root
+  const main = await mainCheckoutOf(root, fs)
+  if (main && (await fs.readText(join(main, 'dw.json'))) !== null) return main
+  return null
+}
+
+/**
  * Whether a workspace has a file to read, by the rule of `locateConfig`, without reading it: only
  * whether each place holds a file (a worktree's `.git` file is read to find its main checkout).
  */

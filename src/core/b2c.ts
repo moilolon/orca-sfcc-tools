@@ -20,8 +20,8 @@
 import { spawn as nodeSpawn } from 'node:child_process'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { extname, posix } from 'node:path'
-import { DW_KEYS, hasConfigFile, loadConfig, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
+import { extname, posix, resolve as resolvePath, win32 } from 'node:path'
+import { configFolderOf, DW_KEYS, hasConfigFile, loadConfig, mainCheckoutOf, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
 import { commandOf, guard, isRole, refusedFlag, ROLES, topicOf, type ConfigState, type Role, type RoleState } from './instances'
 import type { Logger } from './piece'
 import type { Settings } from './settings'
@@ -40,6 +40,7 @@ export type B2cErrorCode =
   | 'unsafe_argument'
   | 'cwd_not_found'
   | 'config_invalid'
+  | 'config_root_refused'
 
 /**
  * Its message is its code and nothing else. `detail` is b2c's own error text when it gave one,
@@ -102,7 +103,17 @@ export type RunOptions = {
   signal?: AbortSignal
   /** Default two minutes. */
   timeoutMs?: number
-}
+} & ConfigChoice
+
+/**
+ * The folder whose dw.json one call reads, named by the caller (null: none, so no role is
+ * configured). Left out, it is the one `configRoot()` names at that moment. A piece that follows
+ * one operation over several calls names the folder it began with, so a focus change in between
+ * does not give it another file; nothing else changes for the other calls. Only the folder of a
+ * local workspace Orca lists, or the main checkout of one, may be named: any other is refused
+ * with `config_root_refused` before anything is read.
+ */
+export type ConfigChoice = { configRoot?: string | null }
 
 /**
  * `json` is the parsed stdout; undefined when b2c printed nothing (`code activate`, `delete`).
@@ -171,7 +182,7 @@ export type B2c = {
   /** b2c's version, `null` when it answers something unexpected. */
   version(): Promise<string | null>
   /** The state of dw.json and of each role. The only thing the rest of the plugin learns of it. */
-  instances(): Promise<InstancesState>
+  instances(options?: ConfigChoice): Promise<InstancesState>
   /**
    * Whether the workspace at `root` (a folder of this machine) has a configuration file to read,
    * by the same rule as the one read for it (the setting, else its `dw.json`, else its main
@@ -192,13 +203,24 @@ export type B2c = {
    * anything that is not a text, and it never throws. It lets a piece find its own instance in
    * a list b2c returns without ever holding the host.
    */
-  isHost(role: Role, value: unknown): Promise<boolean>
+  isHost(role: Role, value: unknown, options?: ConfigChoice): Promise<boolean>
+  /**
+   * The folder whose dw.json a call naming `root` reads: `root` itself, or its main checkout when
+   * only that one holds the file; null when neither does. A piece keeps it to name that file
+   * later, even once `root` is gone. Refused (`config_root_refused`) like a named root.
+   */
+  configFolder(root: string): Promise<string | null>
 }
 
 export type B2cDeps = {
   settings: Settings
   /** The workspace whose dw.json is read. */
   configRoot: () => Promise<string | null>
+  /**
+   * The folders of the local workspaces Orca lists: a call may name one of them, or the main
+   * checkout of one, as the folder whose dw.json it reads. None: no call may name a folder.
+   */
+  knownRoots?: () => Promise<string[]>
   log?: Logger
   spawn?: Spawner
   platform?: string
@@ -941,9 +963,31 @@ export function createB2c(deps: B2cDeps): B2c {
     )
   }
 
-  async function readConfig(): Promise<LoadedConfig> {
+  /** A folder as compared: absolute, one kind of slash, no trailing one, in one case on Windows. */
+  function folderKey(path: string): string {
+    const absolute = platform === 'win32' ? win32.resolve(path) : resolvePath(path)
+    const plain = absolute.replace(/\\/g, '/').replace(/\/+$/, '')
+    return platform === 'win32' ? plain.toLowerCase() : plain
+  }
+
+  /** Refuses a named folder that is neither a listed local workspace nor the main checkout of one. */
+  async function checkRoot(root: string): Promise<void> {
+    const known = deps.knownRoots ? await deps.knownRoots().catch(() => [] as string[]) : []
+    const wanted = folderKey(root)
+    for (const folder of known) {
+      if (folderKey(folder) === wanted) return
+      const main = await mainCheckoutOf(folder, deps.fs).catch(() => null)
+      if (main && folderKey(main) === wanted) return
+    }
+    throw new B2cError('config_root_refused')
+  }
+
+  /** The file of `choice.configRoot` when the caller names one, else of the folder `configRoot()` names now. */
+  async function readConfig(choice: ConfigChoice = {}): Promise<LoadedConfig> {
     const values = await deps.settings.read()
-    const config = await loadConfig({ root: await deps.configRoot(), configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
+    if (typeof choice.configRoot === 'string') await checkRoot(choice.configRoot)
+    const root = choice.configRoot !== undefined ? choice.configRoot : await deps.configRoot()
+    const config = await loadConfig({ root, configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
     for (const role of ROLES) masker.remember(config.roles[role].vars)
     everRead = true
     return config
@@ -953,14 +997,14 @@ export function createB2c(deps: B2cDeps): B2c {
    * Guard, flags, credentials, arguments, the folder and the command to spawn; throws a B2cError
    * before any start.
    */
-  async function prepare(args: readonly string[], options: { role?: Role; cwd?: string }, flag: '--json' | '--jsonl' | null) {
+  async function prepare(args: readonly string[], options: { role?: Role; cwd?: string } & ConfigChoice, flag: '--json' | '--jsonl' | null) {
     const { role } = options
     const verdict = guard(args, role)
     if (!verdict.ok) throw new B2cError(verdict.code)
     // `--version` is a command of its own, not a flag any other command may carry.
     const flagAt = commandOf(args) === '--version' ? -1 : refusedFlag(args)
     if (flagAt !== -1) throw new B2cError('flag_not_allowed', { argument: flagAt })
-    const config = await readConfig()
+    const config = await readConfig(options)
     const known = valuesOf(config)
     const mask = masker.mask
     let vars: B2cEnvironment = {}
@@ -1164,8 +1208,8 @@ export function createB2c(deps: B2cDeps): B2c {
       return parseVersion(result.stdout)
     },
 
-    async instances() {
-      const config = await readConfig()
+    async instances(options = {}) {
+      const config = await readConfig(options)
       const instances = {} as Record<Role, RoleState>
       for (const role of ROLES) instances[role] = config.roles[role].state
       return { config: config.state, instances }
@@ -1186,10 +1230,15 @@ export function createB2c(deps: B2cDeps): B2c {
       return masker.mask(text)
     },
 
-    async isHost(role, value) {
+    async configFolder(root) {
+      await checkRoot(root)
+      return configFolderOf(root, (await deps.settings.read()).configFile, deps.fs)
+    },
+
+    async isHost(role, value, options = {}) {
       if (typeof value !== 'string' || !isRole(role)) return false
       try {
-        const host = (await readConfig()).roles[role].vars.SFCC_SERVER
+        const host = (await readConfig(options)).roles[role].vars.SFCC_SERVER
         return !!host && host.trim().toLowerCase() === value.trim().toLowerCase()
       } catch {
         return false

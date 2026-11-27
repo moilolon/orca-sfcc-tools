@@ -23,6 +23,8 @@ const refused = atom<{ name: ActionName; code: string; workspaceId?: string } | 
 const chosen = atom<string | null>(null)
 /** The left-behind version whose delete was pressed, waiting for the confirming *Delete*. */
 const chosenLeftover = atom<string | null>(null)
+/** The version that cannot be deleted whose forget was pressed, waiting for the confirming *Forget*. */
+const chosenStuck = atom<string | null>(null)
 /** How many workspaces of the project, and of other projects, are drawn: a long list is paged. */
 const shownInProject = atom(PAGE_SIZE)
 const shownElsewhere = atom(PAGE_SIZE)
@@ -38,7 +40,7 @@ function keepStatus(next: SandboxStatus): void {
 }
 
 type ActionRequest = 'sandbox.refresh' | 'sandbox.release' | 'sandbox.deploy' | 'sandbox.reload' | 'sandbox.start' | 'sandbox.stop'
-type ActionName = ActionRequest | 'sandbox.pick' | 'sandbox.forget'
+type ActionName = ActionRequest | 'sandbox.pick' | 'sandbox.forget' | 'sandbox.dropDelete'
 
 /** Refusals whose fix is in the setup view: their notice leads there. */
 const SETUP_CODES: ReadonlySet<string> = new Set(['sandbox_not_ready', 'config_missing', 'config_invalid', 'credentials_missing', 'role_not_configured', 'value_invalid', 'b2c_not_found'])
@@ -70,6 +72,7 @@ async function load(): Promise<void> {
   }
 }
 
+/** `workspaceId` names the workspace of a pick or a forget, and the code version of a dropDelete. */
 async function act(name: ActionName, workspaceId?: string): Promise<void> {
   set(pending, name)
   set(refused, null)
@@ -77,10 +80,13 @@ async function act(name: ActionName, workspaceId?: string): Promise<void> {
     const next =
       name === 'sandbox.pick' || name === 'sandbox.forget'
         ? await plugin.request(name, { workspaceId: workspaceId ?? '' }, { timeoutMs: 90_000 })
-        : await plugin.request(name, {}, { timeoutMs: 90_000 })
+        : name === 'sandbox.dropDelete'
+          ? await plugin.request(name, { codeVersion: workspaceId ?? '' }, { timeoutMs: 90_000 })
+          : await plugin.request(name, {}, { timeoutMs: 90_000 })
     keepStatus(next)
     if (name === 'sandbox.pick') set(chosen, null)
     if (name === 'sandbox.forget') set(chosenLeftover, null)
+    if (name === 'sandbox.dropDelete') set(chosenStuck, null)
   } catch (error) {
     set(refused, { name, code: codeOf(error), workspaceId })
   } finally {
@@ -325,6 +331,43 @@ function LeftoversGroup({ current, locale, ready, busy }: { current: SandboxStat
   )
 }
 
+/**
+ * Queued versions whose workspace's dw.json is gone: never deleted with another file, so a person
+ * may only forget one, by its button and then the confirming one. It may stay on its sandbox.
+ */
+function StuckGroup({ current, locale, busy }: { current: SandboxStatus; locale: string; busy: boolean }) {
+  const w = (key: SandboxMessageKey) => t(messages, locale, key)
+  const stuck = current.stuckDeletes ?? []
+  if (stuck.length === 0) return null
+  const picked = read(chosenStuck)
+  return (
+    <Group title={w('groupStuck')}>
+      {stuck.slice(0, MAX_ROWS).map((version) => {
+        const confirming = picked === version
+        const actions = confirming ? (
+          <Row align="center" gap="xs">
+            <Button size="xs" variant="solid" icon="close" disabled={busy} onPress={() => void act('sandbox.dropDelete', version)}>
+              {w('forgetVersion')}
+            </Button>
+            <IconButton icon="close" size="xs" variant="ghost" label={w('cancel')} onPress={() => set(chosenStuck, null)} />
+          </Row>
+        ) : (
+          <IconButton icon="close" size="xs" variant="ghost" label={w('forgetVersion')} disabled={busy} onPress={() => set(chosenStuck, version)} />
+        )
+        return <ListRow key={version} tone="attention" title={version} note={w('noteConfigGone')} current={confirming} actions={actions} />
+      })}
+      {stuck.length > MAX_ROWS ? (
+        <Text size="sm" muted>
+          {t(messages, locale, 'notShown', { count: stuck.length - MAX_ROWS })}
+        </Text>
+      ) : null}
+      <Text size="sm" muted>
+        {w('stuckGuidance')}
+      </Text>
+    </Group>
+  )
+}
+
 /** What helps after a side action failed on its own: trying it again, or a deploy for a lost change. */
 function problemFix(action: SandboxAction, locale: string, busy: boolean): NoticeAction | undefined {
   const w = (key: SandboxMessageKey) => t(messages, locale, key)
@@ -356,6 +399,7 @@ export function renderSandbox(locale: string): OrcaNode {
       <SandboxGroup current={current} locale={locale} ready={ready} busy={busy} />
       <WorkspacesGroup current={current} locale={locale} ready={ready} busy={busy} />
       <LeftoversGroup current={current} locale={locale} ready={ready} busy={busy} />
+      <StuckGroup current={current} locale={locale} busy={busy} />
     </Stack>
   )
 }
@@ -381,4 +425,5 @@ export function resetSandboxView(): void {
   set(shownElsewhere, PAGE_SIZE)
   set(chosen, null)
   set(chosenLeftover, null)
+  set(chosenStuck, null)
 }
