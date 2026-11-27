@@ -29,6 +29,7 @@ time.
 | 🚦 | **Sandbox** | Started, stopped or busy, with start and stop, and which workspace uploads to which code version, in the status bar |
 | 🪵 | **Errors** | The new errors of each environment's log, one row per error however often it repeats, until marked as seen; each with its detail, its stack trace and a breakpoint on any of its frames; the sandbox's count in the status bar |
 | 🐞 | **Debugger** | Breakpoints on the sandbox, set by clicking a line of a script, and the threads, call stack and variables of a request halted on one, with continue and step |
+| ✏️ | **Editor** | An editor of its own for templates, scripts, bundles and site XML: opens `.isml` by default and the rest from the view toggle or `Alt+Shift+E`; every file the plugin opens goes to it |
 
 ---
 

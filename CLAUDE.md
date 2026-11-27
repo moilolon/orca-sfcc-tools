@@ -26,7 +26,12 @@ Changing it needs the owner's yes.
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
       namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
       with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish),
-      `open-file.ts` (opens a file of a workspace at a line through `orca file open`).
+      `open-file.ts` (opens a file of a workspace at a line through `orca file open`; with
+      `inEditor`, a file of a type the plugin's editor takes (`EDITOR_EXTENSIONS`) through
+      `orca plugin open <plugin-key> --editor <file>`, after recording the file and its line in
+      `EDITOR_OPENS` for the editor to find; the key is found at run time in
+      `orca plugin list --json`, the one running plugin whose key ends with `.sfcc-tools`, and
+      without it, or when that call fails, the file opens through `orca file open`).
       `b2c.ts`, `open-file.ts` and the engine's `checkout/git.ts` are the only modules that start
       a process: `open-file.ts` imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe`
       (or `orca`) directly, never through a shell or a `.cmd`, with the worker's environment plus
@@ -316,6 +321,41 @@ Changing it needs the owner's yes.
       (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to `DESCRIBE_WAIT_MS` for
       a description read through `dw/describe.ts`. `query/performance.test.ts` times each on a
       5,000-line script and template.
+    - `src/pieces/editor/` (phase 7.1, the surface): the plugin's editor, `customEditors` of its
+      manifest, `frame: "isolated"`: the default for `.isml`, an option of the view toggle for
+      `.js`, `.xml` and `.properties` (Orca keeps `.js` for its own editor whatever the manifest
+      says). `main.ts` is the entry Orca loads in the frame: it imports only relative files (a test
+      walks them: the piece's frame modules, `core/i18n.ts` and the engine's `js/` and `isml/`,
+      never Node or worker code). `surface/` is the editing surface written here (spike S9):
+      `buffer.ts` (lines with the break written after each, so CRLF, LF, a lone CR and a BOM come
+      back as read), `history.ts` (its own undo: Orca keeps none for a plugin's editor),
+      `model.ts` (selection and every command, no DOM: what typing does is tested in Node),
+      `view.ts` (a hidden textarea at the caret takes keys, IME and the clipboard; only the lines
+      in view and `OVERSCAN` around them are in the DOM; a gutter with numbers and a mark column
+      for 7.3; for 7.2 a layer of underlines drawn from ranges, a pop-up layer, `caretBox()` and
+      `onCaretMove`, without their features). `highlight/` colours line by line with a state
+      carried from line to line, cached per line and re-lexed only from a change until the state
+      agrees again, never past what is drawn: JavaScript through the engine's own `Lexer`, ISML
+      (tags, values, `${…}` also inside values and among attributes, comments, `<isscript>` and
+      `<script>` through the JavaScript one), `.xml` and `.properties` with small lexers of their
+      own. The frame gets no file name, so the language is guessed from the text until the file is
+      named. `sync.ts` is the only code that talks to Orca about the document
+      (`orca.document.session`), with the three-way line merge of `merge.ts` (an overlap keeps the
+      person's version and is said in a one-line notice). Typography and theme come from Orca
+      (`editor.readTypography`, `editor.typography.changed`, `--orca-*`, `theme`); syntax colours
+      are the editor's own, one set per scheme. **Which file it shows** (spike S3):
+      `editor.locate { workspaceId, text | hash }` answers `{ path, line?, column? }`,
+      `{ candidates, more }` or null, from (a) a file the plugin opened in its editor that holds
+      this text now (with its line, given once), (b) the last `editor.save.before` of this text in
+      the workspace (the hook observes only and never refuses), (c) the SHA-256 of every `.isml`,
+      `.js`, `.xml` and `.properties` of the workspace (`locate.ts`, built in the background,
+      refreshed by file time on a miss). Identical files: a picker in a notice, the choice kept
+      per workspace and hash (`editor.choose`). Not named: a one-line notice, and
+      `identity.ts` says so to the features that read other files (7.2). The command
+      `editor.openInEditor` ("SFCC: Open in SFCC editor", `Alt+Shift+E`; `Mod+Alt+E` is AltGr
+      text on Windows, so Orca never matches it on a Spanish layout) opens the file last saved in
+      the focused workspace in the editor: no host call gives the focused tab's path. The errors'
+      and the debugger's jumps open their file with `inEditor`. The piece has no panel view.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

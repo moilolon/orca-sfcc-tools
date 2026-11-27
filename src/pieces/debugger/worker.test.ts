@@ -292,7 +292,8 @@ test('when Orca’s command line cannot run, the file still opens through editor
   for (const orca of ['missing', 'fails'] as const) {
     const { worker, opened } = await mount({ orca })
     assert.deepEqual(await worker.request('debugger.open', { path: PAGE, line: 3 }), { opened: true }, orca)
-    assert.equal(opened.length, orca === 'missing' ? 0 : 1, `${orca}: started only when found`)
+    // A script opens in the plugin's editor first: `plugin list` looks for its key, then `file open`.
+    assert.equal(opened.filter((call) => call.args[0] === 'file').length, orca === 'missing' ? 0 : 1, `${orca}: started only when found`)
     // editor.open takes the path relative to the workspace, and no line.
     assert.deepEqual(worker.host.calls.filter((call) => call.method === 'editor.open').at(-1)?.params, { workspaceId: 'w1', path: PAGE }, orca)
   }

@@ -16,6 +16,14 @@
 //
 // Only a file inside the workspace is opened: the path is resolved, through symbolic links too,
 // and refused when it leaves the workspace's folder.
+//
+// With `inEditor`, a file of a type the plugin's own editor takes (`EDITOR_EXTENSIONS`) opens in
+// that editor, through `orca plugin open <plugin-key> --editor <file>`, after the file and the line
+// are recorded in `EDITOR_OPENS`: the editor gets no path and no line from Orca, so it asks its
+// worker, which finds them there (src/pieces/editor/). The plugin's key is `<publisher>.<id>` and
+// differs between a development folder and an installed plugin, so it is found at run time in
+// `orca plugin list --json`: the one running plugin whose key ends with the manifest's id. When it
+// cannot be found, or that call fails, the file opens through `orca file open` as before.
 import { spawn as nodeSpawn } from 'node:child_process'
 import { realpath, stat } from 'node:fs/promises'
 import { homedir as osHomedir } from 'node:os'
@@ -33,6 +41,8 @@ export type OpenFileRequest = {
   column?: number
   /** Brings the person to the file. Only when they asked to see it. */
   focus?: boolean
+  /** Opens it in the plugin's own editor when that editor takes its type (`EDITOR_EXTENSIONS`). */
+  inEditor?: boolean
 }
 
 export type OpenFileFailure = 'outside_workspace' | 'not_found' | 'orca_not_found' | 'orca_shim_refused' | 'orca_failed' | 'orca_timeout'
@@ -54,7 +64,7 @@ export type OpenFileChild = {
   readonly stdout: { on(event: 'data', listener: (chunk: unknown) => void): unknown } | null
   readonly stderr: { on(event: 'data', listener: (chunk: unknown) => void): unknown } | null
   on(event: 'error', listener: (error: Error) => void): unknown
-  on(event: 'exit', listener: (code: number | null) => void): unknown
+  on(event: 'exit' | 'close', listener: (code: number | null) => void): unknown
   kill(): boolean
 }
 
@@ -74,9 +84,61 @@ export type OpenFileDeps = {
   /** Default 15 seconds. */
   timeoutMs?: number
   log?: Logger
+  /** Where a file opened in the plugin's editor is recorded; default `EDITOR_OPENS`. */
+  editorOpens?: EditorOpens
+  now?: () => number
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
+
+/** The file types the plugin's own editor opens: the extensions of its `customEditors`. */
+export const EDITOR_EXTENSIONS: readonly string[] = ['.isml', '.js', '.xml', '.properties']
+
+/** The plugin's `id` in its manifest; its key is `<publisher>.<id>`. */
+export const PLUGIN_ID = 'sfcc-tools'
+
+/** How long a listing's output is awaited after its process exited. */
+const CLOSE_GRACE_MS = 500
+/** How long a failed search for the plugin's key is remembered before it is tried again. */
+export const KEY_RETRY_MS = 60_000
+
+/** The most `orca plugin list --json` may print; past it, the list is not read. */
+const MAX_LIST_OUTPUT = 4 * 1024 * 1024
+
+/** A file opened in the plugin's editor: its workspace, its real path, the line to show. */
+export type EditorOpen = { root: string; file: string; line?: number; column?: number; at: number }
+
+/** The files opened in the plugin's editor, newest last, the last `EditorOpens.MAX` of them. */
+export class EditorOpens {
+  static readonly MAX = 20
+  private readonly entries: EditorOpen[] = []
+
+  record(entry: EditorOpen): void {
+    const same = this.entries.findIndex((e) => e.root === entry.root && e.file === entry.file)
+    if (same >= 0) this.entries.splice(same, 1)
+    this.entries.push(entry)
+    if (this.entries.length > EditorOpens.MAX) this.entries.shift()
+  }
+
+  /** The files opened under a workspace's folder, newest first. */
+  under(root: string, platform: string = process.platform): EditorOpen[] {
+    const fold = (value: string) => (platform === 'win32' ? value.toLowerCase().replace(/\\/g, '/') : value)
+    return this.entries.filter((e) => fold(e.root) === fold(root)).reverse()
+  }
+
+  /** Forgets an entry's line once an editor showed it: a frame shown again stays where it is. */
+  takeLine(entry: EditorOpen): void {
+    delete entry.line
+    delete entry.column
+  }
+
+  clear(): void {
+    this.entries.length = 0
+  }
+}
+
+/** Shared by every piece of the worker: the errors' and the debugger's jumps record here, the editor reads. */
+export const EDITOR_OPENS = new EditorOpens()
 
 async function defaultIsFile(path: string): Promise<boolean> {
   try {
@@ -141,6 +203,39 @@ export function openArguments(file: string, root: string, { line, column, focus 
   return args
 }
 
+/** The arguments of `orca plugin open`: the plugin, `--editor` and the file; nothing else. */
+export function pluginOpenArguments(key: string, file: string): string[] {
+  return ['plugin', 'open', key, '--editor', file, '--json']
+}
+
+/** Whether the plugin's editor takes a file, by its extension. */
+export function editorTakes(file: string): boolean {
+  const lower = file.toLowerCase()
+  return EDITOR_EXTENSIONS.some((extension) => lower.endsWith(extension))
+}
+
+/**
+ * The plugin's key in what `orca plugin list --json` printed: the one running plugin whose key is
+ * `<publisher>.<PLUGIN_ID>`. Null when none runs, or more than one does (a development copy and an
+ * installed one, both enabled): then nothing tells which one this worker is.
+ */
+export function pluginKeyIn(listed: string): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(listed)
+  } catch {
+    return null
+  }
+  const result = (parsed as { result?: { plugins?: unknown } } | null)?.result
+  const plugins: unknown[] = Array.isArray(result?.plugins) ? result.plugins : []
+  const pattern = new RegExp(`^[a-z0-9][a-z0-9-]*\\.${PLUGIN_ID}$`, 'i')
+  const running = plugins.filter((plugin): plugin is { pluginKey: string } => {
+    const p = plugin as { pluginKey?: unknown; status?: unknown } | null
+    return typeof p?.pluginKey === 'string' && pattern.test(p.pluginKey) && p.status === 'running'
+  })
+  return running.length === 1 ? running[0].pluginKey : null
+}
+
 /**
  * The Orca to start: the one beside the running Orca, else `orca` on the PATH. On Windows only
  * `orca.exe` is started; a `.cmd` or `.bat` found first on the PATH is refused.
@@ -164,25 +259,47 @@ export async function findOrca({ execPath, platform, env, isFile }: { execPath: 
   return { refused: 'orca_not_found' }
 }
 
-/** Waits for the child to end: `ok` for exit 0, `timeout` past the limit (it is then stopped). */
-function waitFor(child: OpenFileChild, timeoutMs: number): Promise<'ok' | 'failed' | 'timeout'> {
+type Ran = { result: 'ok' | 'failed' | 'timeout'; stdout: string }
+
+/**
+ * Waits for the child to end: `ok` for exit 0, `timeout` past the limit (it is then stopped). With
+ * `capture`, what it printed on stdout is kept (past `MAX_LIST_OUTPUT` it is dropped and the run
+ * is `failed`) and the wait lasts until its pipes close, or `CLOSE_GRACE_MS` after it exits (a
+ * process it started may hold them open); stderr is never kept.
+ */
+function waitFor(child: OpenFileChild, timeoutMs: number, capture: boolean): Promise<Ran> {
   return new Promise((done) => {
     let settled = false
+    const chunks: string[] = []
+    let size = 0
+    let overflow = false
     const finish = (result: 'ok' | 'failed' | 'timeout') => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      done(result)
+      done({ result: overflow && result === 'ok' ? 'failed' : result, stdout: chunks.join('') })
     }
     const timer = setTimeout(() => {
       child.kill()
       finish('timeout')
     }, timeoutMs)
-    // Both pipes are read, so the child never blocks on a full one; what it prints is not kept.
-    child.stdout?.on('data', () => {})
+    // Both pipes are read, so the child never blocks on a full one.
+    child.stdout?.on('data', (chunk) => {
+      if (!capture || overflow) return
+      const text = typeof chunk === 'string' ? chunk : String(chunk)
+      size += text.length
+      if (size > MAX_LIST_OUTPUT) {
+        overflow = true
+        chunks.length = 0
+      } else chunks.push(text)
+    })
     child.stderr?.on('data', () => {})
     child.on('error', () => finish('failed'))
-    child.on('exit', (code) => finish(code === 0 ? 'ok' : 'failed'))
+    if (!capture) child.on('exit', (code) => finish(code === 0 ? 'ok' : 'failed'))
+    else {
+      child.on('close', (code) => finish(code === 0 ? 'ok' : 'failed'))
+      child.on('exit', (code) => void setTimeout(() => finish(code === 0 ? 'ok' : 'failed'), CLOSE_GRACE_MS))
+    }
   })
 }
 
@@ -197,6 +314,22 @@ export function createOpenFile(deps: OpenFileDeps = {}): OpenFile {
   const spawn: OpenFileSpawner = deps.spawn ?? ((file, args, options) => nodeSpawn(file, args, options))
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const api = pathFor(platform)
+  const editorOpens = deps.editorOpens ?? EDITOR_OPENS
+  const now = deps.now ?? (() => Date.now())
+  // The plugin's key, once found; not finding it is tried again after `KEY_RETRY_MS`.
+  let key: string | null = null
+  let missedAt = -Infinity
+  async function pluginKey(run: (args: string[], capture: boolean) => Promise<Ran>): Promise<string | null> {
+    if (key !== null) return key
+    if (now() - missedAt < KEY_RETRY_MS) return null
+    const listed = await run(['plugin', 'list', '--json'], true)
+    key = listed.result === 'ok' ? pluginKeyIn(listed.stdout) : null
+    if (key === null) {
+      missedAt = now()
+      deps.log?.('the plugin key was not found; files open in Orca’s editor')
+    }
+    return key
+  }
 
   return async function openFile(request) {
     const root = api.resolve(request.root)
@@ -211,20 +344,38 @@ export function createOpenFile(deps: OpenFileDeps = {}): OpenFile {
     const opened = api.join(root, api.relative(realRoot, realFile))
     const orca = await findOrca({ execPath: deps.execPath ?? process.execPath, platform, env, isFile })
     if ('refused' in orca) return { opened: false, reason: orca.refused }
-    let child: OpenFileChild
-    try {
-      child = spawn(orca.file, openArguments(opened, root, request), {
-        cwd: root,
-        env: orcaEnvironment(env, { platform, homedir: home }),
-        shell: false,
-        windowsVerbatimArguments: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-    } catch {
-      return { opened: false, reason: 'orca_failed' }
+    const run = async (args: string[], capture: boolean): Promise<Ran> => {
+      let child: OpenFileChild
+      try {
+        child = spawn(orca.file, args, {
+          cwd: root,
+          env: orcaEnvironment(env, { platform, homedir: home }),
+          shell: false,
+          windowsVerbatimArguments: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+      } catch {
+        return { result: 'failed', stdout: '' }
+      }
+      return waitFor(child, timeoutMs, capture)
     }
-    const result = await waitFor(child, timeoutMs)
+    if (request.inEditor && editorTakes(opened)) {
+      const found = await pluginKey(run)
+      if (found !== null) {
+        // Recorded first: the editor asks for it as soon as it mounts.
+        const whole = (value: number | undefined): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0
+        const line = whole(request.line) ? request.line : undefined
+        const column = line !== undefined && whole(request.column) ? request.column : undefined
+        editorOpens.record({ root, file: opened, line, column, at: now() })
+        const { result } = await run(pluginOpenArguments(found, opened), false)
+        if (result === 'ok') return { opened: true }
+        // After a timeout the first call may still land: nothing is opened twice.
+        if (result === 'timeout') return { opened: false, reason: 'orca_timeout' }
+        deps.log?.('orca plugin open failed; the file opens in Orca’s editor')
+      }
+    }
+    const { result } = await run(openArguments(opened, root, request), false)
     if (result === 'ok') return { opened: true }
     deps.log?.(`orca file open ${result === 'timeout' ? 'timed out' : 'failed'}`)
     return { opened: false, reason: result === 'timeout' ? 'orca_timeout' : 'orca_failed' }

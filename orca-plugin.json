@@ -137,6 +137,11 @@
         "title": "SFCC: Step out (debugger)"
       },
       {
+        "id": "editor.openInEditor",
+        "title": "SFCC: Open in SFCC editor",
+        "when": "workspace"
+      },
+      {
         "id": "sandbox.pick",
         "title": "SFCC: Upload from this workspace",
         "when": "workspace"
@@ -164,6 +169,42 @@
       {
         "id": "sandbox.stop",
         "title": "SFCC: Stop sandbox"
+      }
+    ],
+    "customEditors": [
+      {
+        "id": "sfcc",
+        "title": "SFCC",
+        "extensions": [
+          ".isml"
+        ],
+        "priority": "default",
+        "entry": "src/pieces/editor/main.ts",
+        "frame": "isolated"
+      },
+      {
+        "id": "sfcc-view",
+        "title": "SFCC",
+        "extensions": [
+          ".js",
+          ".xml",
+          ".properties"
+        ],
+        "priority": "option",
+        "entry": "src/pieces/editor/main.ts",
+        "frame": "isolated"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "editor.openInEditor",
+        "key": "Alt+Shift+E",
+        "when": "workspace"
+      }
+    ],
+    "hooks": [
+      {
+        "event": "editor.save.before"
       }
     ],
     "statusBarItems": [

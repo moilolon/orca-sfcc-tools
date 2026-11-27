@@ -28,12 +28,13 @@ export type OpenLocation = { path: string; line: number | null; column?: number 
  * Orca's command line cannot run there (not found, a refused shim, or it failed), it falls back to
  * `editor.open`, which takes no line and only a path relative to the workspace, so the file opens
  * at the top. A file outside the workspace, or one that is not there, is not opened either way,
- * and neither is anything after a timeout (the first call may still land). The one place a file
- * of the debugger is opened.
+ * and neither is anything after a timeout (the first call may still land). A script or template
+ * opens in the plugin's own editor (`inEditor`), which the debugger's breakpoints live in. The one
+ * place a file of the debugger is opened.
  */
 export async function openFile(open: OpenFile, host: OrcaWorkerApi['host'], workspace: Workspace, location: OpenLocation): Promise<boolean> {
   const line = typeof location.line === 'number' && location.line > 0 ? location.line : undefined
-  const result = await open({ root: workspace.path, path: location.path, line, column: line ? location.column : undefined, focus: true })
+  const result = await open({ root: workspace.path, path: location.path, line, column: line ? location.column : undefined, focus: true, inEditor: true })
   if (result.opened) return true
   if (!CANNOT_RUN.has(result.reason)) return false
   try {

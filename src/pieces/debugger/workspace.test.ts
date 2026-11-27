@@ -29,7 +29,7 @@ function fakes(answer: OpenFileResult, editorFails = false) {
 test('opens at the line and column, with the workspace’s folder as the root, bringing the person to it', async () => {
   const { open, host, requests, editor } = fakes({ opened: true })
   assert.equal(await openFile(open, host, WORKSPACE, { path: PAGE, line: 24, column: 7 }), true)
-  assert.deepEqual(requests, [{ root: WORKSPACE.path, path: PAGE, line: 24, column: 7, focus: true }])
+  assert.deepEqual(requests, [{ root: WORKSPACE.path, path: PAGE, line: 24, column: 7, focus: true, inEditor: true }])
   assert.deepEqual(editor, [])
   // No line, or a line of 0: no line and no column are passed.
   await openFile(open, host, WORKSPACE, { path: PAGE, line: null, column: 7 })

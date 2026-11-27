@@ -1,0 +1,28 @@
+<iscontent type="text/html" charset="UTF-8" compact="true"/>
+<isdecorate template="common/layout/page">
+    <isscript>
+        var assets = require('*/cartridge/scripts/assets');
+        assets.addCss('/css/showcase.css'); /* an invented page */
+        var greeting = `Hello ${pdict.customerName}`;
+    </isscript>
+
+    <iscomment>
+        Every colour of the SFCC editor in one place.
+    </iscomment>
+    <!-- an HTML comment -->
+    <div class="showcase ${pdict.compact ? 'compact' : ''}" data-href="https://www.example.com/help">
+        <h1>${Resource.msg('showcase.title', 'showcase', null)}</h1>
+        <isif condition="${pdict.items && pdict.items.length > 0}">
+            <isloop items="${pdict.items}" var="item" status="loopState">
+                <p class="<isif condition="${loopState.odd}">odd</isif>">
+                    <isprint value="${item.name}" encoding="htmlcontent"/> &mdash; ${item.price.toFixed(2)}
+                </p>
+            </isloop>
+        <iselse/>
+            <isinclude template="components/empty"/>
+        </isif>
+    </div>
+    <script>
+        window.showcase = { count: 3, pattern: /^item-\d+$/ };
+    </script>
+</isdecorate>
