@@ -3,10 +3,13 @@
 // opening an argument or an attribute's value, `${`), and with Ctrl+Space anywhere. While it is
 // open, every key filters it at once in the frame and asks the engine again (the newest answer
 // only), so the list never waits for the worker; arrows and Page keys move, Enter and Tab accept,
-// Escape closes. Accepting replaces exactly the range the engine said, moved by what was typed
-// since. The selected item's description (`engine.hover` with its id) is asked once the selection
-// rests. Pure: no DOM.
+// Escape closes; filtered to nothing, it closes. Accepting replaces exactly the range the engine
+// said, moved through each change since by the change's place: typing inside it moves its end, a
+// change after it (an outside write below) moves nothing, and one before it or across its edge
+// closes the list. The selected item's description (`engine.hover` with its id) is asked once the
+// selection rests. Pure: no DOM.
 import type { Completion, CompletionContext, CompletionItem, EngineCompletion } from '../../engine/protocol'
+import type { Change } from '../surface/buffer'
 import { hint, noteState, plain, queryAt, type FeatureContext } from './context'
 import { Latest } from './document'
 import { listKey, type KeyPress } from './keys'
@@ -59,9 +62,14 @@ export function filterItems(items: readonly CompletionItem[], typed: string): Co
 }
 
 type Open = {
-  /** The answer drawn: its range and context, as the engine said them on the text of `length`. */
+  /** The answer drawn, as the engine said it. */
   completion: Completion
-  length: number
+  /**
+   * Its range in the text now: the engine's, moved through every change since by the change's
+   * place (typing inside it moves its end; a change after it moves nothing).
+   */
+  start: number
+  end: number
   shown: CompletionItem[]
   selected: number
   description: Section[] | null
@@ -79,6 +87,25 @@ export class CompletionController {
     this.ctx = ctx
     this.latest = new Latest(ctx.document)
     this.describing = new Latest(ctx.document)
+    ctx.model.buffer.onChange((_from, _old, _new, change) => this.track(change))
+  }
+
+  /**
+   * A change of the text while the list is open, by its place: inside the range (typing,
+   * Backspace) it moves the range's end; after it, nothing; before it or across its edge, no
+   * typing explains it (an outside write, an undo), so the list closes.
+   */
+  private track(change: Change): void {
+    const open = this.open
+    if (!open) return
+    const at = this.ctx.document.offsetOf(change.from)
+    const removedEnd = at + change.removed.length
+    if (at > open.end) return
+    if (at >= open.start && removedEnd <= open.end) {
+      open.end += change.inserted.length - change.removed.length
+      return
+    }
+    this.close()
   }
 
   get isOpen(): boolean {
@@ -110,6 +137,11 @@ export class CompletionController {
     }
     open.shown = filterItems(open.completion.items, typed)
     open.selected = 0
+    // Nothing left: the list closes, and the keys are the editor's again.
+    if (open.shown.length === 0) {
+      this.close()
+      return
+    }
     this.draw()
     this.ctx.clearTimer(this.reask)
     this.reask = this.ctx.setTimer(() => void this.ask(false, startedAt, true), REASK_DELAY_MS)
@@ -131,7 +163,7 @@ export class CompletionController {
       this.close()
       return true
     }
-    if (count === 0) return action !== 'accept'
+    if (count === 0) return false
     if (action === 'accept') return this.accept()
     const step = action === 'up' ? -1 : action === 'down' ? 1 : action === 'pageUp' ? -PAGE_ROWS : PAGE_ROWS
     const next = action === 'up' || action === 'down' ? (open.selected + step + count) % count : Math.max(0, Math.min(count - 1, open.selected + step))
@@ -155,7 +187,7 @@ export class CompletionController {
     this.describeLater()
   }
 
-  /** Replaces the engine's range (moved by what was typed since) with the selected item. */
+  /** Replaces the engine's range (moved through what was typed since) with the selected item. */
   accept(): boolean {
     const open = this.open
     if (!open) return false
@@ -165,10 +197,8 @@ export class CompletionController {
       return Boolean(item)
     }
     const document = this.ctx.document
-    const caret = document.caret()
-    const delta = document.length - open.length
-    const start = open.completion.range.start
-    const end = Math.max(caret, open.completion.range.end + delta)
+    const start = open.start
+    const end = Math.max(document.caret(), open.end)
     this.close()
     this.ctx.model.edit(document.posOf(start), document.posOf(end), item.label, 'insert')
     this.ctx.model.history.seal()
@@ -191,8 +221,7 @@ export class CompletionController {
   private typedSince(open: Open): string | null {
     const document = this.ctx.document
     const caret = document.caret()
-    const start = open.completion.range.start
-    const end = open.completion.range.end + (document.length - open.length)
+    const { start, end } = open
     if (caret < start || caret > Math.max(end, start)) return null
     const typed = document.text().slice(start, caret)
     const allowed = NAME_CONTEXTS.has(open.completion.context) ? /^[\w$:-]*$/ : /^[^'"\s<>]*$/
@@ -223,8 +252,13 @@ export class CompletionController {
     }
     const previous = this.open?.shown[this.open.selected]?.id
     const shown = filterItems(completion.items, query.text.slice(completion.range.start, query.offset))
+    if (shown.length === 0) {
+      this.close()
+      return
+    }
     const kept = previous ? shown.findIndex((item) => item.id === previous) : -1
-    this.open = { completion, length: query.text.length, shown, selected: Math.max(0, kept), description: kept >= 0 ? (this.open?.description ?? null) : null }
+    const { start, end } = completion.range
+    this.open = { completion, start, end, shown, selected: Math.max(0, kept), description: kept >= 0 ? (this.open?.description ?? null) : null }
     this.draw()
     this.ctx.measured('complete', this.ctx.now() - startedAt)
     if (kept < 0) this.describeLater()
@@ -257,13 +291,9 @@ export class CompletionController {
   private draw(): void {
     const open = this.open
     if (!open) return
-    if (open.shown.length === 0) {
-      this.ctx.ui.list(null)
-      return
-    }
     const view: ListView = {
       role: 'completion',
-      anchor: this.ctx.document.posOf(open.completion.range.start),
+      anchor: this.ctx.document.posOf(open.start),
       title: null,
       items: open.shown.map((item) => ({ label: item.label, detail: item.detail, note: kindWord(this.ctx.locale, item.kind), deprecated: item.deprecated === true })),
       selected: open.selected,

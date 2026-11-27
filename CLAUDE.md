@@ -334,7 +334,9 @@ Changing it needs the owner's yes.
       a description read through `dw/describe.ts` (`describe: 'wait'`, the default). With
       `describe: 'cached'` (the editor's) `engine.hover` answers at once: the description when it
       was read already (the last `MAX_DESCRIBED` kept in memory), else none with
-      `descriptionError: 'pending'` and the read started. `query/performance.test.ts` times each on a
+      `descriptionError: 'pending'` and the read started; a read it started that fails is answered
+      as that failure, by both modes, for `DESCRIBE_FAILURE_MS` with no new read (the panel's hovers
+      alone never record one). `query/performance.test.ts` times each on a
       5,000-line script and template.
     - `src/pieces/engine/problems/` (phase 6.5): the warnings, pure like the rest (a test
       checks it), each a code with its severity (`PROBLEM_SEVERITY`: `error` what the platform

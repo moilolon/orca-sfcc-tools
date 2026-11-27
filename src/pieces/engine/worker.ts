@@ -93,6 +93,8 @@ export const KEPT_INDEXES = 2
 export const DESCRIBE_WAIT_MS = 2_500
 /** The descriptions remembered for `cached` hovers (masked, in memory only), the oldest dropped first. */
 export const MAX_DESCRIBED = 2_000
+/** How long a description a `cached` hover failed to read is answered as failed, with no new read. */
+export const DESCRIBE_FAILURE_MS = 30_000
 /** The texts whose analysis is kept, the most recent first: the queries on one text parse it once. */
 export const KEPT_ANALYSES = 4
 /** How often a workspace folder that is gone is looked for again, and how many times on its own. */
@@ -269,6 +271,12 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
       let describer: Describer | null = null
       /** The descriptions read so far (masked), by class and member: what a `cached` hover answers at once. */
       const described = new Map<string, string | null>()
+      /**
+       * A read a `cached` hover started that failed: its code and when, kept `DESCRIBE_FAILURE_MS`,
+       * so the editor's `wait` that follows and its next hovers start no new `b2c` read. Only a
+       * `cached` read records one: the panel's hovers alone read as they always did.
+       */
+      const failed = new Map<string, { code: string; at: number }>()
 
       async function settings(): Promise<Required<CheckoutSettings>> {
         try {
@@ -651,12 +659,34 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
       function describeCached(classId: string, memberKey: string | undefined): { description: string | null; descriptionError: string | null } {
         const key = describedKey(classId, memberKey)
         if (described.has(key)) return { description: described.get(key) ?? null, descriptionError: null }
-        readDescription(classId, memberKey).catch(() => undefined)
+        const code = recentFailure(key)
+        if (code !== null) return { description: null, descriptionError: code }
+        readDescription(classId, memberKey).then(
+          () => failed.delete(key),
+          (error: unknown) => {
+            failed.set(key, { code: errorCode(error), at: now() })
+            if (failed.size > MAX_DESCRIBED) failed.delete(failed.keys().next().value as string)
+          }
+        )
         return { description: null, descriptionError: 'pending' }
+      }
+
+      /** The code of a `cached` read of this description that failed within `DESCRIBE_FAILURE_MS`; null when none. */
+      function recentFailure(key: string): string | null {
+        const failure = failed.get(key)
+        if (!failure) return null
+        if (now() - failure.at > DESCRIBE_FAILURE_MS) {
+          failed.delete(key)
+          return null
+        }
+        return failure.code
       }
 
       /** The description a hover wants, waited for at most `DESCRIBE_WAIT_MS`; the describer keeps a page once read. */
       async function describe(classId: string, memberKey: string | undefined): Promise<{ description: string | null; descriptionError: string | null }> {
+        // The editor's `cached` hover just failed to read it: the same failure, no second read.
+        const code = recentFailure(describedKey(classId, memberKey))
+        if (code !== null) return { description: null, descriptionError: code }
         let timer: unknown = null
         const late = new Promise<'late'>((resolve) => {
           timer = setTimer(() => resolve('late'), DESCRIBE_WAIT_MS)
@@ -910,6 +940,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           entries.length = 0
           analyses.length = 0
           described.clear()
+          failed.clear()
           for (const disposable of disposables) disposable.dispose()
         }
       }
