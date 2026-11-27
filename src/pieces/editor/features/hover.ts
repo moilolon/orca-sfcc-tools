@@ -1,9 +1,10 @@
 // Hover: what the engine says of the name the pointer rests on (`engine.hover`, asked once the
 // pointer has rested `HOVER_DELAY_MS`), or of the one at the caret with Mod+I; with the messages
 // of the problems there, which need no request and are drawn at once. Worded from the engine's
-// texts (words.ts). A `dw.*` description is read by the worker at run time: when it was not read
-// in time, the hover is drawn without it and asked once more a little later (the worker keeps a
-// page read late), replacing the hover only while it is still shown. It closes when the pointer
+// texts (words.ts). A `dw.*` description is read by the worker at run time: the hover is asked
+// with `describe: 'cached'`, so it answers at once and is drawn; when the description is not read
+// yet (`pending`), it is said as being read and asked again with `wait`, and drawn into the hover
+// when it comes, only while that hover is still the one shown. It closes when the pointer
 // leaves its range, the text changes, the caret moves (one opened by key), or on Escape. Pure.
 import type { EngineHover, Problem } from '../../engine/protocol'
 import { plain, queryAt, noteState, type FeatureContext } from './context'
@@ -13,8 +14,6 @@ import { hoverLink, hoverSections, problemSections } from './words'
 
 /** How long the pointer rests on a name before it is asked about. */
 export const HOVER_DELAY_MS = 350
-/** When a description was not read in time: how long before the hover asks once more. */
-export const DESCRIPTION_RETRY_MS = 1_500
 
 type Shown = { start: number; end: number; byKey: boolean; offset: number }
 
@@ -23,7 +22,6 @@ export class HoverController {
   private readonly latest: Latest
   private readonly problemsAt: (offset: number) => Problem[]
   private shown: Shown | null = null
-  private retry: unknown = null
 
   constructor(ctx: FeatureContext, problemsAt: (offset: number) => Problem[]) {
     this.ctx = ctx
@@ -61,20 +59,19 @@ export class HoverController {
 
   close(): void {
     this.latest.cancel()
-    this.ctx.clearTimer(this.retry)
     if (this.shown) {
       this.shown = null
       this.ctx.ui.hover(null)
     }
   }
 
+  /** Asks the hover at an offset; `again`: its description, which the first answer said was being read. */
   private async ask(offset: number, byKey: boolean, startedAt: number, again = false): Promise<void> {
     const problems = this.problemsAt(offset)
     const problemText = problemSections(this.ctx.locale, problems)
     let start = problems.length > 0 ? Math.min(...problems.map((each) => each.start)) : offset
     let end = problems.length > 0 ? Math.max(...problems.map((each) => each.end)) : offset
     const current = this.latest.begin()
-    if (!again) this.ctx.clearTimer(this.retry)
     // The problems' messages need no request: drawn at once, the engine's words added when they come.
     if (problemText.length > 0 && !again) this.draw({ start, end, byKey, offset }, problemText, null, null)
     else if (!again && this.shown) {
@@ -85,7 +82,7 @@ export class HoverController {
     if (!query) return
     let answer: EngineHover
     try {
-      answer = await this.ctx.requests.hover(plain(query))
+      answer = await this.ctx.requests.hover({ ...plain(query), describe: again ? 'wait' : 'cached' })
     } catch {
       return
     }
@@ -100,11 +97,11 @@ export class HoverController {
       start = Math.min(start, hover.range.start)
       end = Math.max(end, hover.range.end)
     }
-    const late = hover.descriptionError === 'timeout' && !again
-    const sections = [...hoverSections(this.ctx.locale, hover, late), ...problemText]
+    const reading = hover.descriptionError === 'pending' && !again
+    const sections = [...hoverSections(this.ctx.locale, hover, reading), ...problemText]
     this.draw({ start, end, byKey, offset }, sections, hoverLink(hover), again ? null : startedAt)
-    // The description came too late for this answer: the worker keeps it for the next.
-    if (late) this.retry = this.ctx.setTimer(() => void this.ask(offset, byKey, startedAt, true), DESCRIPTION_RETRY_MS)
+    // The description is being read: asked for again, waited for, and drawn in when it comes.
+    if (reading) void this.ask(offset, byKey, startedAt, true)
   }
 
   /** Draws a hover; `startedAt` measures the engine's answer (null for what needed no request). */

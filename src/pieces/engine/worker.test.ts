@@ -476,6 +476,48 @@ test('engine.hover reads a dw description through b2c docs read, masked, once pe
   assert.deepEqual([late.hover?.kind, late.hover?.description, late.hover?.descriptionError], ['dw-member', null, 'timeout'])
 })
 
+test('engine.hover with describe cached answers at once: pending with the read started, then the description read; wait is the default', async () => {
+  // A page read once and kept, as the real describer does, answered when the test releases it.
+  let release: (text: string) => void = () => {}
+  const reads: string[] = []
+  const pages = new Map<string, Promise<string | null>>()
+  const gated: Describer = {
+    describe: (classId, member) => {
+      const key = `${classId}#${member ?? ''}`
+      reads.push(key)
+      let page = pages.get(key)
+      if (!page) {
+        page = new Promise<string | null>((resolve) => (release = resolve))
+        pages.set(key, page)
+      }
+      return page
+    }
+  }
+  const { worker, ready, timers } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw(), describer: () => gated })
+  await ready()
+  const text = "var ProductMgr = require('dw/catalog/ProductMgr');\nProductMgr.getProduct(pid);"
+  const query = { workspaceId: 'w-shop', path: SCRIPT, text, offset: text.indexOf('getProduct') + 1 }
+  // Nothing read yet: answered at once, with no timer waited on, and the read started.
+  const waiting = timers.filter((timer) => timer.ms === DESCRIBE_WAIT_MS).length
+  const first = (await worker.request('engine.hover', { ...query, describe: 'cached' })) as EngineHover
+  assert.deepEqual([first.hover?.kind, first.hover?.description, first.hover?.descriptionError], ['dw-member', null, 'pending'])
+  assert.equal(timers.filter((timer) => timer.ms === DESCRIBE_WAIT_MS).length, waiting)
+  assert.deepEqual(reads, ['dw.catalog.ProductMgr#getProduct(String)'])
+  release('Returns the product.')
+  await settle()
+  const second = (await worker.request('engine.hover', { ...query, describe: 'cached' })) as EngineHover
+  assert.deepEqual([second.hover?.description, second.hover?.descriptionError], ['Returns the product.', null])
+  // The default, and `wait`, answer as before: the description waited for.
+  const plain = (await worker.request('engine.hover', query)) as EngineHover
+  const waited = (await worker.request('engine.hover', { ...query, describe: 'wait' })) as EngineHover
+  assert.deepEqual([plain.hover?.description, waited.hover?.description], ['Returns the product.', 'Returns the product.'])
+  assert.equal(reads.length, 3, 'a cached answer read nothing more; each wait asked the describer, which keeps the page')
+  // Not a dw.* hover: nothing to describe, whatever is asked.
+  const local = "function price() {}\nprice();"
+  const other = (await worker.request('engine.hover', { workspaceId: 'w-shop', path: SCRIPT, text: local, offset: local.lastIndexOf('price') + 1, describe: 'cached' })) as EngineHover
+  assert.equal(other.hover?.descriptionError ?? null, null)
+})
+
 test('a query is bounded and checked: at most 200 items; a path that leaves the workspace or an offset outside the text answers nothing', async () => {
   const { worker, ready } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw() })
   await ready()

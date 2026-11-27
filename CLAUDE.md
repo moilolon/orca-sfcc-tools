@@ -331,7 +331,10 @@ Changing it needs the owner's yes.
       `engine.references` and `engine.signature` (`{ workspaceId, path, text, offset }`, the path
       checked by `checkQuery`) with the index of the workspace indexed, else an empty one
       (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to `DESCRIBE_WAIT_MS` for
-      a description read through `dw/describe.ts`. `query/performance.test.ts` times each on a
+      a description read through `dw/describe.ts` (`describe: 'wait'`, the default). With
+      `describe: 'cached'` (the editor's) `engine.hover` answers at once: the description when it
+      was read already (the last `MAX_DESCRIBED` kept in memory), else none with
+      `descriptionError: 'pending'` and the read started. `query/performance.test.ts` times each on a
       5,000-line script and template.
     - `src/pieces/engine/problems/` (phase 6.5): the warnings, pure like the rest (a test
       checks it), each a code with its severity (`PROBLEM_SEVERITY`: `error` what the platform
@@ -441,8 +444,9 @@ Changing it needs the owner's yes.
       `editor.open` (src/core/open-file.ts, `inEditor`, a path inside a local workspace only);
       several are a list labelled with their storefronts. Problems are asked `PROBLEMS_DELAY_MS`
       after typing pauses, only for a named file, and between answers the squiggles move with the
-      text. A `dw.*` description the worker did not read in time is said as being read and asked
-      once more. The index not ready, another workspace indexed, or a file too large is said once
+      text. A hover is asked with `describe: 'cached'` and drawn at once; a `dw.*` description
+      still `pending` is said as being read, asked again with `wait` and drawn in when it comes
+      (only while that hover is still the one shown). The index not ready, another workspace indexed, or a file too large is said once
       per state in a hint at the caret. `latency.test.ts` prints the time from the key to the
       drawn answer on 3,000-line files, with canned answers and with the real engine.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).

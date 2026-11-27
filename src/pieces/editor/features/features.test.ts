@@ -5,7 +5,6 @@ import { assert, test } from 'orca/testing'
 import type { Completion, CompletionItem, EngineHoverResult, Problem, SignatureHelp } from '../../engine/protocol'
 import { REASK_DELAY_MS, DESCRIBE_DELAY_MS, filterItems, opensAfter } from './completion'
 import { NO_WORKSPACE, STAND_IN } from './document'
-import { DESCRIPTION_RETRY_MS } from './hover'
 import { featureKey, SHORTCUTS } from './keys'
 import { PROBLEMS_DELAY_MS } from './problems'
 import { SIGNATURE_DELAY_MS, splitLabel } from './signature'
@@ -239,22 +238,47 @@ test('hover by key (Mod+I) at the caret; Escape and a caret move close it; a tex
   assert.equal(mac.key('i', { meta: true }), true)
 })
 
-test('a dw.* description read too late is drawn as being read, and asked once more; the second answer replaces the hover', async () => {
+test('a hover is drawn at once with its dw.* description being read, which is then waited for and drawn in; a late page or a failure is said', async () => {
   const engine = new FakeEngine()
   const h = harness('ProductMgr.getProduct(id);', { requests: engine.requests, identity: located(SCRIPT), language: 'javascript' })
   h.features.pointerRest(14, h.clock.now)
-  engine.last('hover').resolve({ ...READY, hover: { ...member, description: null, descriptionError: 'timeout' } })
+  // Asked so the worker answers at once, without waiting for the description.
+  assert.equal(engine.last('hover').input.describe, 'cached')
+  engine.last('hover').resolve({ ...READY, hover: { ...member, description: null, descriptionError: 'pending' } })
   await settle()
+  assert.equal(h.ui.now().hover?.sections[0].text, 'static getProduct(productID: String): Product')
   assert.equal(h.ui.now().hover?.sections.at(-1)?.text, 'Reading the description…')
-  assert.equal(engine.of('hover').length, 1)
-  h.clock.advance(DESCRIPTION_RETRY_MS)
+  // Then asked once more, waiting for it.
+  assert.equal(engine.of('hover').length, 2)
+  assert.equal(engine.last('hover').input.describe, 'wait')
   engine.last('hover').resolve({ ...READY, hover: member })
   await settle()
   assert.equal(h.ui.now().hover?.sections.at(-1)?.text, 'Returns the product with the given id.')
   assert.equal(engine.of('hover').length, 2, 'asked once more, not again')
-  // A description that failed says why, in the engine's words.
+  assert.equal(h.times.hover?.length, 1, 'the time measured is the first draw')
+  // A description read already comes with the first answer: nothing more is asked.
   h.features.pointerRest(1, h.clock.now)
-  engine.last('hover').resolve({ ...READY, hover: { ...member, range: { start: 0, end: 10 }, description: null, descriptionError: 'b2c_not_found' } })
+  engine.last('hover').resolve({ ...READY, hover: { ...member, range: { start: 0, end: 10 } } })
+  await settle()
+  assert.equal(engine.of('hover').length, 3)
+  // The hover moved on while its description was read: the late description is not drawn over it.
+  h.features.pointerRest(14, h.clock.now)
+  engine.last('hover').resolve({ ...READY, hover: { ...member, description: null, descriptionError: 'pending' } })
+  await settle()
+  const waiting = engine.last('hover')
+  h.type('x')
+  waiting.resolve({ ...READY, hover: member })
+  await settle()
+  assert.equal(h.ui.now().hover, null)
+  // A page that did not come in time, or that failed, says so in the engine's words.
+  h.features.pointerRest(1, h.clock.now)
+  engine.last('hover').resolve({ ...READY, hover: { ...member, range: { start: 0, end: 10 }, description: null, descriptionError: 'pending' } })
+  await settle()
+  engine.last('hover').resolve({ ...READY, hover: { ...member, range: { start: 0, end: 10 }, description: null, descriptionError: 'timeout' } })
+  await settle()
+  assert.equal(h.ui.now().hover?.sections.at(-1)?.text, 'The description took too long to read.')
+  h.features.pointerRest(14, h.clock.now)
+  engine.last('hover').resolve({ ...READY, hover: { ...member, description: null, descriptionError: 'b2c_not_found' } })
   await settle()
   assert.equal(h.ui.now().hover?.sections.at(-1)?.text, 'The description could not be read.')
 })

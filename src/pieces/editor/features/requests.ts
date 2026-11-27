@@ -11,8 +11,11 @@ export type EngineText = Omit<EngineQuery, 'offset'>
 
 export type EngineRequests = {
   complete(query: EngineQuery): Promise<EngineCompletion>
-  /** With `id`, a completion item's description instead of what is at the offset. */
-  hover(query: EngineQuery & { id?: string }): Promise<EngineHover>
+  /**
+   * With `id`, a completion item's description instead of what is at the offset. `describe:
+   * 'cached'` answers at once, a `dw.*` description not read yet being `pending`; `wait` waits for it.
+   */
+  hover(query: EngineQuery & { id?: string; describe?: 'wait' | 'cached' }): Promise<EngineHover>
   definition(query: EngineQuery): Promise<EngineDefinition>
   references(query: EngineQuery): Promise<EngineReferences>
   signature(query: EngineQuery): Promise<EngineSignature>

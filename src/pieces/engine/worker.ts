@@ -21,6 +21,8 @@
 // kept, so the queries on one text parse it once. A hover of a
 // `dw.*` class or member waits up to `DESCRIBE_WAIT_MS` for its description, read through
 // `b2c docs read` (masked, kept in memory only); a page that comes late is there for the next.
+// With `describe: 'cached'` (the editor's) a hover answers at once: the description when it was
+// read already, else none (`pending`) and the read started, for the same hover asked with `wait`.
 //
 // The problems (phase 6.5): after each build, update or change of settings of the index, a pass
 // over the checkout (`problems/checkout.ts`) reads the files that changed and checks them all, one
@@ -89,6 +91,8 @@ export const START_DELAY_MS = 2_000
 export const KEPT_INDEXES = 2
 /** How long a hover waits for the description of a `dw.*` class or member before answering without it. */
 export const DESCRIBE_WAIT_MS = 2_500
+/** The descriptions remembered for `cached` hovers (masked, in memory only), the oldest dropped first. */
+export const MAX_DESCRIBED = 2_000
 /** The texts whose analysis is kept, the most recent first: the queries on one text parse it once. */
 export const KEPT_ANALYSES = 4
 /** How often a workspace folder that is gone is looked for again, and how many times on its own. */
@@ -263,6 +267,8 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
       /** What a query reads when its workspace is not the one indexed: an index of nothing. */
       const emptyIndex = new CheckoutIndex(new MemoryFiles())
       let describer: Describer | null = null
+      /** The descriptions read so far (masked), by class and member: what a `cached` hover answers at once. */
+      const described = new Map<string, string | null>()
 
       async function settings(): Promise<Required<CheckoutSettings>> {
         try {
@@ -620,15 +626,43 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         return analysis
       }
 
+      const describedKey = (classId: string, memberKey: string | undefined) => `${classId}#${memberKey ?? ''}`
+
+      /** Reads a description through the describer; one read well is remembered for `cached` hovers. */
+      function readDescription(classId: string, memberKey: string | undefined): Promise<string | null> {
+        describer ??= describerOf(ctx.b2c)
+        const read = describer.describe(classId, memberKey)
+        read.then(
+          (description) => {
+            const key = describedKey(classId, memberKey)
+            described.delete(key)
+            described.set(key, description)
+            if (described.size > MAX_DESCRIBED) described.delete(described.keys().next().value as string)
+          },
+          () => undefined
+        )
+        return read
+      }
+
+      /**
+       * The description a `cached` hover answers at once: one already read, else none yet
+       * (`pending`) with the read started, so a hover asked again with `wait` finds it.
+       */
+      function describeCached(classId: string, memberKey: string | undefined): { description: string | null; descriptionError: string | null } {
+        const key = describedKey(classId, memberKey)
+        if (described.has(key)) return { description: described.get(key) ?? null, descriptionError: null }
+        readDescription(classId, memberKey).catch(() => undefined)
+        return { description: null, descriptionError: 'pending' }
+      }
+
       /** The description a hover wants, waited for at most `DESCRIBE_WAIT_MS`; the describer keeps a page once read. */
       async function describe(classId: string, memberKey: string | undefined): Promise<{ description: string | null; descriptionError: string | null }> {
-        describer ??= describerOf(ctx.b2c)
         let timer: unknown = null
         const late = new Promise<'late'>((resolve) => {
           timer = setTimer(() => resolve('late'), DESCRIBE_WAIT_MS)
         })
         try {
-          const read = describer.describe(classId, memberKey)
+          const read = readDescription(classId, memberKey)
           read.catch(() => undefined)
           const found = await Promise.race([read, late])
           if (found === 'late') return { description: null, descriptionError: 'timeout' }
@@ -657,6 +691,8 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         const found = typeof id === 'string' ? hoverItem(query, analysis, id) : hover(query, analysis, checked.query.offset)
         if (!found) return { ...answer, hover: null }
         if (found.kind !== 'dw-member' && found.kind !== 'dw-class') return { ...answer, hover: { ...found, description: null, descriptionError: null } }
+        // `cached` (the editor): answered at once, the description when read already; `wait` (the default) waits for it.
+        if ((input as { describe?: unknown }).describe === 'cached') return { ...answer, hover: { ...found, ...describeCached(found.describe.classId, found.describe.memberKey) } }
         return { ...answer, hover: { ...found, ...(await describe(found.describe.classId, found.describe.memberKey)) } }
       }
 
@@ -873,6 +909,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           current = null
           entries.length = 0
           analyses.length = 0
+          described.clear()
           for (const disposable of disposables) disposable.dispose()
         }
       }
