@@ -106,6 +106,35 @@ test('types 5. one variable, one type: two types, or an unknown value, make it u
   assert.deepEqual(await typeAt('/** @param {string} label - x */\nfunction f(label) {\n    label = label || \'none\';\n    return label‸;\n}'), instance('TopLevel.String'))
 })
 
+test('types 5. one binding: a var declared twice in a function, or a var of a parameter’s name, counts every declaration', async () => {
+  // Two declarations of different types: unknown, wherever the name is read.
+  assert.equal(await typeAt('function f(a) {\n    if (a) {\n        var result = new dw.util.ArrayList();\n    } else {\n        var result = new dw.util.HashMap();\n    }\n    return result‸;\n}'), null)
+  assert.equal(await typeAt('var x = new dw.util.ArrayList();\nvar x = new dw.util.HashMap();\nx‸'), null)
+  assert.equal(await typeAt('function f(a) {\n    var x = new dw.util.ArrayList();\n    if (a) { var x = 5; }\n    return x‸;\n}'), null)
+  // An unknown value in one of them: unknown too.
+  assert.equal(await typeAt('var x = new dw.util.ArrayList();\nvar x = helpers.list();\nx‸'), null)
+  // The same type twice: that type.
+  assert.deepEqual(await typeAt('var x = new dw.util.ArrayList();\nif (a) { var x = new dw.util.ArrayList(); }\nx‸'), instance('dw.util.ArrayList'))
+  // A var of a parameter's name is the parameter: its @param and the value disagree.
+  assert.equal(await typeAt('/** @param {dw.order.Order} order - the order */\nfunction f(order) {\n    var order = 5;\n    return order‸;\n}'), null)
+  // In separate functions, two names are two bindings.
+  assert.deepEqual(await typeAt('function a() { var x = new dw.util.HashMap(); }\nfunction b() {\n    var x = new dw.util.ArrayList();\n    return x‸;\n}'), instance('dw.util.ArrayList'))
+})
+
+test('types 5. a parameter is typed by its @param only: without one it is unknown, whatever the body assigns', async () => {
+  assert.equal(await typeAt('function f(list) {\n    if (!list) {\n        list = new dw.util.ArrayList();\n    }\n    return list‸;\n}'), null)
+  assert.equal(await typeAt('function f(list) {\n    list = list || new dw.util.ArrayList();\n    return list‸;\n}'), null)
+  assert.equal(await typeAt('function f(list) {\n    return list‸;\n}'), null)
+  // With a @param, an assignment that agrees keeps it; one that disagrees makes it unknown.
+  assert.deepEqual(await typeAt('/** @param {dw.util.ArrayList} list - the list */\nfunction f(list) {\n    list = list || new dw.util.ArrayList();\n    return list‸;\n}'), instance('dw.util.ArrayList'))
+  assert.equal(await typeAt('/** @param {dw.util.ArrayList} list - the list */\nfunction f(list) {\n    list = new dw.util.HashMap();\n    return list‸;\n}'), null)
+})
+
+test('types 7. inside with (o) { … } a name may be a property of o: unknown', async () => {
+  assert.equal(await typeAt('var list = new dw.util.ArrayList();\nwith (o) {\n    list‸;\n}'), null)
+  assert.deepEqual(await typeAt('var list = new dw.util.ArrayList();\nwith (o) {}\nlist‸'), instance('dw.util.ArrayList'))
+})
+
 test('types 6. a cartridge module and its members; a member’s @returns; what project code builds is never a dw type', async () => {
   assert.deepEqual(await typeAt("var priceHelper = require('*/cartridge/scripts/helpers/priceHelper');\npriceHelper‸"), { kind: 'module', module: '*/cartridge/scripts/helpers/priceHelper', from: SCRIPT })
   assert.deepEqual(await typeAt("var priceHelper = require('*/cartridge/scripts/helpers/priceHelper');\npriceHelper.price‸"), { kind: 'member', module: '*/cartridge/scripts/helpers/priceHelper', from: SCRIPT, name: 'price' })

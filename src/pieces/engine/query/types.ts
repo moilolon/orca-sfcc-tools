@@ -195,37 +195,64 @@ export class Types {
     return found === SELF ? null : found
   }
 
+  /** Every declaration of the binding a declaration belongs to (one, unless a name is declared again in its function). */
+  private binding(declaration: Declaration): Declaration[] {
+    return this.ctx.analysis.bindings.get(declaration.id) ?? [declaration]
+  }
+
   private declared(declaration: Declaration, depth: number): Found {
-    const memo = this.memo.get(declaration.id)
+    const binding = this.binding(declaration)
+    // One binding, one memo: its first declaration's id.
+    const key = binding[0].id
+    const memo = this.memo.get(key)
     if (memo !== undefined) return memo
-    if (this.visiting.has(declaration.id)) return SELF
-    this.visiting.add(declaration.id)
+    if (this.visiting.has(key)) return SELF
+    this.visiting.add(key)
     let result: QType | null
     try {
-      result = this.compute(declaration, depth)
+      result = this.compute(binding, depth)
     } finally {
-      this.visiting.delete(declaration.id)
+      this.visiting.delete(key)
     }
-    this.memo.set(declaration.id, result)
+    this.memo.set(key, result)
     return result
   }
 
-  private compute(declaration: Declaration, depth: number): QType | null {
+  /**
+   * A binding's type. Every declaration and assignment of it counts: when they disagree, or one is
+   * unknown, it is unknown (a JSDoc tag that agrees with every known value settles the unknown
+   * ones). A parameter's value is the caller's: only its `@param` gives it a type.
+   */
+  private compute(binding: readonly Declaration[], depth: number): QType | null {
     const analysis = this.ctx.analysis
-    const required = analysis.requiredMembers.get(declaration.id)
-    if (required) return analysis.rewritten.has(declaration.id) || analysis.assigned.has(declaration.id) ? null : this.requireType(required.module, required.key)
-    if (declaration.kind === 'function' || declaration.kind === 'class' || declaration.kind === 'catch' || declaration.kind === 'isloop' || declaration.kind === 'isset') return null
-    if (analysis.rewritten.has(declaration.id)) return null
+    const first = binding[0]
+    const required = analysis.requiredMembers.get(first.id)
+    if (required && binding.length === 1) return analysis.rewritten.has(first.id) || analysis.assigned.has(first.id) ? null : this.requireType(required.module, required.key)
     const values: AST.Expression[] = []
-    if (declaration.kind !== 'param') {
-      // Inside a pattern (`var { a } = obj`), the initialiser is not this name's value.
-      if (!analysis.plain.has(declaration.id)) return null
-      const init = declaration.init
-      if (init && init.type !== 'FunctionDeclaration' && init.type !== 'ClassDeclaration') values.push(init)
+    let parameter = false
+    for (const declaration of binding) {
+      if (declaration.kind === 'function' || declaration.kind === 'class' || declaration.kind === 'catch' || declaration.kind === 'isloop' || declaration.kind === 'isset') return null
+      if (analysis.requiredMembers.has(declaration.id) || analysis.rewritten.has(declaration.id)) return null
+      if (declaration.kind === 'param') parameter = true
+      else {
+        // Inside a pattern (`var { a } = obj`), the initialiser is not this name's value.
+        if (!analysis.plain.has(declaration.id)) return null
+        const init = declaration.init
+        if (init && init.type !== 'FunctionDeclaration' && init.type !== 'ClassDeclaration') values.push(init)
+      }
+      values.push(...(analysis.assigned.get(declaration.id) ?? []))
     }
-    values.push(...(analysis.assigned.get(declaration.id) ?? []))
+    let documented: QType | null = null
+    for (const declaration of binding) {
+      const type = this.documented(declaration)
+      if (!type) continue
+      if (documented && !sameType(documented, type)) return null
+      documented = type
+    }
+    // An undocumented parameter is whatever the caller passes.
+    if (parameter && !documented) return null
     let known: QType | null = null
-    let unknown = false
+    let unknown = parameter
     for (const value of values) {
       if (isNothing(value)) continue
       const type = this.find(value, depth + 1)
@@ -237,11 +264,35 @@ export class Types {
       if (known && !sameType(known, type)) return null
       known = type
     }
-    const documented = this.documented(declaration)
     // A JSDoc tag that says another type than the values: in doubt.
     if (known && documented && !sameType(known, documented)) return null
     if (known && !unknown) return known
     return documented
+  }
+
+  /** Whether a name is the global one: declared nowhere in the file. */
+  isGlobal(node: AST.Identifier): boolean {
+    const reference = this.ctx.analysis.references.get(node.start)
+    return !reference || reference.declaration === null
+  }
+
+  /**
+   * Whether a name says nothing of what it holds, so its name may be guessed from (`name.custom`
+   * alone): a global, a parameter, or a variable whose every value is read from elsewhere (a call,
+   * a member, another name). One that holds a literal, an object, a function or a `new` is not.
+   */
+  guessable(node: AST.Identifier): boolean {
+    const id = this.ctx.analysis.references.get(node.start)?.declaration
+    const declaration = id === null || id === undefined ? undefined : this.ctx.analysis.facts.declarations[id]
+    if (!declaration) return true
+    const read = (value: AST.Expression) => isNothing(value) || value.type === 'CallExpression' || value.type === 'MemberExpression' || value.type === 'Identifier' || value.type === 'LogicalExpression' || value.type === 'ConditionalExpression'
+    for (const each of this.binding(declaration)) {
+      if (each.kind === 'function' || each.kind === 'class') return false
+      const init = each.kind === 'param' ? null : each.init
+      if (init && (init.type === 'FunctionDeclaration' || init.type === 'ClassDeclaration' || !read(init))) return false
+      if ((this.ctx.analysis.assigned.get(each.id) ?? []).some((value) => !read(value))) return false
+    }
+    return true
   }
 
   /** The type a JSDoc tag gives a declaration: `@type` on its statement, `@param` on its function. */
@@ -259,6 +310,8 @@ export class Types {
     if (depth > MAX_TYPE_DEPTH) return null
     switch (node.type) {
       case 'Identifier': {
+        // Inside `with (o) { … }`, a name may be a property of `o`.
+        if (this.ctx.analysis.withBodies.some((body) => body.start <= node.start && node.end <= body.end)) return null
         const reference = this.ctx.analysis.references.get(node.start)
         if (reference && reference.declaration !== null) {
           const declaration = this.ctx.analysis.facts.declarations[reference.declaration]

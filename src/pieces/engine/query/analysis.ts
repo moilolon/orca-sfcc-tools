@@ -47,6 +47,13 @@ export type Analysis = {
   plain: Set<number>
   /** The JSDoc that documents the function a parameter belongs to, by the parameter's declaration. */
   paramDocs: Map<number, Comment>
+  /**
+   * The declarations of one binding, by each one's id, when there are several: every declaration
+   * of a name in one function (`var x` twice, a `var` of a parameter's name and the parameter).
+   */
+  bindings: Map<number, Declaration[]>
+  /** The bodies of `with` statements: a name there may be a property of the object. */
+  withBodies: Range[]
   /** Too large to parse: no tree, nothing answers. */
   skipped: boolean
 }
@@ -81,6 +88,8 @@ export function analyse(path: string, text: string): Analysis {
     requiredMembers: new Map(),
     plain: new Set(),
     paramDocs: new Map(),
+    bindings: new Map(),
+    withBodies: [],
     skipped
   }
   for (const reference of facts.references) analysis.references.set(reference.start, reference)
@@ -90,6 +99,7 @@ export function analyse(path: string, text: string): Analysis {
     for (const name of call.binding.names) if (name.key !== null && name.declaration !== null) analysis.requiredMembers.set(name.declaration, { module: call.module, key: name.key })
   }
   for (const root of analysis.roots) collect(analysis, root.node)
+  groupBindings(analysis)
   // A write the walk did not see as a plain `=` is some other kind of write.
   const plainWrites = new Map<number, number>()
   for (const [id, values] of analysis.assigned) plainWrites.set(id, values.length)
@@ -128,6 +138,7 @@ function collect(analysis: Analysis, root: Node): void {
         break
       }
     }
+    if (node.type === 'WithStatement') analysis.withBodies.push({ start: node.body.start, end: node.body.end })
     if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
       const declaration = analysis.declarations.get(node.id.start)
       if (declaration) analysis.plain.add(declaration.id)
@@ -148,6 +159,26 @@ function collect(analysis: Analysis, root: Node): void {
       stack.push({ node: child, doc: keep ? passed : undefined })
     }
   }
+}
+
+/**
+ * Groups the declarations that are one binding: in a function, every declaration of a name in its
+ * body's scope and the parameter of that name (ES5 has one binding per name and function).
+ */
+function groupBindings(analysis: Analysis): void {
+  const scopes = analysis.facts.scopes
+  const groups = new Map<string, Declaration[]>()
+  for (const declaration of analysis.facts.declarations) {
+    let scope = declaration.scope
+    const data = scopes[scope]
+    // A body's own scope shares its names with the parameters' scope around it.
+    if (declaration.kind !== 'param' && data && data.kind === 'function' && data.parent !== null && scopes[data.parent]?.kind === 'params') scope = data.parent
+    const key = `${scope}\u0000${declaration.name}`
+    const group = groups.get(key)
+    if (group) group.push(declaration)
+    else groups.set(key, [declaration])
+  }
+  for (const group of groups.values()) if (group.length > 1) for (const declaration of group) analysis.bindings.set(declaration.id, group)
 }
 
 function paramDeclarations(analysis: Analysis, param: AST.Pattern, doc: Comment): void {
