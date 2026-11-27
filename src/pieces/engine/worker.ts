@@ -10,7 +10,10 @@
 // for a worktree (whose refs live in the main checkout, outside the folder watched) or a
 // workspace below its repository's root. A few indexes are kept per workspace, so going back to
 // one reads only the files whose time changed. The two settings, `cartridgePath` and
-// `metadataRef`, rebuild the paths when changed.
+// `metadataRef`, rebuild the paths when changed. When the workspace's folder is gone (a worktree
+// removed), the index says so (`failed`, `folder_missing`) and the folder is looked for again on
+// every status request and every `FOLDER_RETRY_MS`, at most `FOLDER_RETRIES` times; once it is
+// back, it is watched again and the index rebuilt.
 //
 // The queries (`engine.complete`, `engine.hover`, `engine.definition`, `engine.references`,
 // `engine.signature`) read the editor's text with the index of the workspace named when it is
@@ -18,7 +21,7 @@
 // kept, so the queries on one text parse it once. A hover of a
 // `dw.*` class or member waits up to `DESCRIBE_WAIT_MS` for its description, read through
 // `b2c docs read` (masked, kept in memory only); a page that comes late is there for the next.
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import type { B2c } from '../../core/b2c'
 import type { Disposable, PieceContext, WorkerPiece, Workspace } from '../../core/piece'
 import { isLocal } from '../../core/workspaces'
@@ -57,6 +60,9 @@ export const KEPT_INDEXES = 2
 export const DESCRIBE_WAIT_MS = 2_500
 /** The texts whose analysis is kept, the most recent first: the queries on one text parse it once. */
 export const KEPT_ANALYSES = 4
+/** How often a workspace folder that is gone is looked for again, and how many times on its own. */
+export const FOLDER_RETRY_MS = 10_000
+export const FOLDER_RETRIES = 30
 
 export type EngineDeps = {
   files?: (root: string) => CheckoutFiles
@@ -68,9 +74,20 @@ export type EngineDeps = {
   api?: () => Promise<DwIndex | null>
   /** Reads a description through `b2c docs read`. */
   describer?: (b2c: B2c) => Describer
+  /** Whether a workspace's folder is there; the real disk when left out. */
+  exists?: (root: string) => Promise<boolean>
   setTimer?: (run: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
   now?: () => number
+}
+
+/** Whether `root` is a folder on this machine. */
+async function folderExists(root: string): Promise<boolean> {
+  try {
+    return (await stat(root)).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 /** The committed `dw.*` index (data/dw-api.json); null when it cannot be read or checked. */
@@ -117,6 +134,8 @@ type Entry = {
   error: string | null
   /** Whether a build has ended well at least once. */
   built: boolean
+  /** Its folder is gone: it is looked for again, and the index rebuilt once it is back. */
+  missing: boolean
 }
 
 function settingsOf(raw: Record<string, unknown>): Required<CheckoutSettings> {
@@ -133,6 +152,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
   const setTimer = deps.setTimer ?? ((run, ms) => setTimeout(run, ms))
   const clearTimer = deps.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
   const now = deps.now ?? (() => Date.now())
+  const exists = deps.exists ?? folderExists
 
   return {
     id: 'engine',
@@ -148,6 +168,11 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
       /** When the first change of the batch being gathered came. */
       let firstChangeAt: number | null = null
       let refTimer: unknown = null
+      /** The timer that looks again for a folder that is gone, and how many times it has. */
+      let folderTimer: unknown = null
+      let folderTries = 0
+      /** A look for an entry's folder in progress: one at a time per entry. */
+      let looking: { entry: Entry; done: Promise<void> } | null = null
       let dw: Promise<((module: string) => string | null) | null> | null = null
       let api: Promise<DwIndex | null> | null = null
       const apiOnce = () => (api ??= apiLoader())
@@ -177,9 +202,11 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         if (building && !entry.built) entry.state = 'building'
         void task().then(
           () => {
+            entry.built = true
+            // A build that ended after the folder went says nothing of the folder: it is still gone.
+            if (entry.missing) return
             entry.state = 'ready'
             entry.error = null
-            entry.built = true
             // The counts are computed now, so a status request never waits for them.
             entry.index.status()
           },
@@ -240,10 +267,69 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         stopWatching()
         watcher = watch(entry.workspace.path, changed, () => {
           watcher = null
-          ctx.log('the checkout watcher stopped: the index is rebuilt on the next status request')
-          // Without a watcher the index may fall behind: the next request rebuilds it.
-          if (current === entry) current = null
+          if (current !== entry || disposed) return
+          // Changes may have been missed: the folder is looked for, watched again and rebuilt.
+          ctx.log('the checkout watcher stopped: the folder is watched again and the index rebuilt')
+          void lookAgain(entry)
         })
+      }
+
+      function stopLooking(): void {
+        if (folderTimer !== null) clearTimer(folderTimer)
+        folderTimer = null
+        folderTries = 0
+      }
+
+      /** Looks for the folder again in `FOLDER_RETRY_MS`, at most `FOLDER_RETRIES` times; then only a status request does. */
+      function scheduleLook(entry: Entry): void {
+        if (folderTimer !== null || folderTries >= FOLDER_RETRIES || disposed) return
+        folderTimer = setTimer(() => {
+          folderTimer = null
+          folderTries++
+          if (current === entry && entry.missing) void lookAgain(entry)
+        }, FOLDER_RETRY_MS)
+      }
+
+      /**
+       * Watches the entry's folder and builds its index, when the folder is there; when it is gone,
+       * says so (`folder_missing`) and looks again later.
+       */
+      async function watchAndBuild(entry: Entry): Promise<void> {
+        const there = await exists(entry.workspace.path)
+        if (disposed || current !== entry) return
+        if (!there) {
+          stopWatching()
+          if (!entry.missing) ctx.log('the workspace folder is gone: it is looked for again')
+          entry.missing = true
+          entry.state = 'failed'
+          entry.error = 'folder_missing'
+          scheduleLook(entry)
+          return
+        }
+        if (entry.missing) {
+          ctx.log('the workspace folder is back: it is watched and indexed again')
+          // What the index holds is from before the folder went: it is built again before it answers as ready.
+          entry.missing = false
+          entry.state = 'building'
+          entry.error = null
+        }
+        stopLooking()
+        startWatching(entry)
+        // A kept index is walked again: only files whose time changed are read.
+        run(entry, () => entry.index.build(), true)
+      }
+
+      /** One look at a time for an entry; one for another entry starts on its own. */
+      function lookAgain(entry: Entry): Promise<void> {
+        if (looking?.entry === entry) return looking.done
+        const look = {
+          entry,
+          done: watchAndBuild(entry).finally(() => {
+            if (looking === look) looking = null
+          })
+        }
+        looking = look
+        return look.done
       }
 
       /** The workspace to index: the uploading one, else the focused one, when its folder is here. */
@@ -257,11 +343,18 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         if (disposed) return
         if (!workspace) {
           stopWatching()
+          stopLooking()
           current = null
           return
         }
-        if (current && current.workspace.id === workspace.id && current.workspace.path === workspace.path) return
+        if (current && current.workspace.id === workspace.id && current.workspace.path === workspace.path) {
+          // A folder that is gone (whether or not the watcher said so) is looked for on each request.
+          const entry = current
+          if (entry.missing || !(await exists(entry.workspace.path))) await lookAgain(entry)
+          return
+        }
         stopWatching()
+        stopLooking()
         const at = entries.findIndex((entry) => entry.workspace.id === workspace.id && entry.workspace.path === workspace.path)
         let entry: Entry
         if (at !== -1) {
@@ -274,15 +367,14 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
             index: new CheckoutIndex(files(workspace.path), { ...(await settings()), git: git(workspace.path), dw: lookup }),
             state: 'building',
             error: null,
-            built: false
+            built: false,
+            missing: false
           }
         }
         entries.unshift(entry)
         entries.length = Math.min(entries.length, KEPT_INDEXES + 1)
         current = entry
-        startWatching(entry)
-        // A kept index is walked again: only files whose time changed are read.
-        run(entry, () => entry.index.build(), true)
+        await lookAgain(entry)
       }
 
       /** One retarget at a time: a request arriving during one waits for it, never for a build. */
@@ -416,6 +508,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           clearTimer(startTimer)
           if (refTimer !== null) clearTimer(refTimer)
           stopWatching()
+          stopLooking()
           current = null
           entries.length = 0
           analyses.length = 0
