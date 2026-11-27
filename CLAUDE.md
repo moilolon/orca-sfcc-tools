@@ -86,8 +86,8 @@ Changing it needs the owner's yes.
       `{ version: 1, roles: { <role>: table } }`, shared by every copy of the plugin, written by
       the worker only, under an exclusive lock file and an atomic rename, read by anyone. A lock
       older than 30 s is taken over atomically (under a second `wx` lock, `.lock.break`, checked
-      again, renamed to a name of the writer's own, then removed), and old temporary files a
-      killed writer left are swept. A file that does not parse is refused, never read as empty or
+      again, renamed to a name of the writer's own, then removed), and what a killed process left
+      (old temporary files, moved `.stale` locks, a `.lock.break`) is swept. A file that does not parse is refused, never read as empty or
       overwritten. On its first start the piece copies the `errors.seen.<role>` keys of storage
       into it, once (`seenMoved` in storage), only when the file does not exist, and leaves
       storage alone; every read and write of the seen list waits for that copy, and a write that
@@ -132,9 +132,11 @@ Changing it needs the owner's yes.
       `report.json` beside it (`{ version: 1, roles: { <role>: { lastReportAt, reported,
       counted } } }`, locked and atomic too), moved only after a report was printed whole and
       only for a role read. `lastReportAt` is the newest entry's own time (GMT), never the
-      machine's clock; a report reads from five minutes before it (an entry another server
-      flushed late is still read) and skips what `counted` (signature and time of the entries in
-      that overlap) says the last report already counted. It prints per role what is new since the last report and what is still unmarked:
+      machine's clock and never past the run itself (a server stamping in the future cannot push
+      it ahead); before any entry it is the first window's start, kept. A report reads from five
+      minutes before it (an entry another server flushed late is still read) and skips what
+      `counted` (signature and time of every entry at or after that start) says the last report
+      already counted. It prints per role what is new since the last report and what is still unmarked:
       short signature, count, first and last time, the masked normalised message, the logger and
       the top frame's file and function (the pipeline without one); never a raw entry, the rest
       of a stack, the site or a host. Exit 0 with a report, 1 when a role, the seen list or the
