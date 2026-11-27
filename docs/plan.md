@@ -23,9 +23,11 @@ What is built is what `main` holds; this file is the plan for the rest.
    never follows the focused workspace. Each workspace has its own code version: activated when
    the workspace is picked, deleted when the workspace is removed. The workspace the plugin works
    on (whose `dw.json` is read and whose checkout is indexed) is the uploading one; else the
-   focused one when it has a `dw.json`; else the last local workspace that had one, kept across
-   worker restarts and let go when it is removed or no longer local; else the focused one. Moving
-   to a project that is not an SFCC one loses neither the environments nor the index.
+   focused one when it has a `dw.json`; else the last local workspace focused with one (each
+   focus change is heard), kept across worker restarts and let go when it is removed, no longer
+   local or without its `dw.json`; else the focused one. Moving to a project that is not an SFCC
+   one loses neither the environments nor the index. An operation over several `b2c` calls (a
+   debug session, a log read) chooses the workspace once and names its folder in each call.
 6. The error diff is the plugin's own: a signature per error and a list of seen signatures per
    instance. Log content stays on the machine: in the plugin's storage and its own data folder.
 7. The `dw.*` API index is committed on `main` without descriptions: classes, inheritance,

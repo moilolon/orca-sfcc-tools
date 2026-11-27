@@ -103,7 +103,8 @@ test('hidden projects: their ids, or null when Orca cannot say', async () => {
  * builds the workspaces again over the same storage (a worker restart). Only the folders in
  * `withFile` have a configuration file; `asked` is every folder asked about.
  */
-function moving(listed: Listed[], withFile: string[]) {
+function moving(listed: Listed[], withFile: string[] | Set<string>) {
+  const files = withFile instanceof Set ? withFile : new Set(withFile)
   const state = { listed, focused: null as string | null, truncated: false }
   const data = new Map<string, unknown>()
   const asked: string[] = []
@@ -120,7 +121,7 @@ function moving(listed: Listed[], withFile: string[]) {
     delete: async (key: string) => void data.delete(key),
     keys: async () => [...data.keys()]
   }
-  const hasConfig = async (root: string) => (asked.push(root), withFile.includes(root))
+  const hasConfig = async (root: string) => (asked.push(root), files.has(root))
   const build = () => createWorkspaces(host, createStore(storage, 'core'), { hasConfig })
   let workspaces = build()
   return {
@@ -132,6 +133,11 @@ function moving(listed: Listed[], withFile: string[]) {
     },
     focus(id: string | null) {
       state.focused = id
+    },
+    /** The focus moves and Orca says so (`workspace.changed`), with nothing asking `active()`. */
+    async move(id: string | null) {
+      state.focused = id
+      await workspaces.focusMoved(id)
     },
     restart() {
       workspaces = build()
@@ -229,9 +235,10 @@ test('the uploading workspace comes first; once released, it is the one kept', a
 
 test('a folder that cannot say whether it has a file counts as having none', async () => {
   const data = new Map<string, unknown>([[KEPT, 'w-shop']])
-  const failing = workspacesOver([SHOP, NOTES], 'w-shop', null, { hasConfig: async () => Promise.reject(new Error('gone')) }, data)
-  assert.equal(await failing.configRoot(), '/work/shop', 'the kept one, which is the focused one too')
+  const failing = workspacesOver([SHOP, NOTES], 'w-notes', null, { hasConfig: async () => Promise.reject(new Error('gone')) }, data)
+  assert.equal(await failing.configRoot(), '/home/notes', 'the kept one cannot say either: let go, the focused one instead')
   assert.equal((await failing.active?.())?.reason, 'focused')
+  assert.equal(data.has(KEPT), false)
 })
 
 test('with nothing uploading, focused or kept, Orca is not asked for the list', async () => {
@@ -256,4 +263,46 @@ test('activeWorkspace: a stand-in without active() is read by the rule it replac
   assert.deepEqual(await activeWorkspace(stand), { workspace: SHOP, reason: 'focused' })
   assert.deepEqual(await activeWorkspace({ ...stand, uploading: async () => FIX }), { workspace: FIX, reason: 'uploading' })
   assert.equal(await activeWorkspace({ ...stand, focused: async () => null }), null)
+})
+
+test('the focus moving is enough: A (with a file), then B (with one), then notes keeps B, with nothing asked between', async () => {
+  const machine = moving([SHOP, FIX, NOTES], ['/work/shop', '/work/shop-fix'])
+  machine.focus('w-shop')
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'focused' })
+  await machine.move('w-fix')
+  await machine.move('w-notes')
+  assert.deepEqual(await machine.where(), { root: '/work/shop-fix', id: 'w-fix', reason: 'kept' })
+  // A workspace with no file, a remote one, one Orca does not list, or none: nothing changes.
+  for (const id of ['w-notes', 'w-gone', null]) await machine.move(id)
+  assert.equal(machine.data.get(KEPT), 'w-fix')
+})
+
+test('focus changes are taken in order: a slow check never keeps an older workspace over a newer one', async () => {
+  const machine = moving([SHOP, FIX, NOTES], ['/work/shop', '/work/shop-fix'])
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => (release = resolve))
+  const slow = createWorkspaces(
+    { call: async (method: string) => (method === 'workspace.list' ? { workspaces: [SHOP, FIX, NOTES], truncated: false } : null) } as unknown as OrcaWorkerApi['host'],
+    createStore({ get: async (key) => (machine.data.get(key) ?? null) as string | null, set: async (key, value) => void machine.data.set(key, value), delete: async (key) => void machine.data.delete(key), keys: async () => [] }, 'core'),
+    { hasConfig: async (root) => (root === '/work/shop' ? (await held, true) : root === '/work/shop-fix') }
+  )
+  const first = slow.focusMoved('w-shop')
+  const second = slow.focusMoved('w-fix')
+  release()
+  await Promise.all([first, second])
+  assert.equal(machine.data.get(KEPT), 'w-fix')
+})
+
+test('a kept workspace whose file is gone is let go: the focused one, labelled as such, instead', async () => {
+  const files = new Set(['/work/shop'])
+  const machine = moving([SHOP, NOTES], files)
+  machine.focus('w-shop')
+  await machine.where()
+  machine.focus('w-notes')
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'kept' })
+  files.delete('/work/shop')
+  assert.deepEqual(await machine.where(), { root: '/home/notes', id: 'w-notes', reason: 'focused' })
+  assert.equal(machine.data.has(KEPT), false, 'let go')
+  files.add('/work/shop')
+  assert.deepEqual(await machine.where(), { root: '/home/notes', id: 'w-notes', reason: 'focused' }, 'not taken back until focused again')
 })

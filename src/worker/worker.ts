@@ -61,7 +61,10 @@ export function createActivate(overrides: WorkerOverrides = {}) {
         }
         return status()
       }),
-      settings.onDidChange((key) => orca.panels.post('core.changed', { key }))
+      settings.onDidChange((key) => orca.panels.post('core.changed', { key })),
+      // Each focus change, as it happens: a workspace with a file focused is the one kept, even
+      // when nothing asks which workspace the plugin is on before the focus moves again.
+      orca.events.on('workspace.changed', (event) => void workspaces.focusMoved(event?.context?.workspaceId))
     ]
     for (const disposable of handlers) owned.push({ owner: 'core', disposable })
 

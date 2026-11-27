@@ -21,6 +21,7 @@
   "pluginApi": 1,
   "main": "src/worker/worker.ts",
   "contributes": {
+    "events": [{ "on": "workspace.changed" }],
     "panels": [
       {
         "id": "sfcc",

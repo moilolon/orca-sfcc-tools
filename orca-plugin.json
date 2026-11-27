@@ -21,6 +21,14 @@
   "pluginApi": 1,
   "main": "src/worker/worker.ts",
   "contributes": {
+    "events": [
+      {
+        "on": "workspace.changed"
+      },
+      {
+        "on": "workspace.removed"
+      }
+    ],
     "panels": [
       {
         "id": "sfcc",
@@ -240,11 +248,6 @@
         "extensions": [
           ".isml"
         ]
-      }
-    ],
-    "events": [
-      {
-        "on": "workspace.removed"
       }
     ]
   },

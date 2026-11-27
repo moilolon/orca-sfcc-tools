@@ -12,7 +12,7 @@ import { createStore } from '../../core/store'
 import { createWorkspaces } from '../../core/workspaces'
 import { MemoryFiles } from './checkout/memory'
 import { fixtureFiles, FakeRef } from './checkout/testing'
-import type { EngineIndexStatus } from './protocol'
+import type { EngineIndexStatus, ProblemsList } from './protocol'
 import { createEnginePiece, DEBOUNCE_MS, KEPT_INDEXES } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
@@ -55,7 +55,15 @@ async function mount(roots: Record<string, MemoryFiles>, storage: Record<string,
       timers.push(timer)
       return timer
     },
-    clearTimer: (timer) => void ((timer as { cleared: boolean }).cleared = true)
+    clearTimer: (timer) => void ((timer as { cleared: boolean }).cleared = true),
+    // A loaded machine, always: each slice of a problems pass ends at once and pauses on a real
+    // timer, so a pass is still reading files long after the index is ready. The counts below
+    // hold only because each move waits for the pass to end (`quiet`).
+    now: (() => {
+      let at = 0
+      return () => (at += 1_000)
+    })(),
+    pause: () => new Promise<void>((resolve) => setTimeout(resolve, 1))
   })
   let disposable: { dispose(): void | Promise<void> } | void = undefined
   let made: Workspaces | null = null
@@ -89,11 +97,23 @@ async function mount(roots: Record<string, MemoryFiles>, storage: Record<string,
     }
     throw new Error('the build never ended')
   }
-  /** Moves the focus, then asks until the index of the target is ready. */
+  /**
+   * Asks until no problems pass runs: a pass reads files of the same checkout, so a count of reads
+   * taken while one runs would depend on how fast the machine is.
+   */
+  const quiet = async () => {
+    for (let i = 0; i < 5000; i++) {
+      const list = (await worker.request('engine.problems.list', {})) as ProblemsList
+      if (!list.busy && list.state !== 'indexing' && list.state !== 'analysing') return
+      await new Promise((resolve) => setTimeout(resolve, 2))
+    }
+    throw new Error('the problems pass never ended')
+  }
+  /** Moves the focus, then asks until the index of the target is ready and its pass has ended. */
   const focus = async (id: string | null) => {
     host.respond('workspace.readContext', id ? { workspaceId: id, branch: 'main', displayName: id, terminals: [] } : null)
     const answer = await ready()
-    await settle()
+    await quiet()
     return answer
   }
   const fire = (ms: number) => {

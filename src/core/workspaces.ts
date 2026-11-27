@@ -81,7 +81,21 @@ export type WorkspacesOptions = {
   hasConfig?: (root: string) => Promise<boolean>
 }
 
-export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store, options: WorkspacesOptions = {}): Workspaces {
+/** How long a focus change waits for Orca's list before it lets that change go. */
+export const FOCUS_LIST_BOUND_MS = 5_000
+
+/** The workspaces as core builds them: with `focusMoved`, which only core's worker calls. */
+export type CoreWorkspaces = Workspaces & {
+  /**
+   * The focus moved to `workspaceId` (Orca's `workspace.changed`): when it is a local workspace
+   * with a configuration file, it is the one kept from now on, whether or not anything asks
+   * `active()` before the focus moves again. Changes are taken one at a time, in the order they
+   * came, so a slow check never keeps an older workspace over a newer one. Never throws.
+   */
+  focusMoved(workspaceId: string | null | undefined): Promise<void>
+}
+
+export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store, options: WorkspacesOptions = {}): CoreWorkspaces {
   const strip = ({ projectId: _project, ...workspace }: ListedWorkspace): Workspace => workspace
   async function list(): Promise<Workspace[]> {
     return (await listWorkspaces(host)).workspaces.map(strip)
@@ -116,10 +130,14 @@ export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store, opti
       clearTimeout(timer)
     }
   }
+  /** The focus changes being taken in, one after the other. */
+  let moves: Promise<void> = Promise.resolve()
   async function keep(workspaceId: string): Promise<void> {
     if ((await store.get<string | null>(KEPT_KEY, null)) !== workspaceId) await store.set(KEPT_KEY, workspaceId)
   }
   async function active(): Promise<ActiveWorkspace | null> {
+    // A focus change still being taken in is seen first (each is bounded).
+    await moves
     const uploadId = await store.get<string | null>(UPLOADING_KEY, null)
     const focusId = uploadId ? null : await focusedId()
     const keptId = await store.get<string | null>(KEPT_KEY, null)
@@ -139,17 +157,33 @@ export function createWorkspaces(host: OrcaWorkerApi['host'], store: Store, opti
     }
     if (keptId) {
       const kept = find(keptId)
-      if (kept && isLocal(kept)) return { workspace: kept, reason: kept.id === focus?.id ? 'focused' : 'kept' }
-      // Removed (only a whole list can say so) or no longer on this machine: let go.
+      // Still listed, local and with a file (the focused one was just found to have none).
+      if (kept && kept.id !== focus?.id && (await hasConfig(kept))) return { workspace: kept, reason: 'kept' }
+      // Removed (only a whole list can say so), no longer on this machine, or its file gone: let go.
       if (kept || complete) await store.delete(KEPT_KEY)
     }
     return focus ? { workspace: focus, reason: 'focused' } : null
+  }
+  function focusMoved(workspaceId: string | null | undefined): Promise<void> {
+    const id = typeof workspaceId === 'string' && workspaceId ? workspaceId : null
+    moves = moves.then(async () => {
+      if (!id) return
+      try {
+        const { workspaces: listed } = await listWorkspaces(host, { signal: AbortSignal.timeout(FOCUS_LIST_BOUND_MS) })
+        const found = listed.find((workspace) => workspace.id === id)
+        if (found && (await hasConfig(strip(found)))) await keep(id)
+      } catch {
+        // Orca could not list: `active()` looks again when it is asked.
+      }
+    })
+    return moves
   }
   return {
     list,
     focused,
     uploading,
     active,
+    focusMoved,
     async upload() {
       const workspace = await uploading()
       const codeVersion = await store.get<string | null>(UPLOADING_VERSION_KEY, null)

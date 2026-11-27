@@ -30,8 +30,10 @@ Changing it needs the owner's yes.
       names: the uploading one; else the focused one when it has a configuration file
       (`b2c.hasConfig`, which reads nothing, bounded by `HAS_CONFIG_BOUND_MS`); else the last
       local workspace focused with one, or released from uploading with one, kept by id in core's
-      storage (`keptWorkspace`), let go once a whole list lacks it or it is no longer local; else
-      the focused one. A remote workspace is never asked about nor kept. The setup view says which
+      storage (`keptWorkspace`), let go once a whole list lacks it, it is no longer local or its
+      file is gone (asked each time it is read); else the focused one. Each focus change is heard
+      (`workspace.changed`, core's one event, `focusMoved()`, taken in order and awaited by
+      `active()`), so the kept one is the last focused with a file even when nothing asked. A remote workspace is never asked about nor kept. The setup view says which
       workspace and why (`CoreStatus.workspace`); the status line's tooltips do not, as a name has
       no bound and a tooltip is held to `NOTICE_MAX_CHARS`), `i18n.ts` (texts, English and Spanish),
       `open-file.ts` (opens a file of a workspace at a line through `orca file open`; with
@@ -112,7 +114,9 @@ Changing it needs the owner's yes.
       only its counters and a masked, bounded sample (the normalised first line, the logger, the
       pipeline or controller, the level and the top frames; never the site, which names the
       shop), never a raw entry; a notification says how many, never what. The workspace whose cartridges a frame is looked
-      for in is chosen by `frameRoot()` in its `worker.ts` (the workspace the plugin works on, `activeWorkspace()`). A read passes `--level ERROR` and
+      for in is chosen by `frameRoot()` in its `worker.ts` (the workspace the plugin works on, `activeWorkspace()`),
+      once per read: every b2c call of the read, and the check of the request that asked it,
+      names that folder as its `configRoot`. A read passes `--level ERROR` and
       `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
       reduced to its path, its locale segment to `<locale>`, and a host written without a scheme
       to `<host>`, in any letter case (never a file name, a `dw.*` name or a Java package);

@@ -191,6 +191,9 @@ export function createSession(deps: SessionDeps) {
     const running = await deps.b2c.start(['debug', '--client-id', DEBUGGER_CLIENT_ID], {
       role: 'sandbox',
       cwd,
+      // The dw.json of the folder debugged, named: a focus change since it was chosen cannot
+      // hand b2c another workspace's sandbox.
+      configRoot: cwd,
       // stdout is the protocol and nothing else; stderr is b2c's log, masked by the runner.
       onStdout: (chunk) => (client ? client.receive(chunk) : early.push(chunk)),
       onEvent: (event) => {

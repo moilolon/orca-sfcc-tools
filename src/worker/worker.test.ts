@@ -212,6 +212,42 @@ test('focus on a workspace with no dw.json keeps the last one that had one, and 
   }
 })
 
+test('the focus moving is heard: A, then B (each with a dw.json), then notes keeps B with nothing asked between', async () => {
+  const shop = makeWorkspace()
+  const fix = makeWorkspace()
+  const notes = mkdtempSync(join(tmpdir(), 'sfcc-tools-notes-'))
+  try {
+    const focus = (id: string) => ({ workspaceId: id, branch: '', displayName: id, terminals: [] })
+    const host = mockHost({
+      capabilities: CAPABILITIES,
+      results: {
+        'workspace.list': {
+          workspaces: [
+            { id: 'w-shop', kind: 'folder', name: 'shop', path: shop, branch: null, hostId: 'local' },
+            { id: 'w-fix', kind: 'folder', name: 'fix', path: fix, branch: null, hostId: 'local' },
+            { id: 'w-notes', kind: 'folder', name: 'notes', path: notes, branch: null, hostId: 'local' }
+          ],
+          truncated: false
+        },
+        'workspace.readContext': focus('w-shop')
+      }
+    })
+    const spawn = fakeSpawner((call) => call.child.finish(0, VERSION))
+    const machine = { ...MACHINE, isFile: async (path: string) => path === '/fake/bin/b2c' || existsSync(path) }
+    const worker = await mountWorker({ default: createActivate({ ...machine, spawn: spawn.spawn, pieces: [] }), deactivate }, { host })
+    assert.deepEqual((await worker.request('core.status', {})).workspace, { name: 'shop', reason: 'focused' })
+    // Orca says the focus moved; nothing asks which workspace the plugin is on meanwhile.
+    for (const id of ['w-fix', 'w-notes']) {
+      host.respond('workspace.readContext', focus(id))
+      await worker.emit('workspace.changed', { context: focus(id) })
+    }
+    assert.deepEqual((await worker.request('core.status', {})).workspace, { name: 'fix', reason: 'kept' })
+    await worker.deactivate()
+  } finally {
+    for (const folder of [shop, fix, notes]) rmSync(folder, { recursive: true, force: true })
+  }
+})
+
 // ---------------------------------------------------------------------------------------------
 // Deactivation: every piece stops, each within its own bound
 
