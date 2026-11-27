@@ -66,7 +66,7 @@ test('git runs only rev-parse, ls-tree and show, directly, with no shell, in the
     calls.map((call) => call.args),
     [
       ['rev-parse', '--verify', '--quiet', 'origin/main^{commit}'],
-      ['ls-tree', '-r', '--name-only', COMMIT, '--', '.'],
+      ['ls-tree', '--full-tree', '-r', '--name-only', COMMIT, '--', '.'],
       ['show', `${COMMIT}:sites/a/sites/Shop/site.xml`]
     ]
   )

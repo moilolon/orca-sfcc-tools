@@ -4,11 +4,13 @@
 // With src/core/b2c.ts and src/core/open-file.ts, the only module that starts a process. It
 // imports nothing of b2c.ts or dw-config.ts and handles no value of dw.json. It runs three
 // commands and nothing else, each read-only, so it writes nothing (no checkout, no fetch, no
-// change of configuration, no optional lock):
+// change of configuration, no optional lock, no fetch of a missing object in a partial clone):
 //
 // - `rev-parse --verify --quiet <ref>^{commit}`: the commit a ref names;
-// - `ls-tree -r --name-only <ref> -- <path>`: the files below a path at that commit;
-// - `show <ref>:<path>`: one file's text at that commit.
+// - `ls-tree --full-tree -r --name-only <ref> -- <path>`: the files below a path at that commit,
+//   from the repository's root whatever folder of it the workspace is, as `show` takes them;
+// - `show <ref>:<path>`: one file's text at that commit. When it fails, `ls-tree` of that one path
+//   tells a file the commit does not have (null) from a failure (`git_failed`).
 //
 // A ref must match `REF_PATTERN` (letters, digits, `/ . _ -`, no leading `-`, no `..`, no `@{`,
 // at most 200 characters) and a path `validGitPath` (relative, inside the repository, no leading
@@ -101,12 +103,16 @@ export async function findGit({ platform, env, isFile }: { platform: string; env
   return { refused: 'git_not_found' }
 }
 
-/** The child's environment: the worker's own, with git told to take no optional lock and never to prompt. */
+/**
+ * The child's environment: the worker's own, with git told to take no optional lock, never to
+ * prompt, and never to fetch an object a partial clone lacks (which would write to `.git`).
+ */
 export function gitEnvironment(base: Record<string, string | undefined>): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(base)) if (typeof value === 'string') env[key] = value
   env.GIT_OPTIONAL_LOCKS = '0'
   env.GIT_TERMINAL_PROMPT = '0'
+  env.GIT_NO_LAZY_FETCH = '1'
   return env
 }
 
@@ -201,6 +207,18 @@ export function createGitReader(root: string, deps: GitDeps = {}): RefReader {
     if (!validGitPath(path)) throw new GitError('path_invalid')
   }
 
+  async function list(ref: string, path: string): Promise<string[]> {
+    checkRef(ref)
+    checkPath(path)
+    const result = await run(['ls-tree', '--full-tree', '-r', '--name-only', ref, '--', path === '' ? '.' : path])
+    if (result.code !== 0) throw new GitError('git_failed')
+    return result.stdout
+      .split('\n')
+      .map((line) => line.replace(/\r$/, ''))
+      .filter((line) => line.length > 0)
+      .map(unquoteGitPath)
+  }
+
   return {
     async commit(ref) {
       checkRef(ref)
@@ -212,24 +230,16 @@ export function createGitReader(root: string, deps: GitDeps = {}): RefReader {
       if (result.code === 1) return null
       throw new GitError('git_failed')
     },
-    async list(ref, path) {
-      checkRef(ref)
-      checkPath(path)
-      const result = await run(['ls-tree', '-r', '--name-only', ref, '--', path === '' ? '.' : path])
-      if (result.code !== 0) throw new GitError('git_failed')
-      return result.stdout
-        .split('\n')
-        .map((line) => line.replace(/\r$/, ''))
-        .filter((line) => line.length > 0)
-        .map(unquoteGitPath)
-    },
+    list,
     async read(ref, path) {
       checkRef(ref)
       checkPath(path)
       if (path === '') throw new GitError('path_invalid')
       const result = await run(['show', `${ref}:${path}`])
-      if (result.code !== 0) throw new GitError('git_failed')
-      return result.stdout
+      if (result.code === 0) return result.stdout
+      // Not there at that commit: null, as the contract says. Anything else is a failure.
+      if (!(await list(ref, path)).includes(path)) return null
+      throw new GitError('git_failed')
     }
   }
 }
