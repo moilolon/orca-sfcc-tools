@@ -9,11 +9,14 @@ const MINUTE = 60_000
 /** Fixed when the module loads: the view shows times relative to now. */
 const NOW = Date.now()
 
+/** Three workspaces of the project in use, one of it on another machine, and two of other projects. */
 const WORKSPACES: SandboxStatus['workspaces'] = [
-  { id: 'w-main', name: 'storefront', local: true, codeVersion: null, owner: false },
-  { id: 'w-checkout', name: 'checkout-fix', local: true, codeVersion: null, owner: false },
-  { id: 'w-search', name: 'search-filters', local: true, codeVersion: 'ws-search-filters', owner: false },
-  { id: 'w-remote', name: 'storefront on build-01', local: false, codeVersion: null, owner: false }
+  { id: 'w-main', name: 'storefront', branch: 'main', local: true, inProject: true, codeVersion: null, owner: false },
+  { id: 'w-checkout', name: 'checkout-fix', branch: 'bugfix/checkout-total', local: true, inProject: true, codeVersion: null, owner: false },
+  { id: 'w-search', name: 'search-filters', branch: 'feature/search-filters', local: true, inProject: true, codeVersion: 'ws-search-filters', owner: false },
+  { id: 'w-remote', name: 'storefront on build-01', branch: 'main', local: false, inProject: true, codeVersion: null, owner: false },
+  { id: 'w-docs', name: 'handbook', branch: 'main', local: true, inProject: false, codeVersion: null, owner: false },
+  { id: 'w-tools', name: 'release-tools', branch: 'chore/scripts', local: true, inProject: false, codeVersion: null, owner: false }
 ]
 
 /** Nobody uploads; the sandbox is started. */

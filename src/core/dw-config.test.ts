@@ -4,7 +4,7 @@ import { assert, test } from 'orca/testing'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { hasCredentials, loadConfig, locateConfig, mainCheckoutOf, mapRole } from './dw-config'
+import { hasConfigFile, hasCredentials, loadConfig, locateConfig, mainCheckoutOf, mapRole } from './dw-config'
 import { assertNoSecrets, INVENTED_DW, makeWorkspace } from './test-support'
 
 const SUFFIXES = { development: '-dev', staging: '-stg', production: '-prd' }
@@ -162,5 +162,40 @@ test('a file that is not a JSON object is invalid, with every role absent and no
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  }
+})
+
+test('whether a workspace has a file is told without reading it: its own, its main checkout’s, or the setting’s', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'sfcc-tools-has-'))
+  try {
+    const main = join(base, 'main')
+    const worktree = join(base, 'worktrees', 'feature')
+    const other = join(base, 'other')
+    mkdirSync(join(main, '.git', 'worktrees', 'feature'), { recursive: true })
+    mkdirSync(worktree, { recursive: true })
+    mkdirSync(other, { recursive: true })
+    writeFileSync(join(main, '.git', 'worktrees', 'feature', 'commondir'), '../..\n')
+    writeFileSync(join(worktree, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'feature')}\n`)
+    writeFileSync(join(main, 'dw.json'), JSON.stringify(INVENTED_DW))
+    // Only whether each place holds a file is asked; dw.json itself is never read.
+    const asked: string[] = []
+    const isFile = async (path: string) => {
+      asked.push(path)
+      return path === join(main, 'dw.json') || path === join(other, 'config', 'other.json')
+    }
+    const read: string[] = []
+    const fs = { readText: async (path: string) => (read.push(path), path.endsWith('dw.json') ? 'never' : (await locateGit(path))) }
+    async function locateGit(path: string): Promise<string | null> {
+      const { readFile } = await import('node:fs/promises')
+      return readFile(path, 'utf8').catch(() => null)
+    }
+    assert.equal(await hasConfigFile(main, '', isFile, fs), true)
+    assert.equal(await hasConfigFile(worktree, '', isFile, fs), true, 'a worktree uses its main checkout’s')
+    assert.equal(await hasConfigFile(other, '', isFile, fs), false)
+    assert.equal(await hasConfigFile(other, 'config/other.json', isFile, fs), true, 'the setting, relative to the workspace')
+    assert.ok(asked.length > 0)
+    assert.ok(!read.some((path) => path.endsWith('dw.json') || path.endsWith('other.json')), 'no configuration file was read')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
   }
 })

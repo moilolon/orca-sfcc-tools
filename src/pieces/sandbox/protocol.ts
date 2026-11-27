@@ -19,8 +19,15 @@ export type SandboxAction = 'status' | 'start' | 'stop' | 'reload' | 'delete' | 
 export type SandboxWorkspace = {
   id: string
   name: string
+  /** Its Git branch, when Orca knows one. */
+  branch: string | null
   /** False for a workspace on another host: it is listed, never uploaded. */
   local: boolean
+  /**
+   * Whether it belongs to the project whose dw.json is in use: the uploading workspace's project,
+   * else the focused one's. True for every workspace when neither names a project.
+   */
+  inProject: boolean
   /** The code version stored for it, once it has uploaded. */
   codeVersion: string | null
   owner: boolean

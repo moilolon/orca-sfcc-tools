@@ -102,4 +102,10 @@ export type PanelSection = {
    * its place. Never called when `hasView` is false or the piece is not delivered.
    */
   render(locale: string): OrcaNode
+  /**
+   * Clears the view's own state of what is shown (open folders and items, pages drawn, windows,
+   * searches), persisted or not, never the piece's data. The panel calls it from the error state it
+   * draws when the view is too large for Orca, so the view can draw again.
+   */
+  reset?(): void
 }

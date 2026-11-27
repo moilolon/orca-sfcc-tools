@@ -5,12 +5,12 @@
 // Nothing here says what the pieces of the plugin are today. The panel is tested over sections
 // written in this file, and the plugin's own panel only against what `SECTIONS` and the piece
 // ids say, so a phase that delivers a piece from its folder never has to edit this file.
-import { atom, Button, plugin, read, set, Text, type OrcaNode } from 'orca'
+import { atom, Button, plugin, read, Row, set, Stack, Text, Tree, type OrcaNode } from 'orca'
 import { afterEach, assert, hostError, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import { PIECE_IDS, type PanelSection } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import * as panelModule from './panel'
-import { createPanel } from './panel'
+import { createPanel, ORCA_LIMITS, treeCost, VIEW_BUDGET } from './panel'
 import { CHECKS } from './checks'
 import { mergeScenarios, opensOwnView, READY_STATUS, viewOf as namedView } from './scenarios'
 import { SECTIONS } from './sections'
@@ -93,9 +93,11 @@ test('with no piece delivered, the setup view is the whole panel and there is no
   assert.equal(panel.findAll({ text: 'Ready' }).length, 2)
   assert.equal(panel.findAll({ text: 'Incomplete' }).length, 1)
   assert.equal(panel.findAll({ text: 'Not configured' }).length, 1)
-  // An incomplete and an absent environment are explained.
-  assert.ok(panel.find({ text: /^Incomplete: dw\.json has the host/ }))
-  assert.ok(panel.find({ text: /^Not configured: dw\.json has no host for it/ }))
+  // An incomplete and an absent environment each say why, in a few words, under their name.
+  assert.ok(panel.find({ text: 'No usable credentials' }))
+  assert.ok(panel.find({ text: 'No host in dw.json' }))
+  // And one button checks again once dw.json is fixed.
+  assert.ok(panel.find({ type: 'Button', text: 'Check again' }))
   for (const name of ['Sandbox', 'Development', 'Staging', 'Production']) assert.ok(panel.find({ text: name }), name)
   // A piece not delivered is not shown at all, and the empty list of pieces is not drawn.
   for (const name of ['Errors', 'Debugger', 'Pieces', 'Coming']) assert.equal(panel.find({ text: name }), null, name)
@@ -112,17 +114,17 @@ test('asks the worker in the panel’s language', async () => {
   assert.deepEqual(host.calls.filter((call) => call.method === 'plugin.request').map((call) => call.params), [{ name: 'core.status', input: { locale: 'es-ES' }, timeoutMs: 60_000 }])
 })
 
-test('says where the configuration file is read from, and never its path', async () => {
+test('says where the configuration file is read from in a word, and never its path', async () => {
   panel = await mount(CORE, { host: hostAnswering(FOUND), locale: 'en' })
-  assert.ok(panel.find({ text: 'Workspace dw.json' }))
-  assert.ok(panel.find({ text: /^dw\.json at the root of the workspace that uploads/ }))
-  assert.ok(panel.find({ text: /Hosts and credentials are never shown\.$/ }))
+  assert.ok(panel.find({ text: 'Source' }))
+  assert.ok(panel.find({ text: 'Workspace' }))
   assert.ok(panel.find({ text: 'Read' }))
+  // Where the paths are changed, in one line: no paragraph.
+  assert.ok(panel.find({ text: 'Paths and key suffixes: Settings, SFCC Tools.' }))
   panel.unmount()
   const path = 'C:\\work\\shop\\config\\other-dw.json'
   panel = await mount(CORE, { host: hostAnswering(FOUND, { configFile: path }), locale: 'en' })
-  assert.ok(panel.find({ text: 'File in Settings' }))
-  assert.ok(panel.find({ text: /^The file named in Settings → SFCC Tools → Configuration file\./ }))
+  assert.ok(panel.find({ text: 'Settings file' }))
   assert.equal(panel.find({ text: /other-dw|work\\shop/ }), null)
   panel.unmount()
   panel = await mount(CORE, { host: hostAnswering(FOUND, { configFile: path }), locale: 'es' })
@@ -134,34 +136,36 @@ test('says when b2c is missing, and why, pointing at the setting; and that there
   panel = await mount(CORE, { host: hostAnswering(MISSING), locale: 'en' })
   // b2c and the file are both not found.
   assert.equal(panel.findAll({ text: 'Not found' }).length, 2)
-  assert.match(panel.summary().join('\n'), /The b2c CLI is not available/)
-  assert.ok(panel.find({ text: 'The b2c CLI was not found.' }))
-  assert.ok(panel.find({ text: /b2c path/ }))
+  assert.match(panel.summary().join('\n'), /b2c not found/)
+  assert.ok(panel.find({ text: 'The b2c CLI was not found. Install it, or set b2c path in Settings.' }))
   assert.match(panel.summary().join('\n'), /No dw\.json/)
-  assert.ok(panel.find({ text: /^No dw\.json was found for the workspace/ }))
+  assert.ok(panel.find({ text: 'Add one at the workspace root.' }))
   assert.equal(panel.findAll({ text: 'Not configured' }).length, 4)
-  // Without a file, four absences need no explanation of their keys.
-  assert.equal(panel.find({ text: /^Incomplete:/ }), null)
-  assert.equal(panel.find({ text: /^Not configured:/ }), null)
+  // Each problem is a compact notice with one button: no paragraph.
+  assert.equal(panel.findAll({ type: 'Callout' }).length, 2)
+  assert.equal(panel.findAll({ type: 'Button', text: 'Check again' }).length, 3)
+  // Without a file, four absences need no reason of their own.
+  assert.equal(panel.find({ text: 'No host in dw.json' }), null)
+  assert.equal(panel.find({ text: 'No usable credentials' }), null)
 })
 
 test('says a dw.json that is not JSON cannot be read, instead of four silent absences', async () => {
   panel = await mount(CORE, { host: hostAnswering({ ...MISSING, b2c: FOUND.b2c, config: 'invalid' }), locale: 'en' })
   assert.match(panel.summary().join('\n'), /dw\.json cannot be read/)
-  assert.ok(panel.find({ text: 'The file is not valid JSON, so no environment can be read from it.' }))
+  assert.ok(panel.find({ text: 'It is not valid JSON.' }))
   assert.ok(panel.find({ text: 'Not valid JSON' }))
-  assert.equal(panel.find({ text: /^No dw\.json was found/ }), null)
+  assert.equal(panel.find({ text: 'Add one at the workspace root.' }), null)
   panel.unmount()
   panel = await mount(CORE, { host: hostAnswering({ ...MISSING, config: 'invalid' }), locale: 'es' })
   assert.match(panel.summary().join('\n'), /No se puede leer dw\.json/)
-  assert.ok(panel.find({ text: /^El fichero no es JSON válido/ }))
+  assert.ok(panel.find({ text: 'No es JSON válido.' }))
 })
 
 test('in Spanish', async () => {
   panel = await mount(CORE, { host: hostAnswering(MISSING), locale: 'es' })
   assert.ok(panel.find({ type: 'Heading', text: 'Configuración' }))
   assert.equal(panel.findAll({ text: 'No encontrado' }).length, 2)
-  assert.ok(panel.find({ text: 'No se ha encontrado el CLI b2c.' }))
+  assert.ok(panel.find({ text: /^No se ha encontrado el CLI b2c\. Instálalo/ }))
   assert.equal(panel.findAll({ text: 'Sin configurar' }).length, 4)
   assert.match(panel.summary().join('\n'), /No hay dw\.json/)
   assert.ok(panel.find({ text: 'Desarrollo' }))
@@ -170,9 +174,10 @@ test('in Spanish', async () => {
   assert.equal(panel.findAll({ text: 'Listo' }).length, 2)
   assert.equal(panel.findAll({ text: 'Incompleto' }).length, 1)
   assert.equal(panel.findAll({ text: 'Sin configurar' }).length, 1)
-  assert.ok(panel.find({ text: /^Incompleto: dw\.json tiene el host/ }))
-  assert.ok(panel.find({ text: /^Sin configurar: dw\.json no tiene host/ }))
-  assert.ok(panel.find({ text: 'dw.json del workspace' }))
+  assert.ok(panel.find({ text: 'Sin credenciales válidas' }))
+  assert.ok(panel.find({ text: 'Sin host en dw.json' }))
+  assert.ok(panel.find({ text: 'Origen' }))
+  assert.ok(panel.find({ type: 'Button', text: 'Comprobar' }))
 })
 
 test('words a host error, a timeout included, and offers to try again', async () => {
@@ -260,9 +265,9 @@ test('the setup view lists the delivered pieces discreetly, those with no view i
   for (const name of ['ISML', 'Sandbox and upload', 'Errors']) assert.ok(panel.find({ text: name }), name)
   assert.equal(panel.findAll({ text: 'Available' }).length, 3)
   assert.equal(panel.find({ text: 'Debugger' }), null)
-  // The setup itself is there, and the status line too.
+  // The setup itself is there, b2c's version with it; the status line does not repeat the version.
   assert.ok(panel.find({ text: 'Found, version 9.8.7' }))
-  assert.ok(panel.find({ text: 'b2c 9.8.7' }))
+  assert.equal(panel.find({ text: 'b2c 9.8.7' }), null)
 })
 
 test('the last view is remembered, and one that no longer exists falls back to the setup view', async () => {
@@ -332,7 +337,7 @@ test('a view whose render throws shows an error state with a retry, keeping the 
     assert.deepEqual(panel.errors, [], label)
     assert.equal(openView(panel), 'errors', label)
     assert.match(panel.summary().join('\n'), /Errors could not be drawn/, label)
-    assert.ok(panel.find({ text: 'Its view failed while drawing. Try again, or open another view.' }), label)
+    assert.ok(panel.find({ text: 'Try again, or open another view.' }), label)
     // The bar and the status line are still there, so the person can go elsewhere.
     assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'], label)
     assert.ok(panel.find({ role: 'button', label: 'Refresh' }), label)
@@ -424,7 +429,8 @@ test('the status line says each environment’s state by icon and in words, not 
   ])
   // Every state has an icon of its own.
   assert.equal(new Set(chipsOf(panel).map(([, icon]) => icon)).size, 3)
-  assert.ok(panel.find({ text: 'b2c 9.8.7' }))
+  // b2c found is said in the setup view, never beside the environments.
+  assert.equal(panel.find({ text: /^b2c/ }), null)
   assert.ok(panel.find({ role: 'button', label: 'Refresh' }))
   // A fact leads to the setup view, where it is explained.
   await panel.press({ type: 'Button', text: 'PRD' })
@@ -540,7 +546,7 @@ test('a section whose setup throws shows as not started until the panel is reope
     assert.deepEqual(barOf(panel), ['Errors', 'Sandbox and upload', 'Setup'])
     await pick(panel, 'errors')
     assert.match(panel.summary().join('\n'), /Errors could not start/)
-    assert.ok(panel.find({ text: /^Its part of this panel failed to start/ }))
+    assert.ok(panel.find({ text: 'Close the panel and open it again.' }))
     assert.equal(panel.find({ text: 'errors body' }), null)
     assert.equal(attentionOf(panel), 'Piece failed')
     // The other section started and draws its body.
@@ -779,4 +785,113 @@ test('the panel’s checks hold core’s scenarios first, then only scenarios na
     assert.ok(PIECE_IDS.some((id) => name === id || (name.startsWith(id) && /^[A-Z0-9]/.test(name.slice(id.length)))), name)
     assert.ok(CHECKS[name].requests?.['core.status'], `${name} stubs core.status`)
   }
+})
+
+// ---------------------------------------------------------------------------------------------
+// The size budget of a view
+
+test('a tree is measured as Orca measures it: 32 bytes and the props as JSON per node, 8 and the length per text', () => {
+  // { size: 'sm' } is 13 characters as JSON; the text adds 8 and its 2.
+  assert.deepEqual(treeCost(<Text size="sm">ab</Text>), { bytes: 32 + 13 + 8 + 2, nodes: 2 })
+  // Children, key and undefined props are not sent; a handler is sent as {"$callback":"<id>"}.
+  assert.deepEqual(treeCost(<Button key="k" onPress={() => undefined} tooltip={undefined}>x</Button>), { bytes: 32 + 2 + 40 + 8 + 1, nodes: 2 })
+  // A prop's escapes count, as JSON.stringify writes them: a control character takes 6.
+  assert.equal(treeCost(<Text tone={'\u0001' as never}>x</Text>).bytes, 32 + JSON.stringify({ tone: '\u0001' }).length + 9)
+  assert.equal(JSON.stringify({ tone: '\u0001' }).length, 17)
+  // A text child counts as it is, and as a node.
+  assert.deepEqual(treeCost(['a', 'bc', null, false]), { bytes: 8 + 1 + 8 + 2, nodes: 2 })
+  // The budget is close to Orca's limits and under them.
+  assert.ok(VIEW_BUDGET.bytes < ORCA_LIMITS.bytes && VIEW_BUDGET.bytes >= 400 * 1024)
+  assert.ok(VIEW_BUDGET.nodes < ORCA_LIMITS.nodes)
+})
+
+/** A view of `rows` rows of an ordinary error: a link, a time and a count, as the errors view draws them. */
+function rowsView(rows: number, text: string) {
+  return Array.from({ length: rows }, (_, i) => (
+    <Row key={`r${i}`} justify="between" align="center" gap="sm">
+      <Text truncate>{`${i} ${text}`}</Text>
+      <Text size="sm" muted>{`${i}×`}</Text>
+    </Row>
+  ))
+}
+
+test('at the edges: an ordinary long view draws; one that would pass the budget, by escapes or by size, does not reach Orca', async () => {
+  // 700 rows of 300 ordinary characters: about 350 KiB by Orca's measure. It draws as it is.
+  const long: PanelSection = { ...viewOf('errors', 'Errors', 'Errores'), render: () => <Stack gap="xs">{rowsView(700, 'x'.repeat(300))}</Stack> }
+  panel = await mount(panelOver([long]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  const drawn = treeCost(panel.tree()).bytes
+  assert.ok(drawn > 300 * 1024 && drawn < VIEW_BUDGET.bytes, `${drawn} bytes`)
+  assert.equal(panel.find({ text: /too large/ }), null)
+  assert.deepEqual(panel.errors, [])
+  panel.unmount()
+  // A tree whose texts are short but whose props hold control characters: each takes 6 bytes as
+  // JSON. Counted by raw length it would look small; Orca would refuse it. The guard stops it.
+  const escaped: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => <Tree label="Values" items={Array.from({ length: 230 }, (_, i) => ({ key: `v${i}`, label: `v${i}`, description: '\u0001'.repeat(400) }))} />
+  }
+  assert.ok(treeCost(escaped.render('en')).bytes > ORCA_LIMITS.bytes)
+  panel = await mount(panelOver([escaped]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  assert.deepEqual(panel.errors, [], 'Orca refused nothing')
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+  assert.ok(treeCost(panel.tree()).bytes < 16 * 1024)
+  panel.unmount()
+  // Too many nodes, however small, is too large as well.
+  const many: PanelSection = { ...viewOf('errors', 'Errors', 'Errores'), render: () => <Stack gap="xs">{Array.from({ length: 5000 }, (_, i) => <Text key={i}>.</Text>)}</Stack> }
+  panel = await mount(panelOver([many]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  assert.deepEqual(panel.errors, [])
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+})
+
+test('a view too large shows its error state with the bar, the status line and the other views still drawn', async () => {
+  const big = atom(true)
+  const huge: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => (read(big) ? <Stack gap="xs">{rowsView(3000, 'x'.repeat(200))}</Stack> : <Text>Errors body</Text>)
+  }
+  panel = await mount(panelOver([viewOf('sandbox', 'Sandbox and upload', 'Sandbox y subida'), huge]), { host: hostAnswering(ALL_READY), locale: 'en', persisted: { plugin: { view: 'errors' } } })
+  assert.deepEqual(panel.errors, [])
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+  // A view with no reset of its own can only be tried again.
+  assert.ok(panel.find({ text: 'Close what is open in it, or open another view.' }))
+  assert.ok(panel.find({ role: 'button', text: 'Try again' }))
+  assert.ok(treeCost(panel.tree()).bytes < 32 * 1024, 'what Orca is handed stays small')
+  assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'])
+  assert.ok(panel.find({ role: 'button', label: 'Refresh' }), 'the status line is there')
+  await pick(panel, 'sandbox')
+  assert.ok(panel.find({ text: 'Sandbox and upload body' }))
+  // Once the view is small again, it draws.
+  set(big, false)
+  await pick(panel, 'errors')
+  assert.ok(panel.find({ text: 'Errors body' }))
+  panel.unmount()
+  set(big, true)
+  panel = await mount(panelOver([huge]), { host: hostAnswering(ALL_READY), locale: 'es' })
+  assert.match(panel.summary().join('\n'), /Errores es demasiado grande para dibujarse/)
+})
+
+test('a view too large because of what is open in it offers a reset: it closes that, and the view draws again', async () => {
+  // What makes it large is kept across opens, as open folders are.
+  const open = atom<number>('probeOpen', 3000, { persist: 'plugin' })
+  let resets = 0
+  const kept: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => <Stack gap="xs">{rowsView(read(open), 'x'.repeat(200))}</Stack>,
+    reset: () => {
+      resets++
+      set(open, 3)
+    }
+  }
+  panel = await mount(panelOver([kept]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+  assert.ok(panel.find({ text: 'Reset it to close what is open in it.' }))
+  // Trying again alone would draw the same: the one button resets, then draws again.
+  await panel.press({ role: 'button', text: 'Reset view' })
+  assert.equal(resets, 1)
+  assert.equal(panel.find({ text: /too large/ }), null)
+  assert.ok(panel.find({ text: /^2 x/ }))
+  assert.equal(panel.persisted.plugin.probeOpen, 3)
+  panel.unmount()
+  panel = await mount(panelOver([kept]), { host: hostAnswering(ALL_READY), locale: 'es', persisted: { plugin: { probeOpen: 3000 } } })
+  assert.ok(panel.find({ role: 'button', text: 'Restablecer vista' }))
 })

@@ -12,6 +12,7 @@ import { createStore } from '../../core/store'
 import { plainSettings } from '../../core/test-support'
 import { FAKE_HOST, FAKE_ROOT, FakeAdapter } from './fake-adapter'
 import type { ReadDir } from './files'
+import type { SourceFileSystem } from './source'
 import type { DebuggerState } from './protocol'
 import { createActivate, deactivate } from '../../worker/worker'
 import { activateDebugger } from './worker'
@@ -72,6 +73,27 @@ function fakeOrca(behaviour: 'runs' | 'fails' | 'missing') {
  * The debugger's worker half over a mock host. `throughCore` starts it as the plugin's worker does
  * (src/worker/worker.ts, with this piece alone), so deactivation is core's own.
  */
+/**
+ * Files on disk for the source view, by path: `Page.js` holds a line with the invented host, and
+ * `Home.js` is a link that leads out of the workspace.
+ */
+const SOURCE_FILES: Record<string, string> = {
+  [`${FAKE_ROOT}/${PAGE}`]: `'use strict';\r\nvar url = 'https://${FAKE_HOST}/';\n\tmodule.exports = url;\n`,
+  '/elsewhere/Home.js': 'outside'
+}
+const sourceFs: SourceFileSystem = {
+  realpath: async (path) => {
+    const slashed = path.replace(/\\/g, '/')
+    if (slashed.endsWith('/controllers/Home.js')) return '/elsewhere/Home.js'
+    if (slashed === FAKE_ROOT || slashed in SOURCE_FILES) return slashed
+    throw new Error('ENOENT')
+  },
+  read: async (path, limit) => {
+    const bytes = new TextEncoder().encode(SOURCE_FILES[path] ?? '')
+    return { bytes: bytes.subarray(0, limit), more: bytes.length > limit }
+  }
+}
+
 async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Workspace | null, storage = {} as Record<string, boolean>, throughCore = false, orca = 'runs' as 'runs' | 'fails' | 'missing' } = {}) {
   const opening = fakeOrca(orca)
   const adapter = new FakeAdapter({
@@ -95,7 +117,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     instances: async () => ({ config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }),
     isHost: async () => false
   } as unknown as B2c
-  const options = { coalesceMs: 20, platform: 'linux', readDir, openFile: opening.openFile, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
+  const options = { coalesceMs: 20, platform: 'linux', readDir, sourceFs, openFile: opening.openFile, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
   const module = throughCore
     ? {
         default: createActivate({
@@ -146,7 +168,7 @@ test('no workspace, or one on another machine: shown as such, and nothing starts
   assert.equal(await codeOf(none.worker.request('debugger.start', {})), 'no_workspace')
   const remote = await mount({ workspace: { ...LOCAL, hostId: 'ssh:box' } })
   assert.equal((await remote.worker.request('debugger.state', {})).workspace, 'remote')
-  assert.equal(await codeOf(remote.worker.request('debugger.files', { query: 'page' })), 'no_workspace')
+  assert.equal(await codeOf(remote.worker.request('debugger.scripts', {})), 'no_workspace')
   assert.equal(remote.adapter.processes.length + none.adapter.processes.length, 0)
 })
 
@@ -165,8 +187,46 @@ test('breakpoints are kept per workspace with relative paths; a bad one is refus
   assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [11, 24] } })
   assert.equal(await codeOf(worker.request('debugger.setBreakpoints', { path: `${FAKE_ROOT}/x.js`, lines: [1] })), 'invalid_path')
   assert.deepEqual((await worker.request('debugger.clearBreakpoints', {})).breakpoints, [])
-  // Files to pick from: the cartridges' scripts, by name.
-  assert.deepEqual(await worker.request('debugger.files', { query: 'page' }), { files: [PAGE], truncated: false })
+})
+
+test('one breakpoint is set or removed at a time, the file’s other lines kept; a bad line or path is refused', async () => {
+  const { worker } = await mount()
+  await worker.request('debugger.setBreakpoints', { path: PAGE, lines: [11] })
+  let state = await worker.request('debugger.breakpoint', { path: PAGE, line: 24, on: true })
+  assert.deepEqual(state.breakpoints[0].lines.map((each) => each.line), [11, 24])
+  state = await worker.request('debugger.breakpoint', { path: PAGE, line: 11, on: false })
+  assert.deepEqual(state.breakpoints[0].lines.map((each) => each.line), [24])
+  // Setting one that is there, or removing one that is not, changes nothing.
+  state = await worker.request('debugger.breakpoint', { path: PAGE, line: 24, on: true })
+  state = await worker.request('debugger.breakpoint', { path: PAGE, line: 99, on: false })
+  assert.deepEqual(state.breakpoints[0].lines.map((each) => each.line), [24])
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [24] } })
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { path: PAGE, line: 0, on: true })), 'invalid_input')
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { path: PAGE, line: 1.5, on: true })), 'invalid_input')
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { path: `${FAKE_ROOT}/${PAGE}`, line: 3, on: true })), 'invalid_path')
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { path: '../outside.js', line: 3, on: true })), 'invalid_path')
+})
+
+test('the scripts of the workspace come by cartridge, named by their folder, paths relative to the workspace', async () => {
+  const { worker } = await mount()
+  assert.deepEqual(await worker.request('debugger.scripts', {}), {
+    cartridges: [{ name: 'app_example', path: 'cartridges/app_example', files: ['cartridges/app_example/cartridge/controllers/Home.js', PAGE] }],
+    truncated: false
+  })
+  const none = await mount({ workspace: null })
+  assert.equal(await codeOf(none.worker.request('debugger.scripts', {})), 'no_workspace')
+})
+
+test('a script’s lines: read only for a script of the cartridges, inside the workspace, masked, never stored', async () => {
+  const { worker } = await mount()
+  const source = await worker.request('debugger.source', { path: PAGE })
+  assert.deepEqual(source, { path: PAGE, lines: ["'use strict';", "var url = 'https://***/';", '\tmodule.exports = url;'], truncated: false })
+  assert.ok(!JSON.stringify(worker.host.data().storage).includes('use strict'), 'nothing of it is stored')
+  // Only a file the walk of the cartridges found, and never through a link out of the workspace.
+  assert.equal(await codeOf(worker.request('debugger.source', { path: 'dw.json' })), 'invalid_path')
+  assert.equal(await codeOf(worker.request('debugger.source', { path: 'cartridges/app_example/.project' })), 'invalid_path')
+  assert.equal(await codeOf(worker.request('debugger.source', { path: `${FAKE_ROOT}/${PAGE}` })), 'invalid_path')
+  assert.equal(await codeOf(worker.request('debugger.source', { path: 'cartridges/app_example/cartridge/controllers/Home.js' })), 'outside_workspace')
 })
 
 test('a whole session: start answers at once, posts are coalesced, a halt shows its stack, values come on demand, stop disconnects', async () => {
