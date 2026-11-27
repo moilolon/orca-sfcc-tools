@@ -1,0 +1,10 @@
+<isdecorate template="checks/layout">
+    <isinclude template="product/components/price" />
+    <isinclude template="${pdict.include}" />
+    <isinclude template="checks/footer" />
+    <span>${Resource.msg('label.price', 'product', null)}</span>
+    <span>${Resource.msg('label.gone', 'product', null)}</span>
+    <isif condition="${pdict.product.custom.gardenSize}">
+        <span>${pdict.product.custom.gardenSize}</span>
+    </isif>
+</isdecorate>

@@ -166,6 +166,11 @@
         "title": "SFCC: Stop sandbox"
       }
     ],
+    "hooks": [
+      {
+        "event": "editor.save.before"
+      }
+    ],
     "statusBarItems": [
       {
         "id": "errors-new",
