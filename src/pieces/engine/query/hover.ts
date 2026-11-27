@@ -10,7 +10,7 @@ import type { Range } from '../js/ast'
 import { isSuperModule } from '../js/facts'
 import type { ModuleResolution, RouteProblemCode, SuperModuleCopy, TemplateCopy } from '../checkout/checkout'
 import { SITE_PREFERENCES, type ObjectTypeKind } from '../checkout/metadata'
-import { DEFINING_METHODS, type ExportedMember, type RouteMethod } from '../checkout/scan'
+import { DEFINING_METHODS, type ExportedMember, type RouteMethod, type RouteOperation } from '../checkout/scan'
 import { signature, type DwMemberKind } from '../dw/index'
 import { pathAt, rootAt, type Analysis, type Root } from './analysis'
 import { callRole, customTags, elementAt, stringArgumentAt } from './complete'
@@ -55,7 +55,8 @@ export type MemberDefinitionEntry = {
   doc: string | null
 }
 
-export type RouteStepEntry = { method: RouteMethod; name: string; path: string; cartridge: string; line: number }
+/** A step of a route; `handler`, for an `exports.Name` route, is where the function that handles it is declared. */
+export type RouteStepEntry = { method: RouteMethod; name: string; path: string; cartridge: string; line: number; handler: { start: number; end: number; line: number } | null }
 
 export type RouteEntry = {
   storefront: string
@@ -285,7 +286,7 @@ function attributeHover(ctx: QueryContext, typeId: string, id: string, guessed: 
 function routeHover(ctx: QueryContext, id: string): HoverContent | null {
   const resolved = ctx.index.route(id)
   if (!resolved) return null
-  const step = (each: { method: RouteMethod; name: string; path: string; cartridge: string; line: number }): RouteStepEntry => ({ method: each.method, name: each.name, path: each.path, cartridge: each.cartridge, line: each.line })
+  const step = (each: RouteOperation & { path: string; cartridge: string }): RouteStepEntry => ({ method: each.method, name: each.name, path: each.path, cartridge: each.cartridge, line: each.line, handler: each.handler ?? null })
   if (resolved.storefronts.length === 0) {
     // No storefront path: what each cartridge's controller declares, the chain unknown.
     const declared = cartridgeRoutes(ctx).get(`${resolved.controller}-${resolved.name}`) ?? []

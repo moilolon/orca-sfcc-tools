@@ -47,9 +47,10 @@ export type ResourceUse = {
   end: number
 }
 
-export type RouteMethod = 'get' | 'post' | 'use' | 'append' | 'prepend' | 'replace'
+/** `export`: a controller written before SFRA's `server` declares a route as `exports.Name = …`. */
+export type RouteMethod = 'get' | 'post' | 'use' | 'append' | 'prepend' | 'replace' | 'export'
 
-export const DEFINING_METHODS: ReadonlySet<RouteMethod> = new Set(['get', 'post', 'use'])
+export const DEFINING_METHODS: ReadonlySet<RouteMethod> = new Set(['get', 'post', 'use', 'export'])
 const ROUTE_METHODS: ReadonlySet<string> = new Set(['get', 'post', 'use', 'append', 'prepend', 'replace'])
 
 export type RouteOperation = {
@@ -66,6 +67,8 @@ export type RouteOperation = {
   line: number
   /** How many middleware functions the call passes after the name. */
   middleware: number
+  /** `export`: the function that handles the request, when it can be found (the one a wrapper is given). */
+  handler?: { start: number; end: number; line: number }
 }
 
 /** What a controller extends: `server.extend(module.superModule)` or `server.extend(require('…'))`. */
@@ -276,7 +279,7 @@ export function scanScript(text: string, options: { controller?: boolean } = {})
     resources,
     members: memberUsesOf(text, facts, reads),
     superModule: facts.exports.superModule.uses.map(({ start, end }) => ({ start, end })),
-    controller: options.controller ? controllerFacts(text, facts, calls) : null,
+    controller: options.controller ? controllerFacts(text, facts, calls, functions) : null,
     exports: exportsOf(text, facts, functions),
     problems: parsed.problems.length,
     skipped: false
@@ -293,7 +296,7 @@ function serverNames(facts: ScriptFacts): Set<number> {
   return declarations
 }
 
-function controllerFacts(text: string, facts: ScriptFacts, calls: AST.CallExpression[]): ControllerFacts {
+function controllerFacts(text: string, facts: ScriptFacts, calls: AST.CallExpression[], functions: ReadonlyMap<number, FunctionNode>): ControllerFacts {
   const servers = serverNames(facts)
   const starts = lineStarts(text)
   const operations: RouteOperation[] = []
@@ -342,8 +345,47 @@ function controllerFacts(text: string, facts: ScriptFacts, calls: AST.CallExpres
       middleware: Math.max(0, call.arguments.length - 1)
     })
   }
+  // A controller written before SFRA's `server` declares its routes by exporting them:
+  // `exports.Show = guard.ensure(['get'], show)`, `exports.Show = show`, `module.exports = { Show: … }`.
+  let exportsRoutes = false
+  if (servers.size === 0) {
+    const callsByStart = new Map<number, AST.CallExpression>()
+    for (const call of calls) callsByStart.set(call.start, call)
+    const placeOf = (start: number, end: number) => ({ start, end, line: lineAt(starts, start) })
+    /** The function a node is or names, as the place of its declaration (or of the function itself). */
+    const declaredFunction = (id: number | null | undefined): RouteOperation['handler'] | null => {
+      const declaration = id === null || id === undefined ? undefined : facts.declarations[id]
+      const init = declaration?.init
+      return declaration && init && (init.type === 'FunctionDeclaration' || init.type === 'FunctionExpression' || init.type === 'ArrowFunctionExpression') ? placeOf(declaration.start, declaration.end) : null
+    }
+    const functionPlace = (node: Node | undefined): RouteOperation['handler'] | null => {
+      if (!node) return null
+      if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') return node.type === 'FunctionExpression' && node.id ? placeOf(node.id.start, node.id.end) : placeOf(node.start, node.start)
+      return isIdentifier(node) ? declaredFunction(referenceAt(facts, node.start)?.declaration) : null
+    }
+    for (const member of facts.exports.members) {
+      if (member.source !== 'member' && member.source !== 'object') continue
+      const value = member.value
+      let handler: RouteOperation['handler'] | null = null
+      if (value.kind === 'function') handler = functionPlace(functions.get(value.start)) ?? placeOf(value.start, value.start)
+      else if (value.kind === 'identifier') {
+        // A name exported that is no function is no route.
+        handler = declaredFunction(value.declaration)
+        if (!handler) continue
+      } else if (value.kind === 'call') {
+        // A wrapper (`guard.ensure([…], show)`): the function it is given, when one is.
+        const call = callsByStart.get(value.start)
+        for (const argument of [...(call?.arguments ?? [])].reverse()) {
+          handler = argument.type === 'SpreadElement' ? null : functionPlace(argument)
+          if (handler) break
+        }
+      } else continue
+      exportsRoutes = true
+      operations.push({ method: 'export', name: member.name, nameStart: member.start, nameEnd: member.end, start: member.start, end: value.end, line: lineAt(starts, member.start), middleware: 0, ...(handler ? { handler } : {}) })
+    }
+  }
   operations.sort((a, b) => a.start - b.start)
-  const exported = facts.exports.assignments.some((assignment) => {
+  const exported = exportsRoutes || facts.exports.assignments.some((assignment) => {
     const value = assignment.value
     if (value.kind !== 'call' || !value.callee || !value.callee.endsWith('.exports')) return false
     const object = value.callee.slice(0, -'.exports'.length)

@@ -227,7 +227,10 @@ Changing it needs the owner's yes.
       `x_fr` or `x_fr_FR` is a locale of `x`, `x_tile` is a bundle of its own. A route chain
       applies the deepest base first (`extend(module.superModule)` or a required controller): a
       `get`/`post`/`use` declares, `prepend` runs before and `append` after in the order applied,
-      `replace` drops the chain. What SFRA refuses when the controller loads is a problem and not
+      `replace` drops the chain. A controller with no `require('server')` (written before SFRA)
+      declares a route by exporting it (`exports.Show = guard.ensure([…], show)`, a function, a
+      name of one, `module.exports = { Show: … }`): method `export`, its `handler` the function a
+      wrapper is given when one is found. What SFRA refuses when the controller loads is a problem and not
       applied: `route_redefined` (a declaration of a name that exists) and `route_missing` (an
       `append`, `prepend` or `replace` of one that does not); `base_missing` and `not_exported`
       too, all for 6.5. `git.ts` runs only `rev-parse --verify --quiet <ref>^{commit}`, `ls-tree
