@@ -3,12 +3,12 @@
 import { assert, test } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { createStore } from './store'
-import { createWorkspaces, hiddenProjects, isLocal, listWorkspaces } from './workspaces'
+import { activeWorkspace, createWorkspaces, hiddenProjects, isLocal, KEPT_KEY, listWorkspaces, type WorkspacesOptions } from './workspaces'
 
 type Listed = { id: string; kind: 'worktree' | 'folder'; name: string; path: string; branch: string | null; hostId: string | null }
 
-function workspacesOver(listed: Listed[], focusedId: string | null, uploadingId: string | null = null) {
-  const data = new Map<string, unknown>(uploadingId ? [['core.uploading', uploadingId]] : [])
+function workspacesOver(listed: Listed[], focusedId: string | null, uploadingId: string | null = null, options: WorkspacesOptions = {}, data = new Map<string, unknown>()) {
+  if (uploadingId) data.set('core.uploading', uploadingId)
   const host = {
     call: async (method: string) => {
       if (method === 'workspace.list') return { workspaces: listed, truncated: false }
@@ -25,7 +25,7 @@ function workspacesOver(listed: Listed[], focusedId: string | null, uploadingId:
     },
     'core'
   )
-  return createWorkspaces(host, store)
+  return createWorkspaces(host, store, options)
 }
 
 const LOCAL: Listed = { id: 'w1', kind: 'worktree', name: 'shop', path: '/work/shop', branch: 'main', hostId: 'local' }
@@ -58,7 +58,7 @@ test('the uploading workspace comes with its code version, and both clear togeth
   assert.equal(await workspaces.upload(), null, 'a workspace no longer listed uploads nothing')
 })
 
-test('dw.json is looked for in the uploading workspace, else the focused one, and only on this machine', async () => {
+test('dw.json is looked for in the uploading workspace, else the focused one when every folder has a file, and only on this machine', async () => {
   assert.equal(await workspacesOver([LOCAL, REMOTE], 'w1').configRoot(), '/work/shop')
   assert.equal(await workspacesOver([LOCAL, REMOTE], 'w2').configRoot(), null, 'the focused workspace is remote')
   assert.equal(await workspacesOver([LOCAL, REMOTE], 'w2', 'w1').configRoot(), '/work/shop', 'the uploading one wins')
@@ -96,4 +96,164 @@ test('hidden projects: their ids, or null when Orca cannot say', async () => {
   assert.equal(await hiddenProjects(projects({ ...listed, truncated: true })), null)
   assert.equal(await hiddenProjects(projects(new Error('down'))), null)
   assert.equal(await hiddenProjects(projects(listed, false)), null)
+})
+
+/**
+ * A machine whose focus moves: `focus` moves it, `state.listed` is what Orca lists, `restart`
+ * builds the workspaces again over the same storage (a worker restart). Only the folders in
+ * `withFile` have a configuration file; `asked` is every folder asked about.
+ */
+function moving(listed: Listed[], withFile: string[]) {
+  const state = { listed, focused: null as string | null, truncated: false }
+  const data = new Map<string, unknown>()
+  const asked: string[] = []
+  const host = {
+    call: async (method: string) => {
+      if (method === 'workspace.list') return { workspaces: state.listed, truncated: state.truncated }
+      if (method === 'workspace.readContext') return state.focused ? { workspaceId: state.focused, branch: '', displayName: '', terminals: [] } : null
+      throw new Error(`unexpected host call: ${method}`)
+    }
+  } as unknown as OrcaWorkerApi['host']
+  const storage = {
+    get: async (key: string) => (data.get(key) ?? null) as string | null,
+    set: async (key: string, value: unknown) => void data.set(key, value),
+    delete: async (key: string) => void data.delete(key),
+    keys: async () => [...data.keys()]
+  }
+  const hasConfig = async (root: string) => (asked.push(root), withFile.includes(root))
+  const build = () => createWorkspaces(host, createStore(storage, 'core'), { hasConfig })
+  let workspaces = build()
+  return {
+    state,
+    data,
+    asked,
+    get workspaces() {
+      return workspaces
+    },
+    focus(id: string | null) {
+      state.focused = id
+    },
+    restart() {
+      workspaces = build()
+    },
+    /** Where dw.json is looked for, and which workspace the plugin is on and why. */
+    async where() {
+      const active = await activeWorkspace(workspaces)
+      return { root: await workspaces.configRoot(), id: active?.workspace.id ?? null, reason: active?.reason ?? null }
+    }
+  }
+}
+
+const SHOP: Listed = { id: 'w-shop', kind: 'worktree', name: 'shop', path: '/work/shop', branch: 'main', hostId: 'local' }
+const FIX: Listed = { id: 'w-fix', kind: 'worktree', name: 'shop fix', path: '/work/shop-fix', branch: 'fix', hostId: 'local' }
+const NOTES: Listed = { id: 'w-notes', kind: 'folder', name: 'notes', path: '/home/notes', branch: null, hostId: 'local' }
+const SERVER: Listed = { id: 'w-server', kind: 'folder', name: 'on a server', path: '/srv/shop', branch: null, hostId: 'ssh:build-01' }
+const KEPT = `core.${KEPT_KEY}`
+
+test('focus moves: a workspace with a file is used and kept; one without keeps the last that had one', async () => {
+  const machine = moving([SHOP, FIX, NOTES, SERVER], ['/work/shop', '/work/shop-fix'])
+  assert.deepEqual(await machine.where(), { root: null, id: null, reason: null }, 'nothing focused, nothing kept')
+  machine.focus('w-notes')
+  assert.deepEqual(await machine.where(), { root: '/home/notes', id: 'w-notes', reason: 'focused' }, 'nothing kept yet: the focused one, with no file')
+  machine.focus('w-shop')
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'focused' })
+  assert.equal(machine.data.get(KEPT), 'w-shop', 'kept by id in core’s storage')
+  machine.focus('w-notes')
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'kept' }, 'a workspace with no file keeps the last SFCC one')
+  machine.focus(null)
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'kept' }, 'no focus at all keeps it too')
+  machine.focus('w-fix')
+  assert.deepEqual(await machine.where(), { root: '/work/shop-fix', id: 'w-fix', reason: 'focused' }, 'another workspace with a file replaces it')
+  machine.focus('w-notes')
+  assert.deepEqual(await machine.where(), { root: '/work/shop-fix', id: 'w-fix', reason: 'kept' })
+})
+
+test('a remote workspace is never asked for a file nor kept: the last local one stays', async () => {
+  const machine = moving([SHOP, SERVER], ['/work/shop', '/srv/shop'])
+  machine.focus('w-server')
+  assert.deepEqual(await machine.where(), { root: null, id: 'w-server', reason: 'focused' }, 'nothing kept: the remote one, whose folder is never read')
+  machine.focus('w-shop')
+  await machine.where()
+  machine.focus('w-server')
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'kept' })
+  assert.ok(!machine.asked.includes('/srv/shop'), 'a remote path is never looked at as a local folder')
+  // The kept workspace now lives on another host: it is let go, never read as a local folder.
+  machine.state.listed = [{ ...SHOP, hostId: 'ssh:build-01' }, SERVER]
+  assert.deepEqual(await machine.where(), { root: null, id: 'w-server', reason: 'focused' })
+  assert.equal(machine.data.has(KEPT), false)
+})
+
+test('a kept workspace removed is let go, but never on a list Orca cut short', async () => {
+  const machine = moving([SHOP, NOTES], ['/work/shop'])
+  machine.focus('w-shop')
+  await machine.where()
+  machine.focus('w-notes')
+  machine.state.listed = [NOTES]
+  machine.state.truncated = true
+  assert.deepEqual(await machine.where(), { root: '/home/notes', id: 'w-notes', reason: 'focused' }, 'missing from a cut list: not used')
+  assert.equal(machine.data.get(KEPT), 'w-shop', 'nor forgotten')
+  machine.state.listed = [SHOP, NOTES]
+  machine.state.truncated = false
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'kept' })
+  machine.state.listed = [NOTES]
+  assert.deepEqual(await machine.where(), { root: '/home/notes', id: 'w-notes', reason: 'focused' })
+  assert.equal(machine.data.has(KEPT), false, 'removed: let go')
+  machine.state.listed = [SHOP, NOTES]
+  assert.deepEqual(await machine.where(), { root: '/home/notes', id: 'w-notes', reason: 'focused' }, 'and not taken back on its own')
+})
+
+test('a worker restart keeps the workspace kept', async () => {
+  const machine = moving([SHOP, NOTES], ['/work/shop'])
+  machine.focus('w-shop')
+  await machine.where()
+  machine.focus('w-notes')
+  machine.restart()
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'kept' })
+})
+
+test('the uploading workspace comes first; once released, it is the one kept', async () => {
+  const machine = moving([SHOP, FIX, NOTES], ['/work/shop', '/work/shop-fix'])
+  machine.focus('w-shop')
+  await machine.where()
+  await machine.workspaces.setUploading('w-fix', 'ws-fix')
+  machine.focus('w-notes')
+  assert.deepEqual(await machine.where(), { root: '/work/shop-fix', id: 'w-fix', reason: 'uploading' })
+  machine.focus('w-shop')
+  assert.deepEqual(await machine.where(), { root: '/work/shop-fix', id: 'w-fix', reason: 'uploading' }, 'never the focused one while one uploads')
+  machine.focus('w-notes')
+  await machine.workspaces.setUploading(null)
+  assert.deepEqual(await machine.where(), { root: '/work/shop-fix', id: 'w-fix', reason: 'kept' }, 'the released one stays while the focus has no file')
+  machine.focus('w-shop')
+  assert.deepEqual(await machine.where(), { root: '/work/shop', id: 'w-shop', reason: 'focused' })
+})
+
+test('a folder that cannot say whether it has a file counts as having none', async () => {
+  const data = new Map<string, unknown>([[KEPT, 'w-shop']])
+  const failing = workspacesOver([SHOP, NOTES], 'w-shop', null, { hasConfig: async () => Promise.reject(new Error('gone')) }, data)
+  assert.equal(await failing.configRoot(), '/work/shop', 'the kept one, which is the focused one too')
+  assert.equal((await failing.active?.())?.reason, 'focused')
+})
+
+test('with nothing uploading, focused or kept, Orca is not asked for the list', async () => {
+  const methods: string[] = []
+  const host = {
+    call: async (method: string) => {
+      methods.push(method)
+      if (method === 'workspace.readContext') return null
+      throw new Error(`not answered here: ${method}`)
+    }
+  } as unknown as OrcaWorkerApi['host']
+  const data = new Map<string, unknown>()
+  const storage = { get: async (key: string) => (data.get(key) ?? null) as string | null, set: async () => {}, delete: async () => {}, keys: async () => [] }
+  const workspaces = createWorkspaces(host, createStore(storage, 'core'), { hasConfig: async () => true })
+  assert.equal(await workspaces.configRoot(), null)
+  assert.equal(await workspaces.active?.(), null)
+  assert.deepEqual([...new Set(methods)], ['workspace.readContext'])
+})
+
+test('activeWorkspace: a stand-in without active() is read by the rule it replaced', async () => {
+  const stand = { list: async () => [], focused: async () => SHOP, uploading: async () => null, upload: async () => null, setUploading: async () => {}, configRoot: async () => null }
+  assert.deepEqual(await activeWorkspace(stand), { workspace: SHOP, reason: 'focused' })
+  assert.deepEqual(await activeWorkspace({ ...stand, uploading: async () => FIX }), { workspace: FIX, reason: 'uploading' })
+  assert.equal(await activeWorkspace({ ...stand, focused: async () => null }), null)
 })

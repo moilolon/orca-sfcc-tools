@@ -2,7 +2,7 @@
 // read it. Core declares its own requests here; each piece declares its own in
 // src/pieces/<piece>/protocol.ts, prefixed with the piece id (`sandbox.status`, `errors.list`).
 import type { ConfigState, Role, RoleState } from './core/instances'
-import type { PieceId } from './core/piece'
+import type { ActiveReason, PieceId } from './core/piece'
 import './pieces/sandbox/protocol'
 import './pieces/errors/protocol'
 import './pieces/debugger/protocol'
@@ -24,6 +24,11 @@ export type CoreStatus = {
    */
   instances: Record<Role, RoleState>
   pieces: PieceId[]
+  /**
+   * The workspace the plugin works on, by its name, and why (`Workspaces.active()`): it uploads,
+   * it is focused, or it is kept from before. Null when there is none; absent from a stand-in.
+   */
+  workspace?: { name: string; reason: ActiveReason } | null
 }
 
 declare module 'orca' {

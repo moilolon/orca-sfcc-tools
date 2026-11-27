@@ -17,7 +17,8 @@ export const READY_STATUS: CoreStatus = {
   b2c: { found: true, version: '2.11.0' },
   config: 'ok',
   instances: { sandbox: 'ready', development: 'ready', staging: 'ready', production: 'ready' },
-  pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor']
+  pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor'],
+  workspace: { name: 'garden-shop', reason: 'focused' }
 }
 
 /**

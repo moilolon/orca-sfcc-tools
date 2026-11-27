@@ -230,11 +230,19 @@ function Environments({ current, busy }: { current: CoreStatus; busy: boolean })
   )
 }
 
-/** Where dw.json is read from, in a word, and its state; when it cannot be used, how to fix it. */
-function ConfigFile({ config, custom, busy }: { config: ConfigState; custom: boolean | null; busy: boolean }) {
+const ACTIVE_REASONS = { uploading: 'activeUploading', focused: 'activeFocused', kept: 'activeKept' } as const
+
+/**
+ * Where dw.json is read from: the workspace the plugin is on and why, in a few words (a worker
+ * that does not say leaves both out), and the source, in a word; its state; when it cannot be
+ * used, how to fix it.
+ */
+function ConfigFile({ config, custom, busy, workspace }: { config: ConfigState; custom: boolean | null; busy: boolean; workspace: CoreStatus['workspace'] }) {
   const recheck = { label: text('recheck'), icon: 'refresh' as const, disabled: busy, onPress: () => void load() }
   return (
     <Group title={text('configFile')}>
+      {workspace === undefined ? null : <LabelledRow label={text('activeWorkspace')}>{workspace ? workspace.name : text('activeNone')}</LabelledRow>}
+      {workspace ? <LabelledRow label={text('activeReason')}>{text(ACTIVE_REASONS[workspace.reason])}</LabelledRow> : null}
       {custom === null ? null : <LabelledRow label={text('configReadFrom')}>{text(custom ? 'configFromSetting' : 'configFromWorkspace')}</LabelledRow>}
       <LabelledRow label={text('configState')}>
         <StateBadge tone={CONFIG_STATES[config].tone}>{text(CONFIG_STATES[config].key)}</StateBadge>
@@ -297,7 +305,7 @@ function SetupView({ sections, failed, locale, busy }: { sections: readonly Pane
       {current ? (
         <Stack gap="md">
           <Environments current={current} busy={busy} />
-          <ConfigFile config={current.config} custom={custom} busy={busy} />
+          <ConfigFile config={current.config} custom={custom} busy={busy} workspace={current.workspace} />
           <B2cState value={current.b2c} busy={busy} />
           <Pieces sections={sections} failed={failed} locale={locale} />
           <Text size="sm" muted>

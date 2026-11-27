@@ -33,7 +33,7 @@ import { B2cError, type InstancesState } from '../../core/b2c'
 import { isRole, ROLES, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
-import { isLocal } from '../../core/workspaces'
+import { activeWorkspace, isLocal } from '../../core/workspaces'
 import { createSeenFileStore, DataFileError, dataFiles, dataFolder, DATA_VERSION, updateDataFile } from './data-folder'
 import { FILE_WINDOW_BYTES, listArguments, maskedSamples, occurrencesOf, readArguments, windowFull } from './digest'
 import { createFrameResolver, type FrameResolver } from './frames'
@@ -232,12 +232,14 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   /**
-   * The workspace whose cartridges a frame is looked for in: the uploading one, else the focused
-   * one while no workspace uploads. Only a workspace on this machine. The one place that decides.
+   * The workspace whose cartridges a frame is looked for in: the one the plugin works on
+   * (`activeWorkspace`: the uploading one, else the focused one with a configuration file, else
+   * the last one that had one), whose dw.json the logs were read with. Only a workspace on this
+   * machine. The one place that decides.
    */
   async function frameRoot(): Promise<string | null> {
     try {
-      const workspace = (await ctx.workspaces.uploading()) ?? (await ctx.workspaces.focused())
+      const workspace = (await activeWorkspace(ctx.workspaces))?.workspace
       return workspace && isLocal(workspace) ? workspace.path : null
     } catch {
       return null

@@ -1,7 +1,9 @@
 // The worker over a mock host, a fake b2c and an invented dw.json: core.status, what reaches the
 // panel, storage and the log, and deactivation over pieces written here.
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
-import { rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, type SpawnCall } from '../core/test-support'
 import type { WorkerPiece } from '../core/piece'
 import { createActivate, deactivate } from './worker'
@@ -48,7 +50,9 @@ test('core.status: b2c found, the state of dw.json and of each role, every piece
       config: 'ok',
       // Staging has a host and a client id but no secret; production has no host.
       instances: { sandbox: 'ready', development: 'ready', staging: 'incomplete', production: 'absent' },
-      pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor']
+      pieces: ['isml', 'sandbox', 'errors', 'debugger', 'engine', 'editor'],
+      // The workspace the plugin is on, by name, and why: never its path.
+      workspace: { name: 'shop', reason: 'focused' }
     })
     // The status asks b2c for its version, once. A piece may have asked for something of its
     // own when it started: that is its business, and its own tests'.
@@ -162,6 +166,49 @@ test('a workspace on another host is never read as a folder of this machine', as
     }
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('focus on a workspace with no dw.json keeps the last one that had one, and core.status says so', async () => {
+  const shop = makeWorkspace()
+  const notes = mkdtempSync(join(tmpdir(), 'sfcc-tools-notes-'))
+  try {
+    const focus = (id: string) => ({ workspaceId: id, branch: '', displayName: id, terminals: [] })
+    const host = mockHost({
+      capabilities: CAPABILITIES,
+      results: {
+        'workspace.list': {
+          workspaces: [
+            { id: 'w-shop', kind: 'folder', name: 'shop', path: shop, branch: null, hostId: 'local' },
+            { id: 'w-notes', kind: 'folder', name: 'notes', path: notes, branch: null, hostId: 'local' }
+          ],
+          truncated: false
+        },
+        'workspace.readContext': focus('w-notes')
+      }
+    })
+    const spawn = fakeSpawner((call) => call.child.finish(0, VERSION))
+    // Whether a folder has a dw.json is asked of the disk, as the real worker asks it.
+    const machine = { ...MACHINE, isFile: async (path: string) => path === '/fake/bin/b2c' || existsSync(path) }
+    const worker = await mountWorker({ default: createActivate({ ...machine, spawn: spawn.spawn }), deactivate }, { host })
+    const first = await worker.request('core.status', {})
+    assert.equal(first.config, 'missing', 'nothing kept yet: the focused folder, which has none')
+    assert.deepEqual(first.workspace, { name: 'notes', reason: 'focused' })
+    host.respond('workspace.readContext', focus('w-shop'))
+    const onShop = await worker.request('core.status', {})
+    assert.equal(onShop.config, 'ok')
+    assert.deepEqual(onShop.workspace, { name: 'shop', reason: 'focused' })
+    host.respond('workspace.readContext', focus('w-notes'))
+    const kept = await worker.request('core.status', {})
+    assert.equal(kept.config, 'ok', 'the environments stay')
+    assert.equal(kept.instances.sandbox, 'ready')
+    assert.deepEqual(kept.workspace, { name: 'shop', reason: 'kept' })
+    assert.equal(worker.host.data().storage['core.keptWorkspace'], 'w-shop', 'kept by id, never by path')
+    assertNoSecrets(JSON.stringify(kept), 'the answer')
+    await worker.deactivate()
+  } finally {
+    rmSync(shop, { recursive: true, force: true })
+    rmSync(notes, { recursive: true, force: true })
   }
 })
 
