@@ -6,21 +6,24 @@ import { assert, test } from 'orca/testing'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { largeScript, mutate, seeded } from './fixtures/generate'
+import { fixture, SCRIPT_FIXTURES, TEMPLATE_FIXTURES } from './fixtures/read'
 import { forEachChild, parseExpression, parseScript, parseTemplate, scriptFacts, templateScript, tokenize, type IsmlNode, type Node, type Problem } from './index'
 
 const HERE = new URL('./', import.meta.url)
-const fixture = (name: string) => readFileSync(new URL(`fixtures/${name}`, HERE), 'utf8')
-const SCRIPTS = ['controller.js', 'model.js', 'shapes.js', 'helper.js', 'broken.js', 'truncated.js'].map(fixture)
-const TEMPLATES = ['template.isml', 'broken.isml'].map(fixture)
+const SCRIPTS = SCRIPT_FIXTURES.map(fixture)
+const TEMPLATES = TEMPLATE_FIXTURES.map(fixture)
 
-/** Every node of a JavaScript tree lies inside its parent, with `start <= end`; returns how many there are. */
-function checkTree(node: Node, low: number, high: number, where: string): number {
-  assert.ok(node.start <= node.end, `${where}: ${node.type} ends before it starts`)
-  assert.ok(low <= node.start && node.end <= high, `${where}: ${node.type} ${node.start}-${node.end} outside ${low}-${high}`)
-  let count = 1
-  forEachChild(node, (child) => {
-    count += checkTree(child, node.start, node.end, where)
-  })
+/** Every node of a JavaScript tree lies inside its parent, with `start <= end` (an explicit stack: trees can be deep); returns how many there are. */
+function checkTree(root: Node, low: number, high: number, where: string): number {
+  const stack: { node: Node; low: number; high: number }[] = [{ node: root, low, high }]
+  let count = 0
+  while (stack.length > 0) {
+    const { node, low: from, high: to } = stack.pop() as { node: Node; low: number; high: number }
+    count++
+    assert.ok(node.start <= node.end, `${where}: ${node.type} ends before it starts`)
+    assert.ok(from <= node.start && node.end <= to, `${where}: ${node.type} ${node.start}-${node.end} outside ${from}-${to}`)
+    forEachChild(node, (child) => stack.push({ node: child, low: node.start, high: node.end }))
+  }
   return count
 }
 

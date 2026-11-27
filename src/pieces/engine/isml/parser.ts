@@ -29,6 +29,24 @@ export const ISML_CONTAINERS: ReadonlySet<string> = new Set(['isif', 'isloop', '
 /** How deep elements may nest: deeper, an element is kept empty and its content becomes its siblings. */
 export const MAX_ELEMENT_DEPTH = 300
 
+/** How many tags may be read inside one another (ISML tags inside a tag or a value): deeper, the tag ends there. */
+export const MAX_TAG_NESTING = 32
+
+/**
+ * How far a `${…}` that spans lines may run looking for its `}`: past this many lines or
+ * characters, or at a line that starts with a tag, it is unclosed and ends with its first line.
+ */
+export const EXPRESSION_LINES = 20
+export const EXPRESSION_CHARACTERS = 4000
+
+// What the parser searches for. Module constants: `find` remembers its last search per pattern.
+const COMMENT_END = /-->/g
+const ISCOMMENT_END = /<\/iscomment\s*>/gi
+const ISSCRIPT_END = /<\/isscript\s*>/gi
+const SCRIPT_END = /<\/script/gi
+const STYLE_END = /<\/style/gi
+const TAG_LINE = /(?:\r\n?|\n)[ \t]*<[A-Za-z/!]/g
+
 /** HTML elements that never have content. */
 export const HTML_VOID: ReadonlySet<string> = new Set([
   'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'
@@ -177,22 +195,45 @@ class IsmlParser {
 
   private tooDeep = false
 
-  /** Reports `too_deep` once per template, at the first element past the limit. */
-  private reportTooDeep(element: Element): void {
+  /** Reports `too_deep` once per template, at the first element or tag past a limit. */
+  private reportTooDeep(start: number, end: number): void {
     if (this.tooDeep) return
     this.tooDeep = true
-    this.report('too_deep', element.start, element.openEnd)
+    this.report('too_deep', start, end)
   }
 
   report(code: ProblemCode, start: number, end: number, detail?: string): void {
     this.problems.push(detail === undefined ? { code, start, end } : { code, start, end, detail })
   }
 
-  /** The first match of the global pattern `pattern` from `from` that ends by `limit`. */
+  /** The last search of each pattern: from where, and its first match in the whole text (or none). */
+  private readonly searches = new Map<RegExp, { from: number; match: RegExpExecArray | null }>()
+
+  /**
+   * The first match of the global pattern `pattern` from `from` that ends by `limit`. The last
+   * search of each pattern is remembered, so a run of unclosed constructs that each look for
+   * their end (`-->`, `</iscomment>`) reads the text once, not once per construct.
+   */
   private find(pattern: RegExp, from: number, limit: number): RegExpExecArray | null {
-    pattern.lastIndex = from
-    const match = pattern.exec(this.text)
+    const known = this.searches.get(pattern)
+    let match: RegExpExecArray | null
+    if (known && known.from <= from && (known.match === null || from <= known.match.index)) {
+      match = known.match
+    } else {
+      pattern.lastIndex = from
+      match = pattern.exec(this.text)
+      this.searches.set(pattern, { from, match })
+    }
     return match && match.index + match[0].length <= limit ? match : null
+  }
+
+  /** At `at` (a line break) the next line starts with a tag; ISML tags count unless `html` only. */
+  private tagLineAfter(at: number, limit: number, htmlOnly: boolean): boolean {
+    const text = this.text
+    let q = at + (text[at] === '\r' && text[at + 1] === '\n' ? 2 : 1)
+    while (q < limit && (text[q] === ' ' || text[q] === '\t')) q++
+    if (text[q] !== '<' || !(isLetter(text[q + 1]) || text[q + 1] === '/' || text[q + 1] === '!')) return false
+    return !htmlOnly || !(this.isIsmlTagAt(q, false) || this.isIsmlTagAt(q, true))
   }
 
   private startsWithCI(value: string, at: number): boolean {
@@ -284,7 +325,7 @@ class IsmlParser {
             if (element.name === 'ismodule') this.addModule(element)
             if (ISML_CONTAINERS.has(element.name) && !element.selfClosing) {
               if (room) stack.push({ element })
-              else this.reportTooDeep(element)
+              else this.reportTooDeep(element.start, element.openEnd)
             }
           } else if (!element.selfClosing && !HTML_VOID.has(element.name)) {
             if (element.name === 'script' || element.name === 'style') {
@@ -292,7 +333,7 @@ class IsmlParser {
             } else if (room) {
               stack.push({ element })
             } else {
-              this.reportTooDeep(element)
+              this.reportTooDeep(element.start, element.openEnd)
             }
           }
           continue
@@ -364,7 +405,7 @@ class IsmlParser {
 
   /** `<script>` and `<style>`: their content is text for HTML, but ISML in it is parsed. Answers where parsing resumes. */
   private parseRawText(element: Element, limit: number): number {
-    const match = this.find(element.name === 'script' ? /<\/script/gi : /<\/style/gi, element.openEnd, limit)
+    const match = this.find(element.name === 'script' ? SCRIPT_END : STYLE_END, element.openEnd, limit)
     if (!match) {
       // No end tag: the rest is parsed as ordinary content.
       this.report('unclosed_raw_text', element.start, element.openEnd, element.name)
@@ -384,13 +425,32 @@ class IsmlParser {
     while (p < limit && NAME_CHAR.test(text[p])) p++
     const name = text.slice(start + 2, p).toLowerCase()
     // Up to its `>`; an end tag missing one stops before the next `<` or the end of its line.
-    while (p < limit && text[p] !== '>' && text[p] !== '<' && text[p] !== '\n') p++
+    while (p < limit && text[p] !== '>' && text[p] !== '<' && text[p] !== '\n' && text[p] !== '\r') p++
     if (p < limit && text[p] === '>') p++
     else this.report('unclosed_start_tag', start, p, name)
     return { type: 'CloseTag', name, start, end: p }
   }
 
+  /** How many start tags are being read inside one another (ISML tags inside a tag or a value). */
+  private tagDepth = 0
+
   private parseStartTag(start: number, limit: number): Element {
+    this.tagDepth++
+    try {
+      return this.parseStartTagInner(start, limit)
+    } finally {
+      this.tagDepth--
+    }
+  }
+
+  /** Whether one more tag may be read inside the current one; past the bound it reports `too_deep` once. */
+  private roomForTag(at: number): boolean {
+    if (this.tagDepth < MAX_TAG_NESTING) return true
+    this.reportTooDeep(at, at + 1)
+    return false
+  }
+
+  private parseStartTagInner(start: number, limit: number): Element {
     const text = this.text
     let p = start + 1
     while (p < limit && NAME_CHAR.test(text[p])) p++
@@ -429,7 +489,12 @@ class IsmlParser {
         break
       }
       if (c === '<') {
-        if (this.isIsmlTagAt(p, false)) {
+        const ismlOpen = this.isIsmlTagAt(p, false)
+        if (ismlOpen && !this.roomForTag(p)) {
+          // Too many tags inside one another: this one ends here, and the rest is read as content.
+          break
+        }
+        if (ismlOpen) {
           const inner = this.parseStartTag(p, limit)
           element.inTag.push(inner)
           p = inner.openEnd
@@ -492,21 +557,34 @@ class IsmlParser {
   }
 
   private parseQuotedValue(start: number, limit: number, quote: '"' | "'"): AttributeValue {
-    let scan = this.scanValueParts(start + 1, limit, quote)
-    if (!scan.closed) {
-      // No closing quote: the value stops at the end of its line, and the rest is parsed again.
-      let lineEnd = this.text.indexOf('\n', start)
-      if (lineEnd === -1 || lineEnd > limit) lineEnd = limit
-      scan = this.scanValueParts(start + 1, lineEnd, quote)
-      this.report('unclosed_attribute_value', start, scan.end)
-      return { quote, contentStart: start + 1, contentEnd: scan.end, parts: scan.parts, closed: false, start, end: scan.end }
+    const mark = this.problems.length
+    const scan = this.scanValueParts(start + 1, limit, quote)
+    if (scan.closed) return { quote, contentStart: start + 1, contentEnd: scan.end, parts: scan.parts, closed: true, start, end: scan.end + 1 }
+    // No closing quote: the value stops at the end of its line, and the rest is parsed again as
+    // content. The scan is cut there, never run twice (tags nested in values would make that
+    // exponential): a part that crosses the cut moves it back to where the part starts.
+    let cut = start
+    while (cut < scan.end && this.text[cut] !== '\n' && this.text[cut] !== '\r') cut++
+    const parts: AttributeValue['parts'] = []
+    for (const part of scan.parts) {
+      if (part.end <= cut) {
+        parts.push(part)
+        continue
+      }
+      if (part.type === 'Text' && part.start < cut) parts.push({ type: 'Text', start: part.start, end: cut })
+      else if (part.start < cut) cut = part.start
+      break
     }
-    return { quote, contentStart: start + 1, contentEnd: scan.end, parts: scan.parts, closed: true, start, end: scan.end + 1 }
+    // What was read past the cut is read again: its problems go with it.
+    for (let i = this.problems.length - 1; i >= mark; i--) if (this.problems[i].start >= cut) this.problems.splice(i, 1)
+    this.report('unclosed_attribute_value', start, cut)
+    return { quote, contentStart: start + 1, contentEnd: cut, parts, closed: false, start, end: cut }
   }
 
   /**
    * The parts of a quoted value from `from`, up to its quote (`closed`) or `limit`. A value may
-   * span lines, but not into a line that starts with a tag: its quote is taken as missing there.
+   * span lines, but not into a line that starts with an HTML tag: its quote is taken as missing
+   * there. An ISML tag belongs in a value, at the start of a line too (`class="a\n<isif …>b</isif>"`).
    */
   private scanValueParts(from: number, limit: number, quote: '"' | "'"): { parts: AttributeValue['parts']; end: number; closed: boolean } {
     const text = this.text
@@ -522,13 +600,9 @@ class IsmlParser {
         flush(p)
         return { parts, end: p, closed: true }
       }
-      if (c === '\n') {
-        let q = p + 1
-        while (q < limit && (text[q] === ' ' || text[q] === '\t' || text[q] === '\r')) q++
-        if (text[q] === '<' && (isLetter(text[q + 1]) || text[q + 1] === '/' || text[q + 1] === '!')) {
-          flush(p)
-          return { parts, end: p, closed: false }
-        }
+      if ((c === '\n' || c === '\r') && this.tagLineAfter(p, limit, true)) {
+        flush(p)
+        return { parts, end: p, closed: false }
       }
       if (c === '$' && text[p + 1] === '{') {
         flush(p)
@@ -537,7 +611,7 @@ class IsmlParser {
         p = textStart = expression.end
         continue
       }
-      if (c === '<' && this.isIsmlTagAt(p, false)) {
+      if (c === '<' && this.isIsmlTagAt(p, false) && this.roomForTag(p)) {
         flush(p)
         const element = this.parseStartTag(p, limit)
         parts.push(element)
@@ -592,11 +666,12 @@ class IsmlParser {
   }
 
   private parseHtmlComment(start: number, limit: number): HtmlComment {
-    const close = this.text.indexOf('-->', start + 4)
-    if (close === -1 || close + 3 > limit) {
+    const match = this.find(COMMENT_END, start + 4, limit)
+    if (!match) {
       this.report('unclosed_comment', start, start + 4)
       return { type: 'Comment', children: [], closed: false, start, end: start + 4 }
     }
+    const close = match.index
     const children = this.parseNodes(start + 4, close, false)
     return { type: 'Comment', children, closed: true, start, end: close + 3 }
   }
@@ -605,7 +680,7 @@ class IsmlParser {
     const open = this.parseStartTag(start, limit)
     const contentStart = open.openEnd
     if (open.selfClosing) return { type: 'IsComment', contentStart, contentEnd: contentStart, closed: true, start, end: contentStart }
-    const match = this.find(/<\/iscomment\s*>/gi, contentStart, limit)
+    const match = this.find(ISCOMMENT_END, contentStart, limit)
     if (!match) {
       // Unclosed: only the tag itself is the comment; what follows is parsed as usual.
       this.report('unclosed_iscomment', start, contentStart)
@@ -620,7 +695,7 @@ class IsmlParser {
     const codeStart = open.openEnd
     const node: IsScript = { type: 'IsScript', attributes: open.attributes, openEnd: open.openEnd, codeStart, codeEnd: codeStart, close: null, start, end: codeStart }
     if (open.selfClosing) return node
-    const match = this.find(/<\/isscript\s*>/gi, codeStart, limit)
+    const match = this.find(ISSCRIPT_END, codeStart, limit)
     if (match) {
       node.codeEnd = match.index
       node.close = { start: node.codeEnd, end: node.codeEnd + match[0].length }
@@ -628,8 +703,8 @@ class IsmlParser {
       return node
     }
     // Unclosed: the script stops before the next line that starts with a tag.
-    const tagLine = this.find(/\n[ \t]*<[A-Za-z/!]/g, codeStart, limit)
-    node.codeEnd = tagLine ? tagLine.index + 1 : limit
+    const tagLine = this.find(TAG_LINE, codeStart, limit)
+    node.codeEnd = tagLine ? tagLine.index + (tagLine[0].startsWith('\r\n') ? 2 : 1) : limit
     node.end = node.codeEnd
     this.report('unclosed_isscript', start, codeStart)
     return node
@@ -637,18 +712,34 @@ class IsmlParser {
 }
 
 /**
- * Where a `${…}` whose code starts at `from` ends: at the `}` that balances it (`closed`), or
- * where an unclosed one stops: the end of the line, `</` or `-->` (outside a quoted value), or
- * `quote` unless `lenient`.
+ * Where a `${…}` whose code starts at `from` ends: at the `}` that balances it (`closed`), over
+ * nested braces, strings, template literals, regex literals and `/* *\/` comments, across lines
+ * too. One that does not balance is unclosed and ends at the first of: the end of its first line,
+ * `</` or `-->` (outside a quoted value), or `quote` unless `lenient`. Looking for the balance
+ * stops at a line that starts with a tag, or past `EXPRESSION_LINES` or `EXPRESSION_CHARACTERS`,
+ * so no `${` reads far: the work per expression is bounded.
  */
 export function scanExpression(text: string, from: number, limit: number, quote: '"' | "'" | null, lenient: boolean): { end: number; closed: boolean } {
   // What is open: ordinary braces, a template literal, a template's `${`.
   const stack: ('brace' | 'template' | 'substitution')[] = []
   let p = from
-  const stops = (c: string) => c === '\n' || c === '\r' || (quote !== null && !lenient && c === quote)
+  let firstLineEnd = -1
+  let lines = 0
+  // The last character of code that is not a space: whether a `/` starts a regex or divides.
+  let previous = ''
+  const unclosed = (at: number) => ({ end: firstLineEnd === -1 ? Math.min(at, limit) : Math.min(at, firstLineEnd), closed: false })
+  const stopsAt = (c: string) => quote !== null && !lenient && c === quote
   while (p < limit) {
     const c = text[p]
-    if (stops(c)) return { end: p, closed: false }
+    if (c === '\n' || c === '\r') {
+      if (firstLineEnd === -1) firstLineEnd = p
+      const next = p + (c === '\r' && text[p + 1] === '\n' ? 2 : 1)
+      lines++
+      if (lines > EXPRESSION_LINES || next - from > EXPRESSION_CHARACTERS || startsTag(text, next, limit)) return unclosed(p)
+      p = next
+      continue
+    }
+    if (stopsAt(c)) return unclosed(p)
     if (stack[stack.length - 1] === 'template') {
       if (c === '`') stack.pop()
       else if (c === '\\') p++
@@ -657,19 +748,22 @@ export function scanExpression(text: string, from: number, limit: number, quote:
         p++
       }
       p++
+      previous = 'a'
       continue
     }
-    if (quote === null && c === '<' && text[p + 1] === '/') return { end: p, closed: false }
-    if (quote === null && c === '-' && text.startsWith('-->', p)) return { end: p, closed: false }
+    if (quote === null && c === '<' && text[p + 1] === '/') return unclosed(p)
+    if (quote === null && c === '-' && text.startsWith('-->', p)) return unclosed(p)
     if (c === '}') {
       if (stack.length === 0) return { end: p, closed: true }
       stack.pop()
       p++
+      previous = '}'
       continue
     }
     if (c === '{') {
       stack.push('brace')
       p++
+      previous = '{'
       continue
     }
     if (c === '`') {
@@ -678,7 +772,7 @@ export function scanExpression(text: string, from: number, limit: number, quote:
       continue
     }
     if (c === '"' || c === "'") {
-      // A string, to its quote or the end of its line (or the value's quote).
+      // A string: to its quote, or it ends at its line (or at the value's quote).
       p++
       while (p < limit) {
         const s = text[p]
@@ -686,21 +780,54 @@ export function scanExpression(text: string, from: number, limit: number, quote:
           p++
           break
         }
-        if (stops(s)) break
+        if (s === '\n' || s === '\r' || stopsAt(s)) break
         p += s === '\\' ? 2 : 1
       }
+      previous = 'a'
       continue
     }
     if (c === '/' && text[p + 1] === '*') {
-      const close = text.indexOf('*/', p + 2)
-      const lineEnd = text.indexOf('\n', p)
-      p = close !== -1 && close < limit && (lineEnd === -1 || close < lineEnd) ? close + 2 : p + 2
+      // A comment, to its `*/` on the same line.
+      p += 2
+      while (p < limit && text[p] !== '\n' && text[p] !== '\r' && !(text[p] === '*' && text[p + 1] === '/')) p++
+      if (p < limit && text[p] === '*') p += 2
       continue
     }
+    if (c === '/' && REGEX_BEFORE.includes(previous)) {
+      // A regex literal: its quotes and braces are not code.
+      p++
+      let inClass = false
+      while (p < limit) {
+        const r = text[p]
+        if (r === '\n' || r === '\r' || stopsAt(r)) break
+        if (r === '\\') {
+          p += 2
+          continue
+        }
+        p++
+        if (r === '[') inClass = true
+        else if (r === ']') inClass = false
+        else if (r === '/' && !inClass) break
+      }
+      previous = 'a'
+      continue
+    }
+    if (c !== ' ' && c !== '\t') previous = c
     p++
   }
-  return { end: Math.min(p, limit), closed: false }
+  return unclosed(limit)
 }
+
+// After these (or at the start), a `/` begins a regex literal; after anything else it divides.
+const REGEX_BEFORE = ['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', ';', '+', '-', '*', '%', '<', '>', '~', '^']
+
+/** At `at` starts a line whose first character, after spaces, opens a tag. */
+function startsTag(text: string, at: number, limit: number): boolean {
+  let q = at
+  while (q < limit && (text[q] === ' ' || text[q] === '\t')) q++
+  return text[q] === '<' && (isLetter(text[q + 1]) || text[q + 1] === '/' || text[q + 1] === '!')
+}
+
 
 // ---------------------------------------------------------------------------------------------
 // Lookups
@@ -719,19 +846,23 @@ export function attributeText(text: string, element: Element | IsScript, name: s
 
 /** Calls `visit` on every node of the document, in source order: children, attribute values and tag contents included. */
 export function walkTemplate(document: IsmlDocument, visit: (node: IsmlNode) => void): void {
-  const walk = (nodes: readonly IsmlNode[]) => {
-    for (const node of nodes) {
-      visit(node)
-      if (node.type === 'Element') {
-        const inner: IsmlNode[] = [...node.inTag]
-        for (const a of node.attributes) if (a.value) inner.push(...a.value.parts)
-        inner.sort((x, y) => x.start - y.start)
-        walk(inner)
-        walk(node.children)
-      } else if (node.type === 'Comment') {
-        walk(node.children)
-      }
+  // An explicit stack, not recursion: nodes are pushed in reverse so they come off in order.
+  const stack: IsmlNode[] = []
+  const pushAll = (nodes: readonly IsmlNode[]) => {
+    for (let i = nodes.length - 1; i >= 0; i--) stack.push(nodes[i])
+  }
+  pushAll(document.children)
+  while (stack.length > 0) {
+    const node = stack.pop() as IsmlNode
+    visit(node)
+    if (node.type === 'Element') {
+      const inner: IsmlNode[] = [...node.inTag]
+      for (const a of node.attributes) if (a.value) inner.push(...a.value.parts)
+      inner.sort((x, y) => x.start - y.start)
+      pushAll(node.children)
+      pushAll(inner)
+    } else if (node.type === 'Comment') {
+      pushAll(node.children)
     }
   }
-  walk(document.children)
 }

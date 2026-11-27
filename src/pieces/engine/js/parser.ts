@@ -93,9 +93,9 @@ export function parseExpression(text: string, options: ParseOptions = {}): Expre
 export const MAX_DEPTH = 200
 
 /**
- * How deep the tree may grow, counting each link of a chain (`a.b.c`, `a + b + c`, `f()()`) as a
- * level as well as each recursion: a chain is read in a loop, but its tree nests, and whoever
- * walks the tree recursively must be able to.
+ * How deep expressions may grow, counting each link of a chain (`a.b.c`, `a + b + c`, `f()()`)
+ * as a level as well as each recursion. An `else if` chain is not bounded (a long one is valid
+ * code), so a tree can still be as deep as its input: walk it with `walk` or a stack of your own.
  */
 export const MAX_TREE_DEPTH = 1000
 
@@ -310,7 +310,7 @@ class Parser {
   private enter(): boolean {
     if (this.depth >= MAX_DEPTH || this.treeDepth >= MAX_TREE_DEPTH) {
       const t = this.tok
-      this.report('too_deep', t.start, t.end)
+      this.tooDeep()
       if (t.type !== 'eof') this.next()
       return false
     }
@@ -327,11 +327,23 @@ class Parser {
   /** One more link of a chain read in a loop; false past the tree's limit, where the chain stops. */
   private link(): boolean {
     if (this.treeDepth >= MAX_TREE_DEPTH) {
-      this.report('too_deep', this.tok.start, this.tok.end)
+      this.tooDeep()
       return false
     }
     this.treeDepth++
     return true
+  }
+
+  private tooDeepReported = false
+
+  /** Reports `too_deep` once per parse, at the first place it happens; later ones only mark the statement for recovery. */
+  private tooDeep(): void {
+    if (!this.tooDeepReported) {
+      this.tooDeepReported = true
+      this.report('too_deep', this.tok.start, this.tok.end)
+    } else {
+      this.pendingError = true
+    }
   }
 
   private parseStatementInner(): Statement {
@@ -701,8 +713,15 @@ class Parser {
       this.next()
       return { type: 'Identifier', name: t.value, start: t.start, end: t.end }
     }
-    if (this.at('[')) return this.parseArrayPattern()
-    if (this.at('{')) return this.parseObjectPattern()
+    if (this.at('[') || this.at('{')) {
+      // Patterns nest: bounded like expressions.
+      if (!this.enter()) return this.invalid(t.start, this.prevEnd)
+      try {
+        return this.at('[') ? this.parseArrayPattern() : this.parseObjectPattern()
+      } finally {
+        this.leave()
+      }
+    }
     this.report('expected', t.start, t.end, 'name')
     return this.invalid(t.start, t.start)
   }

@@ -232,7 +232,9 @@ test('declarations, scopes and the declaration of each use', () => {
   const hoisted = declared(facts, text, 'hoisted', 1)
   const functionScope = facts.scopes[hoisted.scope]
   assert.equal(functionScope.kind, 'function', '`var` belongs to the function, not the block')
-  assert.equal(declared(facts, text, 'param').scope, hoisted.scope)
+  const paramScope = facts.scopes[declared(facts, text, 'param').scope]
+  assert.equal(paramScope.kind, 'params')
+  assert.equal(functionScope.parent, paramScope.id, 'the parameters’ scope holds the body’s')
   const inner = declared(facts, text, 'inner')
   assert.equal(facts.scopes[inner.scope].kind, 'block')
   assert.equal(facts.scopes[declared(facts, text, 'err', 0).scope].kind, 'catch')
@@ -270,6 +272,44 @@ test('shadowing, and which uses write', () => {
   assert.deepEqual(writes, ['x', 'a', 'b', 'c', 'e', 'h'])
   const reads = facts.references.filter((r) => !r.write).map((r) => r.name)
   assert.deepEqual(reads, ['x', 'x', 'd', 'g', 'k'])
+})
+
+test('Object.assign as a statement exports onto module.exports, exports, or an exported name', () => {
+  const ontoModule = factsOf('Object.assign(module.exports, { a: 1 });\nObject.assign(exports, { b: function () {} });')
+  assert.deepEqual(ontoModule.exports.members.map((m) => [m.name, m.source, m.value.kind]), [
+    ['a', 'assign', 'other'],
+    ['b', 'assign', 'function']
+  ])
+  const text = 'var base = module.superModule;\nObject.assign(base, { extra: function () {} });\nmodule.exports = base;'
+  const extended = factsOf(text)
+  assert.deepEqual(extended.exports.members.map((m) => [m.name, m.source, m.start]), [['extra', 'assign', offsetOf(text, 'extra')]])
+  const local = factsOf('var other = {};\nObject.assign(other, { hidden: 1 });\nmodule.exports = {};')
+  assert.deepEqual(local.exports.members, [], 'a name that is not exported exports nothing')
+  const assigned = factsOf('module.exports = Object.assign({}, { once: 1 });')
+  assert.deepEqual(assigned.exports.members.map((m) => m.name), ['once'], 'the value of an export is counted once')
+})
+
+test('module and exports are the module’s only when no local name shadows them', () => {
+  const shadowed = factsOf('function f(exports, module) { exports.x = 1; module.exports = {}; module.exports.y = 2; }\nexports.z = 3;')
+  assert.deepEqual(shadowed.exports.members.map((m) => m.name), ['z'])
+  assert.deepEqual(shadowed.exports.assignments, [])
+})
+
+test('a default parameter sees earlier parameters and outer names, not later ones or the body', () => {
+  const text = 'var x = 1, b = 0;\nfunction f(a = x, c = a, d = b, b) { var x = 2; return x + a; }'
+  const facts = factsOf(text)
+  const byKind = (name: string, kind: string) => facts.declarations.find((d) => d.name === name && d.kind === kind) as Declaration
+  const outerX = byKind('x', 'var')
+  const innerX = facts.declarations.filter((d) => d.name === 'x')[1]
+  const paramA = byKind('a', 'param')
+  const outerB = byKind('b', 'var')
+  assert.equal(outerX.start, offsetOf(text, 'x = 1'))
+  assert.equal(innerX.start, offsetOf(text, 'x = 2'))
+  assert.equal(resolved(facts, text, 'x', 0, 'x, c ='), outerX.id, 'a default sees the outer x, not the body’s var')
+  assert.equal(resolved(facts, text, 'a', 0, 'a, d'), paramA.id, 'an earlier parameter')
+  assert.equal(resolved(facts, text, 'b', 0, 'b, b)'), outerB.id, 'a later parameter is not seen: the outer b')
+  assert.equal(resolved(facts, text, 'x', 0, 'x + a'), innerX.id, 'the body sees its own var')
+  assert.equal(resolved(facts, text, 'a', 0, 'a; }'), paramA.id, 'and the parameters')
 })
 
 test('declarations keep their JSDoc', () => {

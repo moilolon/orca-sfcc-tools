@@ -13,7 +13,8 @@ import type * as AST from './ast'
 import type { Comment, Expression, Node, Pattern, Range } from './ast'
 import { forEachChild } from './ast'
 
-export type ScopeKind = 'module' | 'template' | 'function' | 'block' | 'catch' | 'class' | 'loop'
+/** `params` holds a function's parameters and is the parent of its body's `function` scope. */
+export type ScopeKind = 'module' | 'template' | 'function' | 'params' | 'block' | 'catch' | 'class' | 'loop'
 
 export interface Scope extends Range {
   id: number
@@ -182,24 +183,42 @@ export function scriptFacts(program: AST.Program): ScriptFacts {
  */
 export function fragmentFacts(range: Range, fragments: readonly Fragment[], declarations: readonly TemplateDeclaration[] = []): ScriptFacts {
   const builder = new FactsBuilder('template', range, true)
-  const loops: { scope: number; range: Range }[] = []
-  // Loop scopes first, outer before inner, so each one's parent is already known.
+  // Loop scopes: loops nest like the elements they come from, so one sweep in order of start
+  // (outer before inner) with a stack of the open ones gives each its parent.
   const loopDeclarations = declarations.filter((d) => d.kind === 'isloop').sort((a, b) => a.visible.start - b.visible.start || b.visible.end - a.visible.end)
+  const loops: { scope: number; range: Range }[] = []
+  const byRange = new Map<string, number>()
+  const open: { scope: number; range: Range }[] = []
   for (const declaration of loopDeclarations) {
-    let loop = loops.find((l) => l.range.start === declaration.visible.start && l.range.end === declaration.visible.end)
-    if (!loop) {
-      const parent = innermost(loops, declaration.visible.start, declaration.visible.end)
-      loop = { scope: builder.addScope('loop', declaration.visible, parent ?? builder.rootScope), range: declaration.visible }
+    const key = `${declaration.visible.start}:${declaration.visible.end}`
+    let scope = byRange.get(key)
+    if (scope === undefined) {
+      while (open.length > 0 && !contains(open[open.length - 1].range, declaration.visible)) open.pop()
+      const parent = open.length > 0 ? open[open.length - 1].scope : builder.rootScope
+      scope = builder.addScope('loop', declaration.visible, parent)
+      byRange.set(key, scope)
+      const loop = { scope, range: declaration.visible }
       loops.push(loop)
+      open.push(loop)
     }
-    builder.declare(declaration.name, 'isloop', declaration, declaration.node, loop.scope, null, undefined, declaration.visible.start)
+    builder.declare(declaration.name, 'isloop', declaration, declaration.node, scope, null, undefined, declaration.visible.start)
   }
   for (const declaration of declarations) {
     if (declaration.kind !== 'isset') continue
     builder.declare(declaration.name, 'isset', declaration, declaration.node, builder.rootScope, null, undefined, declaration.visible.start)
   }
-  for (const fragment of fragments) {
-    const scope = innermost(loops, fragment.node.start, fragment.node.end) ?? builder.rootScope
+  // Each fragment in the innermost loop around it: the same sweep, over fragments in order.
+  const ordered = [...fragments].sort((a, b) => a.node.start - b.node.start)
+  const around: { scope: number; range: Range }[] = []
+  let next = 0
+  for (const fragment of ordered) {
+    const at = { start: fragment.node.start, end: fragment.node.end }
+    while (next < loops.length && loops[next].range.start <= at.start) {
+      while (around.length > 0 && !contains(around[around.length - 1].range, loops[next].range)) around.pop()
+      around.push(loops[next++])
+    }
+    while (around.length > 0 && !contains(around[around.length - 1].range, at)) around.pop()
+    const scope = around.length > 0 ? around[around.length - 1].scope : builder.rootScope
     // A template-level `var` belongs to the template; it is visible from its fragment on.
     builder.fragmentStart = fragment.node.start
     if (fragment.node.type === 'Program') builder.visitProgram(fragment.node, scope)
@@ -208,23 +227,16 @@ export function fragmentFacts(range: Range, fragments: readonly Fragment[], decl
   return builder.finish()
 }
 
-function innermost(loops: { scope: number; range: Range }[], start: number, end: number): number | null {
-  let best: { scope: number; range: Range } | null = null
-  for (const loop of loops) {
-    if (loop.range.start <= start && end <= loop.range.end && (!best || loop.range.end - loop.range.start <= best.range.end - best.range.start)) best = loop
-  }
-  return best ? best.scope : null
-}
+const contains = (outer: Range, inner: Range) => outer.start <= inner.start && inner.end <= outer.end
 
 // ---------------------------------------------------------------------------------------------
-
-/** Past this depth the walk stops descending: deeper than any tree the parser builds. */
-const MAX_WALK_DEPTH = 3000
 
 interface ScopeData extends Scope {
   names: Map<string, Declaration[]>
   /** The scope `var` declarations of this scope go to. */
   functionScope: number
+  /** A use sees only the declarations visible at its offset: parameters, and a template's own scopes. */
+  ordered: boolean
 }
 
 /** An assignment `name.member = value` seen while walking, settled once the exported names are known. */
@@ -254,8 +266,13 @@ class FactsBuilder {
   private readonly docs = new Map<AST.AssignmentExpression, Comment>()
   /** Bindings of `require` calls whose declaration is settled at the end. */
   private readonly requireBindings = new Map<AST.CallExpression, RequireBinding>()
-  private readonly assignments: { node: AST.AssignmentExpression; scope: number; doc?: Comment }[] = []
-  private readonly memberExports: { name: string; start: number; end: number; value: Expression; scope: number; doc?: Comment }[] = []
+  /** Every `module.exports = …`; `root` is its `module`, which must be the global one. */
+  private readonly assignments: { node: AST.AssignmentExpression; scope: number; doc?: Comment; root: AST.Identifier }[] = []
+  /** Every `module.exports.x = …` and `exports.x = …`; `root` is the `module` or `exports`. */
+  private readonly memberExports: { name: string; start: number; end: number; value: Expression; scope: number; doc?: Comment; root: AST.Identifier }[] = []
+  /** `Object.assign(target, …)` calls that are not the value of a `module.exports =`. */
+  private readonly assignCalls: { call: AST.CallExpression; scope: number }[] = []
+  private readonly exportedAssignCalls = new Set<AST.CallExpression>()
   private readonly extensions: PendingExtension[] = []
   private readonly superUses: Range[] = []
   /** Declarators whose value is `module.superModule`, settled to declarations at the end. */
@@ -275,7 +292,8 @@ class FactsBuilder {
   addScope(kind: ScopeKind, range: Range, parent: number | null): number {
     const id = this.scopes.length
     const functionScope = kind === 'module' || kind === 'template' || kind === 'function' || parent === null ? id : this.scopes[parent].functionScope
-    this.scopes.push({ id, kind, start: range.start, end: range.end, parent, names: new Map(), functionScope })
+    const ordered = kind === 'params' || (this.ordered && (kind === 'template' || kind === 'loop'))
+    this.scopes.push({ id, kind, start: range.start, end: range.end, parent, names: new Map(), functionScope, ordered })
     return id
   }
 
@@ -310,16 +328,27 @@ class FactsBuilder {
     this.references.push({ name: id.name, start: id.start, end: id.end, scope, declaration: null, write })
   }
 
-  /** The declaration `name` refers to from `scope` at `offset`. */
+  /** The declaration `name` refers to from `scope` at `offset`. Ordered scopes' lists are sorted by `finish`. */
   private lookup(name: string, scope: number, offset: number): Declaration | null {
     for (let current: number | null = scope; current !== null; current = this.scopes[current].parent) {
-      const list = this.scopes[current].names.get(name)
+      const data = this.scopes[current]
+      const list = data.names.get(name)
       if (!list) continue
-      if (!this.ordered) return list[0]
-      // In a template: the last declaration visible at this offset.
-      let found: Declaration | null = null
-      for (const declaration of list) if (declaration.visibleFrom <= offset) found = declaration
-      if (found) return found
+      if (!data.ordered) return list[0]
+      // The last declaration visible at this offset, by binary search over `visibleFrom`.
+      let low = 0
+      let high = list.length - 1
+      let found = -1
+      while (low <= high) {
+        const middle = (low + high) >> 1
+        if (list[middle].visibleFrom <= offset) {
+          found = middle
+          low = middle + 1
+        } else {
+          high = middle - 1
+        }
+      }
+      if (found >= 0) return list[found]
     }
     return null
   }
@@ -342,16 +371,29 @@ class FactsBuilder {
     }
   }
 
-  /** How deep the walk is; the parser bounds a tree's depth, and this bounds the walk the same way on any tree. */
-  private depth = 0
+  /** While a node is visited, the children it hands on; they are walked after it, in order. */
+  private pending: { node: Node; scope: number }[] | null = null
 
+  /**
+   * Walks `node` with an explicit stack, never by recursion: a tree can be as deep as its input
+   * (an `else if` chain nests one level per link). Inside a visit, `visit` only queues the child.
+   */
   visit(node: Node, scope: number): void {
-    if (this.depth >= MAX_WALK_DEPTH) return
-    this.depth++
-    try {
-      this.visitNode(node, scope)
-    } finally {
-      this.depth--
+    if (this.pending) {
+      this.pending.push({ node, scope })
+      return
+    }
+    const stack: { node: Node; scope: number }[] = [{ node, scope }]
+    while (stack.length > 0) {
+      const item = stack.pop() as { node: Node; scope: number }
+      const children: { node: Node; scope: number }[] = []
+      this.pending = children
+      try {
+        this.visitNode(item.node, item.scope)
+      } finally {
+        this.pending = null
+      }
+      for (let i = children.length - 1; i >= 0; i--) stack.push(children[i])
     }
   }
 
@@ -467,8 +509,11 @@ class FactsBuilder {
       outer = this.addScope('function', node, scope)
       this.declare(node.id.name, 'function', node.id, node, outer, node, undefined, 0)
     }
-    const inner = this.addScope('function', node, outer)
-    for (const param of node.params) this.declarePattern(param, 'param', param, inner, null, undefined)
+    // Parameters have a scope of their own, around the body's: a default sees the parameters
+    // before it and the names outside, never a later parameter or the body's `var`.
+    const params = this.addScope('params', node, outer)
+    for (const param of node.params) this.declarePattern(param, 'param', param, params, null, undefined, param.end)
+    const inner = this.addScope('function', node.body, params)
     if (node.body.type === 'BlockStatement') {
       this.hoistFunctions(node.body.body, inner)
       for (const statement of node.body.body) this.visit(statement, inner)
@@ -499,30 +544,30 @@ class FactsBuilder {
   }
 
   /** Declares every name of a binding pattern, and walks its defaults and computed keys. */
-  private declarePattern(pattern: Pattern, kind: DeclarationKind, node: Range, scope: number, init: Expression | null, doc: Comment | undefined): void {
+  private declarePattern(pattern: Pattern, kind: DeclarationKind, node: Range, scope: number, init: Expression | null, doc: Comment | undefined, visibleFrom?: number): void {
     switch (pattern.type) {
       case 'Identifier':
-        this.declare(pattern.name, kind, pattern, node, scope, init, doc)
+        this.declare(pattern.name, kind, pattern, node, scope, init, doc, visibleFrom)
         return
       case 'ObjectPattern':
         for (const property of pattern.properties) {
           if (property.type === 'RestElement') {
-            this.declarePattern(property.argument, kind, node, scope, null, doc)
+            this.declarePattern(property.argument, kind, node, scope, null, doc, visibleFrom)
           } else {
             if (property.computed) this.visit(property.key, scope)
-            this.declarePattern(property.value as Pattern, kind, node, scope, null, doc)
+            this.declarePattern(property.value as Pattern, kind, node, scope, null, doc, visibleFrom)
           }
         }
         return
       case 'ArrayPattern':
-        for (const element of pattern.elements) if (element) this.declarePattern(element, kind, node, scope, null, doc)
+        for (const element of pattern.elements) if (element) this.declarePattern(element, kind, node, scope, null, doc, visibleFrom)
         return
       case 'AssignmentPattern':
-        this.declarePattern(pattern.left, kind, node, scope, init, doc)
+        this.declarePattern(pattern.left, kind, node, scope, init, doc, visibleFrom)
         this.visit(pattern.right, scope)
         return
       case 'RestElement':
-        this.declarePattern(pattern.argument, kind, node, scope, null, doc)
+        this.declarePattern(pattern.argument, kind, node, scope, null, doc, visibleFrom)
         return
       case 'MemberExpression':
         this.visit(pattern, scope)
@@ -584,13 +629,15 @@ class FactsBuilder {
       while (value.type === 'AssignmentExpression' && value.operator === '=') value = value.right
       if (left.type === 'MemberExpression') {
         if (isModuleExports(left)) {
-          this.assignments.push({ node, scope, doc })
+          this.assignments.push({ node, scope, doc, root: left.object as AST.Identifier })
           this.valueScopes.set(value, scope)
+          if (value.type === 'CallExpression' && isObjectAssign(value)) this.exportedAssignCalls.add(value)
         } else {
           const member = memberName(left)
           if (member !== null) {
             if (isModuleExports(left.object) || isExportsObject(left.object)) {
-              this.memberExports.push({ name: member.name, start: member.start, end: member.end, value, scope, doc })
+              const root = (left.object.type === 'MemberExpression' ? left.object.object : left.object) as AST.Identifier
+              this.memberExports.push({ name: member.name, start: member.start, end: member.end, value, scope, doc, root })
               this.valueScopes.set(value, scope)
             } else if (left.object.type === 'Identifier') {
               this.extensions.push({
@@ -657,6 +704,7 @@ class FactsBuilder {
       })
       this.requireNodes.set(node, this.requires.length - 1)
     }
+    if (isObjectAssign(node) && !this.exportedAssignCalls.has(node)) this.assignCalls.push({ call: node, scope })
     this.visit(node.callee, scope)
     for (const argument of node.arguments) this.visit(argument, scope)
   }
@@ -665,6 +713,12 @@ class FactsBuilder {
   // Settling
 
   finish(): ScriptFacts {
+    // Ordered scopes look declarations up by binary search over `visibleFrom`.
+    for (const scope of this.scopes) {
+      if (!scope.ordered) continue
+      for (const list of scope.names.values()) if (list.length > 1) list.sort((a, b) => a.visibleFrom - b.visibleFrom)
+    }
+    this.references.sort((a, b) => a.start - b.start)
     // Each use to its declaration.
     for (const reference of this.references) {
       const declaration = this.lookup(reference.name, reference.scope, reference.start)
@@ -713,7 +767,12 @@ class FactsBuilder {
       return classifyValue(value, (id) => resolve(id.name, scope, id.start), superBindings)
     }
 
-    const assignments: ExportAssignment[] = this.assignments.map(({ node, doc }) => {
+    // `module` and `exports` are the module's only where no local name shadows them (`function f(exports) {…}`).
+    const isGlobal = (id: AST.Identifier, scope: number) => resolve(id.name, scope, id.start) === null
+    const exportAssignments = this.assignments.filter((a) => isGlobal(a.root, a.scope))
+    const memberExports = this.memberExports.filter((m) => isGlobal(m.root, m.scope))
+
+    const assignments: ExportAssignment[] = exportAssignments.map(({ node, doc }) => {
       let valueNode: Expression = node.right
       while (valueNode.type === 'AssignmentExpression' && valueNode.operator === '=') valueNode = valueNode.right
       const assignment: ExportAssignment = { start: node.start, end: node.end, value: classify(valueNode) }
@@ -729,7 +788,7 @@ class FactsBuilder {
 
     const members: (ExportMember & { order: number })[] = []
     // Properties of exported object literals, and of Object.assign arguments.
-    this.assignments.forEach(({ node }) => {
+    exportAssignments.forEach(({ node }) => {
       let valueNode: Expression = node.right
       while (valueNode.type === 'AssignmentExpression' && valueNode.operator === '=') valueNode = valueNode.right
       if (valueNode.type === 'ObjectExpression') {
@@ -743,7 +802,7 @@ class FactsBuilder {
       }
     })
     // module.exports.x = … and exports.x = …
-    for (const member of this.memberExports) {
+    for (const member of memberExports) {
       const fact: ExportMember & { order: number } = { name: member.name, start: member.start, end: member.end, value: classify(member.value), source: 'member', order: member.start }
       if (member.doc) fact.doc = member.doc
       members.push(fact)
@@ -769,6 +828,27 @@ class FactsBuilder {
       const fact: ExportMember & { order: number } = { name: extension.member, start: extension.start, end: extension.end, value: classify(extension.value), source: 'extension', order: extension.start }
       if (extension.doc) fact.doc = extension.doc
       members.push(fact)
+    }
+    // `Object.assign(target, {…})` as a statement: its object literals add members when the
+    // target is `module.exports`, `exports`, or a name whose members are exported.
+    for (const { call, scope } of this.assignCalls) {
+      const target = call.arguments[0]
+      if (!target || target.type === 'SpreadElement') continue
+      let exported = false
+      if (isModuleExports(target)) exported = isGlobal((target as AST.MemberExpression).object as AST.Identifier, scope)
+      else if (target.type === 'Identifier' && target.name === 'exports') exported = isGlobal(target, scope)
+      else if (target.type === 'Identifier') {
+        const declaration = resolve(target.name, scope, target.start)
+        exported = declaration !== null && exportedNames.has(declaration) && (!superBindings.has(declaration) || this.exportsBuildOn(assignments, declaration))
+      }
+      if (!exported) continue
+      for (const argument of call.arguments.slice(1)) {
+        if (argument.type !== 'ObjectExpression') continue
+        for (const member of this.objectMembers(argument, 'assign')) {
+          this.valueScopes.set(member.valueNode, scope)
+          members.push({ ...member, value: classify(member.valueNode), order: member.start })
+        }
+      }
     }
     members.sort((a, b) => a.order - b.order)
 

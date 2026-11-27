@@ -154,8 +154,16 @@ test('where an expression ends, as in the ISML grammar', () => {
   const cases: [string, string, boolean][] = [
     // text, the expression as parsed, closed
     ['<p>${a + b}</p>', '${a + b}', true],
-    ['<p>${a\n}</p>', '${a', false],
+    // A closed expression may span lines; an unclosed one ends with its first line.
+    ['<p>${a\n}</p>', '${a\n}', true],
+    ['<span class="price">${pdict.total\n    + pdict.tax}</span>', '${pdict.total\n    + pdict.tax}', true],
+    ['<p>${a\r\n    + b}</p>', '${a\r\n    + b}', true],
+    ['<p>${a\n<b>x</b>', '${a', false],
+    ['<p>${a\nb\nc</p>', '${a', false],
     ['<p>${a</p>', '${a', false],
+    // A regex literal's quotes are not strings.
+    ['<p>${s.replace(/\'/g, "")}</p><b>${t}</b>', '${s.replace(/\'/g, "")}', true],
+    ['<p>${a / b / c}</p>', '${a / b / c}', true],
     ['<!-- ${a --> after', '${a ', false],
     ['<p>${ "}" + \'{\' + `x${y}z` }</p>', '${ "}" + \'{\' + `x${y}z` }', true],
     ['<p>${ /* } */ a }</p>', '${ /* } */ a }', true],
@@ -204,8 +212,48 @@ test('a broken template: each problem at its place, and nothing unclosed takes t
   assert.equal(loop.close, null)
   assert.equal(loop.end, offsetOf(text, '</isif>'))
   const paragraph = element(document, 'p')
-  assert.equal(paragraph.openEnd, offsetOf(text, '\n    <isloop'), 'the start tag ends with its unclosed value')
+  assert.equal(paragraph.openEnd, offsetOf(text, '\n    <em>next'), 'the start tag ends with its unclosed value, before the line that starts with an HTML tag')
   assert.ok(all(document).some((n) => n.type === 'CloseTag' && n.name === 'div'), 'an HTML end tag never closes past an open ISML tag')
+})
+
+test('a multi-line ${…} keeps every line, and what follows it', () => {
+  const text = '<span class="price">${pdict.total\n    + pdict.tax}</span>\n<p>${after}</p>'
+  const { document, problems } = parseTemplate(text)
+  assert.deepEqual(problems, [])
+  const expressions = all(document).filter((n): n is IsmlExpression => n.type === 'Expression')
+  assert.deepEqual(expressions.map((e) => text.slice(e.codeStart, e.codeEnd)), ['pdict.total\n    + pdict.tax', 'after'])
+})
+
+test('an ISML tag inside a quoted value, at the start of a line too', () => {
+  const text = '<div class="form-group\n    <isif condition="${pdict.required}">required</isif>">\n  <input name="a"/>\n</div>'
+  const { document, problems } = parseTemplate(text)
+  assert.deepEqual(problems, [])
+  const div = element(document, 'div')
+  const value = div.attributes[0].value
+  assert.ok(value)
+  assert.deepEqual({ start: value.contentStart, end: value.contentEnd }, rangeOf(text, 'form-group\n    <isif condition="${pdict.required}">required</isif>'))
+  assert.deepEqual(value.parts.map((p) => [p.type, p.type === 'Element' || p.type === 'CloseTag' ? p.name : '']), [
+    ['Text', ''],
+    ['Element', 'isif'],
+    ['Text', ''],
+    ['CloseTag', 'isif']
+  ])
+  assert.deepEqual(div.children.filter((n) => n.type === 'Element').map((n) => (n as Element).name), ['input'])
+  assert.deepEqual(div.close, rangeOf(text, '</div>'))
+})
+
+test('tags inside tags are bounded: past the bound the rest is read as content, never lost', () => {
+  const nested = '<p>${keep}</p>' + '<isa '.repeat(20000) + '\n<b>${alsoKept}</b>'
+  const deep = parseTemplate(nested)
+  assert.ok(deep.problems.some((p) => p.code === 'too_deep'))
+  assert.equal(deep.problems.filter((p) => p.code === 'too_deep').length, 1, 'reported once')
+  const kept = all(deep.document).filter((n): n is IsmlExpression => n.type === 'Expression').map((e) => nested.slice(e.codeStart, e.codeEnd))
+  assert.deepEqual([kept[0], kept[kept.length - 1]], ['keep', 'alsoKept'])
+  const values = '<p>${keep}</p>' + '<a b="<isa c=\''.repeat(5000) + '\n<b>${alsoKept}</b>'
+  const inValues = parseTemplate(values)
+  const keptInValues = all(inValues.document).filter((n): n is IsmlExpression => n.type === 'Expression').map((e) => values.slice(e.codeStart, e.codeEnd))
+  assert.deepEqual([keptInValues[0], keptInValues[keptInValues.length - 1]], ['keep', 'alsoKept'])
+  assert.ok(!inValues.problems.some((p) => p.code === 'internal_error'))
 })
 
 test('more tolerance: an unclosed start tag, a stray end tag, names in any case', () => {

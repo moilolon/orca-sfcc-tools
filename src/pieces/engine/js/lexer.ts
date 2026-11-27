@@ -80,6 +80,12 @@ function isIdPart(c: number, text: string, at: number): boolean {
   return ID_CONTINUE.test(String.fromCodePoint(text.codePointAt(at) ?? c))
 }
 
+/** The text of a template between two offsets, as the language reads it: a CR or CRLF is an LF. */
+function raw(text: string, from: number, to: number): string {
+  const chunk = text.slice(from, to)
+  return chunk.indexOf('\r') === -1 ? chunk : chunk.replace(/\r\n?/g, '\n')
+}
+
 /** Reads tokens of `text` between `start` and `end`, collecting comments and problems. */
 export class Lexer {
   readonly text: string
@@ -133,9 +139,16 @@ export class Lexer {
         this.addComment({ kind: 'line', start, end: this.pos, text: text.slice(start + 2, this.pos) })
       } else if (c === 47 && this.pos + 1 < end && text.charCodeAt(this.pos + 1) === 42 /* * */) {
         const start = this.pos
-        const close = text.indexOf('*/', this.pos + 2)
+        // Searched only up to `end`: a slice (one `${…}` of a template) never reads past itself.
+        let close = -1
+        for (let p = this.pos + 2; p + 1 < end; p++) {
+          if (text.charCodeAt(p) === 42 && text.charCodeAt(p + 1) === 47) {
+            close = p
+            break
+          }
+        }
         let bodyEnd: number
-        if (close === -1 || close + 2 > end) {
+        if (close === -1) {
           this.report('unterminated_comment', start, end)
           bodyEnd = end
           this.pos = end
@@ -373,25 +386,25 @@ export class Lexer {
     let tail = false
     for (;;) {
       if (this.pos >= end) {
-        cooked += text.slice(chunk, this.pos)
+        cooked += raw(text, chunk, this.pos)
         this.report('unterminated_template', start, this.pos)
         tail = true
         break
       }
       const c = text.charCodeAt(this.pos)
       if (c === 96) {
-        cooked += text.slice(chunk, this.pos)
+        cooked += raw(text, chunk, this.pos)
         this.pos++
         tail = true
         break
       }
       if (c === 36 && this.pos + 1 < end && text.charCodeAt(this.pos + 1) === 123) {
-        cooked += text.slice(chunk, this.pos)
+        cooked += raw(text, chunk, this.pos)
         this.pos += 2
         break
       }
       if (c === 92) {
-        cooked += text.slice(chunk, this.pos)
+        cooked += raw(text, chunk, this.pos)
         cooked += this.readEscape()
         chunk = this.pos
         continue

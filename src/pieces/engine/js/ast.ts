@@ -515,6 +515,22 @@ export function forEachChild(node: Node, visit: (child: Node) => void): void {
   }
 }
 
+/**
+ * Calls `visit` on `root` and every node below it, in source order, with an explicit stack: a
+ * tree can be as deep as its input (an `else if` chain nests one level per link), so a walker
+ * that recurses once per level can overflow. Use this, or a stack of your own.
+ */
+export function walk(root: Node, visit: (node: Node) => void): void {
+  const stack: Node[] = [root]
+  while (stack.length > 0) {
+    const node = stack.pop() as Node
+    visit(node)
+    const children: Node[] = []
+    forEachChild(node, (child) => children.push(child))
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i])
+  }
+}
+
 /** The innermost node whose range holds `offset` (start inclusive, end exclusive), and its ancestors. */
 export function nodePathAt(root: Node, offset: number): Node[] {
   const path: Node[] = []

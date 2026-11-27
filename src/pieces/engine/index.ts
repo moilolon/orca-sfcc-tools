@@ -19,9 +19,9 @@
 // (`PROBLEM_CODES`) for whoever words them.
 
 export type * from './js/ast'
-export { PROBLEM_CODES, forEachChild, nodePathAt } from './js/ast'
+export { PROBLEM_CODES, forEachChild, nodePathAt, walk } from './js/ast'
 export { KEYWORDS, Lexer, tokenize, type Token, type TokenType } from './js/lexer'
-export { MAX_DEPTH, parseExpression, parseScript, type ExpressionParse, type ParseOptions, type ScriptParse } from './js/parser'
+export { MAX_DEPTH, MAX_TREE_DEPTH, parseExpression, parseScript, type ExpressionParse, type ParseOptions, type ScriptParse } from './js/parser'
 export {
   declarationAt,
   fragmentFacts,
@@ -50,9 +50,13 @@ export {
   type ValueKind
 } from './js/facts'
 export {
+  EXPRESSION_CHARACTERS,
+  EXPRESSION_LINES,
   HTML_VOID,
   ISML_CONTAINERS,
   ISML_TAGS,
+  MAX_ELEMENT_DEPTH,
+  MAX_TAG_NESTING,
   attribute,
   attributeText,
   parseTemplate,

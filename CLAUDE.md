@@ -108,15 +108,26 @@ Changing it needs the owner's yes.
       `js/lexer.ts` and `js/parser.ts` read SFCC scripts (ES5 plus what Rhino accepts, `for
       each` and conditional `catch` included) into an ESTree-shaped tree (`js/ast.ts`) with
       `start` and `end` offsets on every node; they never throw, report problems by code
-      (`PROBLEM_CODES`) and recover at statement boundaries; recursion and tree depth are bounded
-      (`MAX_DEPTH`, `MAX_TREE_DEPTH`), so a walker of the tree may recurse. JSDoc rides on the
-      next declaration as `doc`. `js/facts.ts`: scopes, declarations, the declaration of each use,
-      `require` calls and their bindings, exports and `module.superModule`. `isml/parser.ts`: a
-      template into elements, ISML and custom tags, text, `${…}` (ending as the ISML grammar
-      does), comments and `<isscript>`, tolerant the same way; `isml/embedded.ts` parses its
-      JavaScript in template positions, where a template-level name is seen only after it is
-      declared. Fixtures are invented; `fixtures/generate.ts` makes the large script and the
-      seeded mutations.
+      (`PROBLEM_CODES`, `too_deep` once per parse) and recover at statement boundaries. Their
+      recursion is bounded (`MAX_DEPTH`, `MAX_TREE_DEPTH`), but an `else if` chain is not, so a
+      tree can be as deep as its input: walk it with `walk` (`js/ast.ts`) or an explicit stack,
+      never one recursion per level. CR, CRLF and LF are line breaks alike, positions stay
+      offsets of the text as given. JSDoc rides on the next declaration as `doc`. `js/facts.ts`
+      (an explicit stack too): scopes (parameters in a `params` scope around the body's, so a
+      default sees earlier parameters and outer names only), declarations, the declaration of
+      each use, `require` calls and their bindings, exports (`module` and `exports` only when
+      unshadowed; `Object.assign` as a value or a statement) and `module.superModule`.
+      `isml/parser.ts`: a template into elements, ISML and custom tags, text, `${…}`, comments
+      and `<isscript>`, tolerant the same way. A `${…}` may span lines when it balances; an
+      unclosed one ends with its first line, and the search for its `}` stops at a line that
+      starts with a tag (bounded by `EXPRESSION_LINES`/`EXPRESSION_CHARACTERS`). A quoted value
+      may hold ISML tags anywhere, a line start included; it is unclosed only before a line that
+      starts with an HTML tag. Searches for a construct's end are remembered per pattern, so runs
+      of unclosed constructs stay linear. `isml/embedded.ts` parses its JavaScript in template
+      positions, where a template-level name is seen only after it is declared. Fixtures are
+      invented and read with LF (`fixtures/read.ts`); `line-endings.test.ts` runs each with LF,
+      CRLF and CR, and `limits.test.ts` holds the inputs that once broke a bound or took
+      quadratic time. `fixtures/generate.ts` makes the large script and the seeded mutations.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
