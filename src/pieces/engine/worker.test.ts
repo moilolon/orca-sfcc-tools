@@ -283,6 +283,30 @@ test('a folder gone before its first build is never built over, not even when th
   await dispose()
 })
 
+test('while the folder is gone, git is never asked about the ref; a setting changed meanwhile is applied once it is back', async () => {
+  let there = true
+  const files = fixtureFiles()
+  files.delete('sites')
+  const commit = 'a'.repeat(40)
+  const ref = new FakeRef({ 'origin/main': commit }, { [commit]: { 'sites/x/sites/Shop/site.xml': '<site site-id="Shop"><custom-cartridges>app_garden_base</custom-cartridges></site>' } })
+  const { ready, status, watched, fire, orca, dispose } = await mount(hostFor('w-shop', { metadataRef: 'origin/main' }), { 'C:/work/shop': files }, { git: () => ref, exists: async () => there })
+  assert.equal((await ready()).index?.pathSource, 'git-ref')
+  there = false
+  watched[0].onError()
+  await settle()
+  assert.equal((await status()).error, 'folder_missing')
+  const before = ref.calls.length
+  fire(REF_CHECK_MS)
+  await orca().settings.set('cartridgePath', 'app_garden_core:app_garden_base')
+  await settle()
+  assert.deepEqual(ref.calls.slice(before), [], 'neither the ref timer nor the setting asked git')
+  assert.equal((await status()).error, 'folder_missing')
+  there = true
+  const back = await ready()
+  assert.deepEqual([back.state, back.index?.pathSource, back.index?.storefronts.map((s) => s.cartridges)], ['ready', 'setting', [['app_garden_core', 'app_garden_base']]])
+  await dispose()
+})
+
 test('on the real disk: a folder removed and put back while status is asked is watched and indexed again', async () => {
   const parent = mkdtempSync(join(tmpdir(), 'sfcc-tools-engine-'))
   const root = join(parent, 'shop')
@@ -504,5 +528,40 @@ test('engine.definition, engine.references and engine.signature answer on the ed
     assert.equal(bad.error, 'file_invalid', name)
     const far = (await worker.request(name, { ...query, offset: text.length + 1 } as never)) as { error: string | null }
     assert.equal(far.error, 'offset_invalid', name)
+  }
+})
+
+test('on the real disk: a folder removed and made again at once, before the watcher could see it gone, is indexed again', async () => {
+  // Only Windows reports the removed folder itself; elsewhere a status request finds it changed.
+  if (process.platform !== 'win32') return
+  const parent = mkdtempSync(join(tmpdir(), 'sfcc-tools-engine-'))
+  const root = join(parent, 'shop')
+  const fixture = new URL('./fixtures/checkout/', import.meta.url)
+  cpSync(fixture, root, { recursive: true })
+  const workspace = { id: 'w-disk', kind: 'folder', name: 'Disk', path: root, branch: null, hostId: 'local' }
+  const host = mockHost({
+    capabilities: CAPABILITIES,
+    results: {
+      'workspace.list': { workspaces: [workspace], truncated: false },
+      'workspace.readContext': { workspaceId: 'w-disk', branch: '', displayName: 'Disk', terminals: [] }
+    }
+  })
+  const { ready, dispose } = await mount(host, {}, { files: diskFiles, watch: watchCheckout, exists: undefined })
+  try {
+    assert.equal((await ready()).index?.cartridges.length, 4)
+    // Within one turn of the event loop: removed, and made again with a cartridge less.
+    rmSync(root, { recursive: true, force: true })
+    cpSync(fixture, root, { recursive: true })
+    rmSync(join(root, 'cartridges', 'app_garden_outlet'), { recursive: true, force: true })
+    const end = Date.now() + 10_000
+    let answer = await ready()
+    while (answer.index?.cartridges.length !== 3 && Date.now() < end) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      answer = await ready()
+    }
+    assert.deepEqual([answer.state, answer.error, answer.watching, answer.index?.cartridges.length], ['ready', null, true, 3])
+  } finally {
+    await dispose()
+    rmSync(parent, { recursive: true, force: true })
   }
 })

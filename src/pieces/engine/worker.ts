@@ -175,6 +175,8 @@ type Entry = {
   built: boolean
   /** Its folder is gone: it is looked for again, and the index rebuilt once it is back. */
   missing: boolean
+  /** A setting changed while the folder was gone: applied when it is back. */
+  reconfigure: boolean
   /** The problems of the checkout, kept per file; a pass runs after each build and update. */
   problems: CheckoutProblems
   /** The pass asked for and not started yet, and whether one runs. */
@@ -393,6 +395,7 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           error: null,
           built: false,
           missing: false,
+          reconfigure: false,
           problems: new CheckoutProblems(index, checkout, () => dwApi, {
             now,
             pause: () => (disposed ? Promise.reject(new Error('disposed')) : pause())
@@ -446,7 +449,8 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           refTimer = null
           if (disposed) return
           const entry = current
-          if (entry && entry.built) run(entry, () => entry.index.refreshRef(), false, { full: false, paths: new Set(), notify: false })
+          // Git is never asked about a folder that is gone.
+          if (entry && entry.built && !entry.missing) run(entry, () => entry.index.refreshRef(), false, { full: false, paths: new Set(), notify: false })
           scheduleRefCheck()
         }, REF_CHECK_MS)
       }
@@ -504,8 +508,18 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
         }
         stopLooking()
         startWatching(entry)
+        const reconfigure = entry.reconfigure
+        entry.reconfigure = false
         // A kept index is walked again: only files whose time changed are read, by the pass too.
-        run(entry, () => entry.index.build(), true, FULL)
+        run(
+          entry,
+          async () => {
+            if (reconfigure) await entry.index.configure(await settings())
+            await entry.index.build()
+          },
+          true,
+          FULL
+        )
       }
 
       /** One look at a time for an entry; one for another entry starts on its own. */
@@ -843,7 +857,9 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           // Kept indexes would start with the old settings: drop them.
           entries.splice(current ? 1 : 0)
           const entry = current
-          if (entry) void settings().then((values) => run(entry, () => entry.index.configure(values), false, FULL))
+          // A folder that is gone is not read: the settings are applied once it is back.
+          if (entry?.missing) entry.reconfigure = true
+          else if (entry) void settings().then((values) => run(entry, () => entry.index.configure(values), false, FULL))
         })
       ]
 

@@ -56,9 +56,11 @@ export type Watcher = { dispose(): void }
  * Watches the folder and every folder below it, calling `onChange` with each changed path,
  * relative and with `/`. Null when the platform cannot watch a tree (then the index is kept current
  * only by a rebuild). `onError` is called once when the watcher stops on its own: on an error, or
- * once the folder itself is gone. On Windows, Node goes on reporting the removed folder's own
- * path (`\\?\C:\…`) many thousands of times a second and never fails: an event that names no
- * path inside the folder is the one that checks whether the folder is still there.
+ * once an event names the folder itself rather than a path inside it. On Windows, Node goes on
+ * reporting a removed folder's own path (`\\?\C:\…`) many thousands of times a second and
+ * never fails, even once a folder of the same name is made again (it then reports nothing inside
+ * it): such an event ends the watcher whether or not the folder is there now, and the caller
+ * watches again. An event with no name ends it only when the folder is gone.
  */
 export function watchCheckout(root: string, onChange: (path: string) => void, onError: () => void = () => {}): Watcher | null {
   let closed = false
@@ -72,9 +74,15 @@ export function watchCheckout(root: string, onChange: (path: string) => void, on
   try {
     watcher = nodeWatch(root, { recursive: true, persistent: false }, (_event, filename) => {
       if (closed) return
-      const plain = typeof filename === 'string' && filename !== '' ? normalizePath(filename) : null
+      if (typeof filename !== 'string' || filename === '') {
+        if (!existsSync(root)) stop()
+        return
+      }
+      const plain = normalizePath(filename)
       if (plain !== null && plain !== '') onChange(plain)
-      else if (!existsSync(root)) stop()
+      // A name that is no path inside the folder is the folder itself: removed, and perhaps made
+      // again already, which this watcher would never see.
+      else stop()
     })
   } catch {
     return null

@@ -48,3 +48,29 @@ test('the watcher reports a change inside the folder, and stops once the folder 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('the watcher stops when its folder is removed and made again before it could see it gone', async () => {
+  // Only Windows reports the removed folder itself, and goes on reporting it after it is made again.
+  if (process.platform !== 'win32') return
+  const root = mkdtempSync(join(tmpdir(), 'sfcc-tools-watch-'))
+  const changes: string[] = []
+  let stopped = 0
+  const watcher = watchCheckout(root, (path) => changes.push(path), () => stopped++)
+  try {
+    assert.ok(watcher)
+    writeFileSync(join(root, 'a.js'), 'var a = 1;')
+    assert.ok(await until(() => changes.includes('a.js'), 10_000), 'the watcher sees a change first')
+    // In one turn of the event loop: by the time an event is handled, the folder is there again.
+    rmSync(root, { recursive: true, force: true })
+    mkdirSync(root)
+    assert.ok(await until(() => stopped > 0, 10_000), 'the watcher says it stopped, so the caller watches again')
+    assert.equal(stopped, 1)
+    const before = changes.length
+    writeFileSync(join(root, 'b.js'), 'var b = 1;')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.equal(changes.length, before, 'a stopped watcher reports nothing more')
+  } finally {
+    watcher?.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
