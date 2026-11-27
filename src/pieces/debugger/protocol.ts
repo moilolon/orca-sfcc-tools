@@ -102,9 +102,12 @@ declare module 'orca' {
      * Sets (`on`) or removes one line of one file, keeping the file's other lines: what pressing a
      * line of a script, a frame of the call stack or a frame of an error does. This and
      * `setBreakpoints` act on the debugged workspace, or on `workspaceId` when the editor names its
-     * own: then only a script of its cartridges is taken (`not_script` otherwise).
+     * own: then only a script of its cartridges is taken (`not_script` otherwise). With `text`
+     * (what the editor believes the line holds on disk), a line set is refused with `line_changed`
+     * when the file on disk holds something else there (an editor that took another tab's unsaved
+     * edits for the file).
      */
-    'debugger.breakpoint': { input: { path: string; line: number; on: boolean; workspaceId?: string }; output: DebuggerState }
+    'debugger.breakpoint': { input: { path: string; line: number; on: boolean; workspaceId?: string; text?: string }; output: DebuggerState }
     /** Removes every breakpoint of the workspace. */
     'debugger.clearBreakpoints': { input: Record<string, never>; output: DebuggerState }
     /** Every script of the workspace's cartridges, by cartridge, for the view's list of scripts. */

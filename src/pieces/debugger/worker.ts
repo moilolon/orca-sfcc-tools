@@ -29,10 +29,15 @@ const FILES_TTL_MS = 30_000
 const FILES_KEPT = 4
 /** What the editor's hover is sent of a value at most, once masked. */
 export const HOVER_MAX_TEXT = 1_000
+/** Listings the hover keeps for one halt. */
+const HOVER_LISTINGS = 200
 /** How long a save waits, at most, for the file's text before it is written (to move its breakpoints). */
 export const REMAP_READ_MS = 500
 /** How long the save hook waits at all; Orca allows a hook 2 s. */
 const REMAP_HOOK_MS = 1_000
+/** How long after a save its text is looked for on disk, and how often, before its breakpoints move. */
+const SAVE_WAIT_MS = 10_000
+const SAVE_POLL_MS = 100
 /** A file larger than this is not read to move its breakpoints: they stay where they are. */
 const REMAP_MAX_BYTES = 4 * 1024 * 1024
 
@@ -67,6 +72,9 @@ export type DebuggerOptions = {
   sourceFs?: SourceFileSystem
   /** How a saved file's text before the save is read, to move its breakpoints; default the local disk. */
   readText?: (file: string) => Promise<string | null>
+  /** How long, and how often, the file is looked at for a save's text before its breakpoints move. */
+  saveWaitMs?: number
+  savePollMs?: number
 }
 
 const STEP_KINDS: readonly StepKind[] = ['continue', 'over', 'in', 'out']
@@ -97,6 +105,8 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   let lastPosted: DebuggerState | null = null
   /** The workspace the running session debugs; the breakpoints shown are its own while it runs. */
   let sessionWorkspace: Workspace | null = null
+  /** The hover's listings, kept for the halted stack they were read in. */
+  let hoverCache: { frames: unknown; lists: Map<string, Promise<Variable[]>> } = { frames: null, lists: new Map() }
   /** The scripts of each workspace's cartridges, by folder, the newest last. */
   const filesCache = new Map<string, { at: number; files: Promise<{ files: string[]; truncated: boolean; cartridges: string[] }> }>()
 
@@ -242,14 +252,14 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     const snapshot = session.snapshot()
     if (snapshot.status !== 'halted' || !snapshot.frames.some((frame) => frame.id === frameId) || session.frameLocation(frameId)?.path !== path) return null
     let found: Variable | null = null
-    for (const scope of await session.variables({ frameId })) {
+    for (const scope of await listing({ frameId })) {
       if (scope.reference <= 0) continue
-      found = (await session.variables({ reference: scope.reference })).find((each) => each.name === read.path[0]) ?? null
+      found = (await listing({ reference: scope.reference })).find((each) => each.name === read.path[0]) ?? null
       if (found) break
     }
     for (const name of read.path.slice(1)) {
       if (!found || found.reference <= 0) return null
-      found = (await session.variables({ reference: found.reference })).find((each) => each.name === name || each.name === `[${name}]`) ?? null
+      found = (await listing({ reference: found.reference })).find((each) => each.name === name || each.name === `[${name}]`) ?? null
     }
     if (!found) return null
     // Masked and cut by the session; cut again to what a pop-up shows, never inside a surrogate pair.
@@ -257,10 +267,31 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   }
 
   /**
+   * A frame's scopes or a value's members for the hover, each asked of the adapter once per halt:
+   * the listings are kept until the halted stack changes (a step, a continue, another halt), so
+   * resting on names again asks nothing more of the instance. At most HOVER_LISTINGS are kept.
+   */
+  async function listing(input: { frameId: number } | { reference: number }): Promise<Variable[]> {
+    const frames = session.snapshot().frames
+    if (hoverCache.frames !== frames) hoverCache = { frames, lists: new Map() }
+    const key = 'frameId' in input ? `f${input.frameId}` : `r${input.reference}`
+    const kept = hoverCache.lists.get(key)
+    if (kept) return kept
+    const asked = session.variables(input)
+    const cache = hoverCache
+    cache.lists.set(key, asked)
+    asked.catch(() => cache.lists.delete(key))
+    if (cache.lists.size > HOVER_LISTINGS) cache.lists.delete(cache.lists.keys().next().value as string)
+    return asked
+  }
+
+  /**
    * After a save from any editor tab: the file's breakpoints move with its text (line-diff.ts, the
    * file on disk before against the text saved), so the store, the session and every view agree
    * with what now runs. Read before Orca writes (the hook waits for it, `REMAP_READ_MS` at most);
-   * nothing is changed or refused of the save itself.
+   * nothing is changed or refused of the save itself. The store moves only once the file on disk
+   * holds the text saved (looked at every `savePollMs`, for `saveWaitMs` at most): a save that
+   * failed, or that another hook refused, moves nothing.
    */
   async function remapOnSave(event: { workspaceId?: unknown; path?: unknown; text?: unknown } | undefined): Promise<void> {
     if (typeof event?.path !== 'string' || typeof event.text !== 'string') return
@@ -272,13 +303,39 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     if (lines.length === 0) return
     const before = await readOld((platform === 'win32' ? win32 : posix).join(workspace.path, ...rel.split('/')))
     if (before === null) return
-    const moved = remapLines(lines, textLines(before), textLines(event.text))
+    const beforeLines = textLines(before)
+    const afterLines = textLines(event.text)
+    const moved = remapLines(lines, beforeLines, afterLines)
     if (moved.length === lines.length && moved.every((line, i) => line === lines[i])) return
     // The save need not wait for the store or the session: only the read had to come first.
+    const file = (platform === 'win32' ? win32 : posix).join(workspace.path, ...rel.split('/'))
+    const saved = afterLines.join('\n')
     void (async () => {
-      const files = await breakpoints.set(workspace.id, rel, moved)
+      if (!(await written(file, saved))) return
+      // A line removed meanwhile stays removed; one set meanwhile was set on the saved text and stays.
+      const now = (await breakpoints.list(workspace.id)).find((each) => each.path === rel)?.lines ?? []
+      const moved = remapLines(lines.filter((line) => now.includes(line)), beforeLines, afterLines)
+      const files = await breakpoints.set(workspace.id, rel, [...moved, ...now.filter((line) => !lines.includes(line))])
       await synced(workspace.id, files.find((file) => file.path === rel) ?? { path: rel, lines: [] })
     })().catch((error: unknown) => ctx.log(`moving breakpoints after a save failed (${codeOf(error)})`))
+  }
+
+  /** Whether line `line` (1-based) of a file on disk is `text`; true when the file cannot be read, so a slow disk never blocks a click. */
+  async function lineHolds(workspace: Workspace, path: string, line: number, text: string): Promise<boolean> {
+    const now = await readOld((platform === 'win32' ? win32 : posix).join(workspace.path, ...path.split('/')))
+    return now === null || textLines(now)[line - 1] === text
+  }
+
+  /** Whether the file on disk comes to hold `text` (its lines, whatever their breaks) within the wait. */
+  async function written(file: string, text: string): Promise<boolean> {
+    const until = Date.now() + (options.saveWaitMs ?? SAVE_WAIT_MS)
+    for (;;) {
+      if (disposed) return false
+      const now = await readOld(file)
+      if (now !== null && textLines(now).join('\n') === text) return true
+      if (Date.now() >= until) return false
+      await new Promise((resolve) => setTimeout(resolve, options.savePollMs ?? SAVE_POLL_MS))
+    }
   }
 
   /** The file as it is on disk now, or null when it cannot be read whole and in time. */
@@ -397,6 +454,8 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
         if (!path) throw new DebuggerError('invalid_path')
         const workspace = await breakpointTarget(input, path)
         if (typeof line !== 'number' || !Number.isInteger(line) || line < 1) throw new DebuggerError('invalid_input')
+        // The editor says what it believes the line holds on disk: a line it has not seen saved is refused.
+        if (input?.on === true && typeof input.text === 'string' && !(await lineHolds(workspace, path, line, input.text))) throw new DebuggerError('line_changed')
         const existing = (await breakpoints.list(workspace.id)).find((file) => file.path === path)?.lines ?? []
         const lines = input?.on === true ? [...existing, line] : existing.filter((each) => each !== line)
         const files = await breakpoints.set(workspace.id, path, lines)

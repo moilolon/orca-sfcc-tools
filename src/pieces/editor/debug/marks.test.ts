@@ -65,9 +65,10 @@ test('a pasted block above moves breakpoints by its lines; a cut around one hide
   at(0, 0)
   model.paste('// one\n// two\n// three\n')
   assert.deepEqual(shown(), ['5:idle', '9:idle'])
-  model.setSelection({ line: 3, col: 0 }, { line: 6, col: 0 })
+  // Cut `var b` and `function show() {` (lines 5 and 6 now): the breakpoint of `var b` goes.
+  model.setSelection({ line: 4, col: 0 }, { line: 6, col: 0 })
   model.cut()
-  assert.deepEqual(shown(), ['6:idle'])
+  assert.deepEqual(shown(), ['7:idle'])
   model.undo()
   assert.deepEqual(shown(), ['5:idle', '9:idle'])
 })
@@ -81,12 +82,12 @@ test('finding 2: a write from outside never moves marks; they stay on the storeâ
   assert.deepEqual(shown(), ['3:idle'])
   assert.equal(marks.current(3), 2, 'a stopped line at 3 is drawn on line 3')
   // A click on line 6 is line 6 of the file on disk.
-  assert.deepEqual(marks.toggle(5), [{ line: 6, on: true }])
+  assert.deepEqual(marks.toggle(5), [{ line: 6, on: true, text: '  return a + b;' }])
 })
 
 test('a click sets a saved line at once and holds one on a written line, set once a save makes it a line of the file', () => {
   const { model, marks, shown, at } = edited([2])
-  assert.deepEqual(marks.toggle(3), [{ line: 4, on: true }])
+  assert.deepEqual(marks.toggle(3), [{ line: 4, on: true, text: '  return a + b;' }])
   assert.deepEqual(shown(), ['2:idle', '4:idle'])
   at(0, 0)
   model.paste('// a\n// b\n')
@@ -135,4 +136,14 @@ test('states: verified, not verified, no session; joined lines verified only whe
   assert.deepEqual(shown(), [])
   model.undo()
   assert.deepEqual(shown(), ['2:verified'])
+})
+
+test('round 2, finding 2: a breakpoint stays on its line while the line is retyped from empty', () => {
+  const { model, shown, at } = edited([4])
+  model.setSelection({ line: 3, col: 0 }, { line: 3, col: model.buffer.line(3).length })
+  model.cut()
+  assert.deepEqual(shown(), ['4:idle'], 'emptied')
+  at(3, 0)
+  model.paste('  var sum = add(a, b); return sum;')
+  assert.deepEqual(shown(), ['4:idle'], 'rewritten into something else')
 })

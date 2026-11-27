@@ -117,7 +117,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     instances: async () => ({ config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }),
     isHost: async () => false
   } as unknown as B2c
-  const options = { coalesceMs: 20, platform: 'linux', readDir, sourceFs, openFile: opening.openFile, readText: async (file: string) => DISK[file] ?? null, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
+  const options = { coalesceMs: 20, platform: 'linux', readDir, sourceFs, openFile: opening.openFile, readText: async (file: string) => DISK[file] ?? null, saveWaitMs: 300, savePollMs: 5, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
   const module = throughCore
     ? {
         default: createActivate({
@@ -477,10 +477,19 @@ test('while a session runs: the editor sees which lines it verified, the halted 
   const asked = sent().slice(before)
   assert.ok(asked.length > 0 && asked.every((command) => command === 'scopes' || command === 'variables'), `only what expanding the tree asks: ${[...new Set(asked)].join(', ')}`)
 
-  // A long value is cut for the pop-up, after masking.
-  adapter.config.variables = { ...adapter.config.variables, 1: [{ name: "basket", value: `${FAKE_HOST} ${"x".repeat(5_000)}`, variablesReference: 10 }] }
+  // Round 2, finding 4: the listings are kept for the halt, so resting on names again asks the instance nothing more.
+  const kept = sent().length
+  for (const expression of ['basket.totalGrossPrice', 'BasketMgr', "items[0]['productID']", 'basket.missing']) await hover(expression)
+  assert.equal(sent().length, kept, 'nothing asked again during the same halt')
+
+  // Another halt reads them again; a long value is cut for the pop-up, after masking.
+  adapter.config.variables = { ...adapter.config.variables, 1: [{ name: 'basket', value: `${FAKE_HOST} ${'x'.repeat(5_000)}`, variablesReference: 10 }] }
+  const posted = states().length
+  await worker.request('debugger.step', { kind: 'continue' })
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => states().slice(posted).some((state) => state.status === 'halted' && state.frames.length > 0), 'the second halt')
   const long = await hover('basket')
-  assert.ok(long && long.value.startsWith('*** x') && long.value.length <= HOVER_MAX_TEXT + 1 && long.expandable)
+  assert.ok(long && long.value.startsWith('*** x') && long.value.length <= HOVER_MAX_TEXT + 1 && long.expandable, JSON.stringify(long))
 
   // The thread continues: the halted line goes, and a hover evaluates nothing.
   await worker.request('debugger.step', { kind: 'continue' })
@@ -507,11 +516,14 @@ test('findings 2 to 5: a save from any editor tab moves the file’s breakpoints
   const after = `// one\n// two\n${before.replace('var e = 1;\n', '')}`
   const decision = await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, languageId: 'javascript', text: after })
   assert.equal(decision.kind, 'continue', 'the save goes on as it was')
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [3, 5, 6] } }, 'nothing moves before the file is written')
+  DISK[`${FAKE_ROOT}/${PAGE}`] = after
   await until(() => JSON.stringify(worker.host.data().storage['debugger.breakpoints']) === JSON.stringify({ w1: { [PAGE]: [5, 7] } }), 'the moved lines')
   // A tab names its workspace `<project>::<folder>`; an edit inside a line moves nothing.
   DISK[`${FAKE_ROOT}/${PAGE}`] = after
   await worker.hooks.fire('editor.save.before', { workspaceId: `repo::${FAKE_ROOT}`, path: `${FAKE_ROOT}/${PAGE}`, text: after.replace('var c = 1;', 'var c = 2;') })
   await worker.hooks.fire('editor.save.before', { workspaceId: `repo::${FAKE_ROOT}`, path: `${FAKE_ROOT}/${PAGE}`, text: `\n${after}` })
+  DISK[`${FAKE_ROOT}/${PAGE}`] = `\n${after}`
   await until(() => JSON.stringify(worker.host.data().storage['debugger.breakpoints']) === JSON.stringify({ w1: { [PAGE]: [6, 8] } }), 'moved again')
   // A file with no breakpoints, one outside every workspace, or one that cannot be read: nothing changes.
   for (const path of [`${FAKE_ROOT}/cartridges/app_example/cartridge/controllers/Home.js`, '/elsewhere/Other.js']) {
@@ -521,6 +533,31 @@ test('findings 2 to 5: a save from any editor tab moves the file’s breakpoints
   await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: 'var z;' })
   await new Promise((resolve) => setTimeout(resolve, 30))
   assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [6, 8] } })
+})
+
+test('round 2, finding 4: a save that never reaches the disk (it failed, or another hook refused it) moves nothing', async () => {
+  const { worker } = await mount()
+  const before = ['a', 'b', 'c'].map((name) => `var ${name} = 1;`).join('\n')
+  DISK[`${FAKE_ROOT}/${PAGE}`] = before
+  await worker.request('debugger.setBreakpoints', { path: PAGE, lines: [2] })
+  await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: `// top\n${before}` })
+  // The wait for the written text (300 ms here) passes with the old text still on disk.
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [2] } })
+})
+
+test('round 2, finding 3: a line set from the editor is refused when the disk holds another text there', async () => {
+  const { worker } = await mount()
+  DISK[`${FAKE_ROOT}/${PAGE}`] = ['var a = 1;', 'function show() {', '  return a;', '}'].join('\n')
+  const set = (line: number, text: string) => worker.request('debugger.breakpoint', { workspaceId: 'w1', path: PAGE, line, on: true, text })
+  // The editor took another tab's unsaved Enter for the file: its line 4 is `return a;`, the disk's is `}`.
+  assert.equal(await codeOf(set(4, '  return a;')), 'line_changed')
+  assert.equal(worker.host.data().storage['debugger.breakpoints'], undefined)
+  await set(3, '  return a;')
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [3] } })
+  // Removing needs no text: it removes what the store holds.
+  await worker.request('debugger.breakpoint', { workspaceId: 'w1', path: PAGE, line: 3, on: false })
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], {})
 })
 
 test('a value cut for the pop-up never splits a surrogate pair', () => {

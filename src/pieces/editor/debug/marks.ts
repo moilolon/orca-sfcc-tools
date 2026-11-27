@@ -21,8 +21,12 @@ export type MarkState = 'verified' | 'unverified' | 'idle' | 'pending'
 
 export type StoredLine = DebuggerFileState['lines'][number]
 
-/** What a click on a line asks the store: set or remove these saved lines (1-based); nothing when the change stayed here. */
-export type ToggleAction = { line: number; on: boolean }[]
+/**
+ * What a click on a line asks the store: set or remove these saved lines (1-based), a set one with
+ * the text the editor believes the line holds on disk (the worker refuses it when the disk holds
+ * another); nothing when the change stayed here.
+ */
+export type ToggleAction = { line: number; on: boolean; text?: string }[]
 
 type Pending = { line: number }
 
@@ -114,7 +118,7 @@ export class BreakpointMarks {
       return []
     }
     this.stored = [...this.stored, { line: saved + 1, verified: null }].sort((a, b) => a.line - b.line)
-    return [{ line: saved + 1, on: true }]
+    return [{ line: saved + 1, on: true, text: this.baseline[saved] }]
   }
 
   /** Orca is about to save this editor's text. */

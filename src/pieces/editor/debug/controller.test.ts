@@ -36,8 +36,12 @@ class FakeDebugger implements DebugRequests {
     }
   }
 
-  async breakpoint(input: DebuggerFileInput & { line: number; on: boolean }): Promise<unknown> {
+  /** The file on disk, as the worker reads it to check a line's text. */
+  disk = SCRIPT
+
+  async breakpoint(input: DebuggerFileInput & { line: number; on: boolean; text?: string }): Promise<unknown> {
     this.calls.push(`breakpoint ${input.line} ${input.on}`)
+    if (input.on && input.text !== undefined && textLines(this.disk)[input.line - 1] !== input.text) throw Object.assign(new Error('line_changed'), { code: 'line_changed' })
     if (this.failNext) {
       const code = this.failNext
       this.failNext = null
@@ -56,6 +60,7 @@ class FakeDebugger implements DebugRequests {
   /** A save of the file from any tab: the worker moves the store's lines as its save hook does. */
   saved(before: string, after: string): void {
     this.lines.set(PATH, remapLines(this.lines.get(PATH) ?? [], textLines(before), textLines(after)))
+    this.disk = after
   }
 
   hovers: string[] = []
@@ -198,6 +203,7 @@ test('finding 2: after a write from outside, the stopped line and a click use th
   // An agent writes the file: two lines at the top. The store still says 3, as the session does.
   const written = `'use strict';\n\n${SCRIPT}`
   model.replaceAll(written)
+  debug.disk = written
   await controller.rebase(textLines(written))
   assert.deepEqual(gutter(), ['3:bp-idle'], 'the mark stays on the store’s line')
   debug.session = 'halted'
@@ -242,6 +248,36 @@ test('finding 3: two editors of one file agree after either saves, and after a s
   }
   assert.deepEqual(debug.lines.get(PATH), [5])
   assert.deepEqual([a.gutter(), b.gutter()], [['5:bp-idle'], ['5:bp-idle']])
+})
+
+test('round 2, finding 3: while another tab has unsaved edits, a click on a line the disk holds differently is refused in one line', async () => {
+  const debug = new FakeDebugger()
+  const a = setup([3], debug)
+  const b = editorOf(debug)
+  for (const each of [a, b]) {
+    each.controller.setFile(FILE)
+    await each.controller.refresh()
+  }
+  // A presses Enter at the top and does not save; B takes A's text for the file.
+  a.model.setSelection({ line: 0, col: 0 })
+  a.model.enter()
+  b.model.replaceAll(a.model.text())
+  await b.controller.rebase(textLines(a.model.text()))
+  // In B, a click on `return a + b;` (its line 5): line 5 on disk is `}`.
+  await b.controller.toggle(4)
+  assert.deepEqual(b.drawn.notices, ['This line is not saved yet: save the file, then set it.'])
+  assert.deepEqual(debug.lines.get(PATH), [3])
+  assert.deepEqual(b.gutter(), ['3:bp-idle'])
+  // In A, the same line is line 4 of the file on disk: set there.
+  await a.controller.toggle(4)
+  assert.deepEqual(debug.lines.get(PATH), [3, 4])
+  // A saves: the store moves with the text, and both are on the lines that run.
+  a.controller.flushed()
+  debug.saved(SCRIPT, a.model.text())
+  await a.controller.savedOwn()
+  await b.controller.rebase([...b.model.buffer.lines])
+  assert.deepEqual(debug.lines.get(PATH), [4, 5])
+  assert.deepEqual([a.gutter(), b.gutter()], [['4:bp-idle', '5:bp-idle'], ['4:bp-idle', '5:bp-idle']])
 })
 
 test('finding 5: a breakpoint’s line deleted whole hides it, undo brings it back, and a save drops it', async () => {

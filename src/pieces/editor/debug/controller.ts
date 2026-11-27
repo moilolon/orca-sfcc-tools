@@ -14,7 +14,7 @@ import { BreakpointMarks, type MarkState } from './marks'
 
 export type DebugRequests = {
   file(input: DebuggerFileInput): Promise<DebuggerFileState>
-  breakpoint(input: DebuggerFileInput & { line: number; on: boolean }): Promise<unknown>
+  breakpoint(input: DebuggerFileInput & { line: number; on: boolean; text?: string }): Promise<unknown>
   hover(input: DebuggerFileInput & { expression: string; frameId: number }): Promise<DebuggerHoverValue | null>
 }
 
@@ -131,7 +131,7 @@ export class DebugController {
     this.draw()
     if (actions.length === 0) return
     await this.write(async () => {
-      for (const action of actions) await this.requests.breakpoint({ ...file, line: action.line, on: action.on })
+      for (const action of actions) await this.requests.breakpoint({ ...file, ...action })
     })
   }
 
@@ -190,7 +190,8 @@ export class DebugController {
     try {
       await work()
     } catch (error) {
-      this.surface.notify(this.word((error as { code?: unknown } | null)?.code === 'not_script' ? 'notScript' : 'failed'))
+      const code = (error as { code?: unknown } | null)?.code
+      this.surface.notify(this.word(code === 'not_script' ? 'notScript' : code === 'line_changed' ? 'lineChanged' : 'failed'))
     } finally {
       this.writing--
     }

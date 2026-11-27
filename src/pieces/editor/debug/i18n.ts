@@ -16,7 +16,8 @@ export const debugMessages = defineMessages(
     valueLabel: 'Value while stopped',
     valueMembers: 'has members: see Variables in the debugger',
     failed: 'Could not change the breakpoint. Try again.',
-    notScript: 'Breakpoints go only in scripts of a cartridge.'
+    notScript: 'Breakpoints go only in scripts of a cartridge.',
+    lineChanged: 'This line is not saved yet: save the file, then set it.'
   },
   {
     markVerified: 'Punto de interrupción, verificado por la sesión',
@@ -30,6 +31,7 @@ export const debugMessages = defineMessages(
     valueLabel: 'Valor mientras está parado',
     valueMembers: 'tiene miembros: míralos en Variables del depurador',
     failed: 'No se ha podido cambiar el punto de interrupción. Inténtalo de nuevo.',
-    notScript: 'Los puntos de interrupción solo van en scripts de un cartucho.'
+    notScript: 'Los puntos de interrupción solo van en scripts de un cartucho.',
+    lineChanged: 'Esta línea aún no está guardada: guarda el fichero y vuelve a ponerlo.'
   }
 )
