@@ -8,6 +8,13 @@ import type { JsonValue } from 'orca'
 import type { ChildLike, SpawnOptions, Spawner } from './b2c'
 import { createSettings, type Settings } from './settings'
 
+/**
+ * Every test process that loads this module gets a throwaway data folder of the plugin: no test
+ * may read or write the person's own seen list. The name is the errors piece's override
+ * (`ORCA_SFCC_TOOLS_DATA`); its data folder refuses the real folder under a test runner without it.
+ */
+if (!process.env.ORCA_SFCC_TOOLS_DATA) process.env.ORCA_SFCC_TOOLS_DATA = mkdtempSync(join(tmpdir(), 'sfcc-tools-data-'))
+
 /** An invented dw.json: a sandbox, a development and a staging instance; production has no host. */
 export const INVENTED_DW = {
   hostname: 'sandbox-01.example.com',

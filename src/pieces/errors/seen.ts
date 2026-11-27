@@ -3,15 +3,22 @@
 // count but never make it new again, unless a person forgets it, which drops it from the list.
 // The lists of two environments are independent.
 //
-// Pure over the store it is given: no Orca or Node import, so the command line of phase 4 runs it
-// outside Orca over a store of its own. What is kept per signature is its counters and a sample
+// Pure over the store it is given: no Orca or Node import. The worker gives it a store over
+// `seen.json` in the plugin's data folder (data-folder.ts), whose `update` changes one role's list
+// under the file's lock, so two workers (an old one still stopping, another copy of the plugin)
+// never lose each other's changes. The command line of bin/errors.ts only reads that file. What is kept per signature is its counters and a sample
 // (the normalised first line, the logger and the top frames), each cut to a bound: never a raw
 // log entry. The caller masks the sample before it is recorded.
 
-/** The part of a store the list needs: the plugin's own `Store` is one. */
+/**
+ * The part of a store the list needs. With `update`, each change reads and writes the list in one
+ * step its store makes atomic; without it, as `get` then `set`.
+ */
 export type SeenStore = {
   get<T extends SeenJson>(key: string, fallback: T): Promise<T>
   set(key: string, value: SeenJson): Promise<void>
+  /** Replaces the value at `key` by `change(current)`, or leaves it when that answers undefined. */
+  update?(key: string, change: (current: SeenJson | null) => SeenJson | undefined): Promise<void>
 }
 
 /** A JSON value, as a store keeps it. */
@@ -126,11 +133,20 @@ export function createSeenList(store: SeenStore): SeenList {
     )
     return next
   }
-  const load = async (role: string): Promise<Table> => {
-    const value = await store.get<SeenJson>(listKey(role), {})
-    return value && typeof value === 'object' && !Array.isArray(value) ? (value as unknown as Table) : {}
+  const tableOf = (value: SeenJson | null | undefined): Table => (value && typeof value === 'object' && !Array.isArray(value) ? (value as unknown as Table) : {})
+  const load = async (role: string): Promise<Table> => tableOf(await store.get<SeenJson>(listKey(role), {}))
+  /** Changes a role's table: `change` edits it and answers false to write nothing. */
+  async function change(role: string, edit: (table: Table) => boolean): Promise<void> {
+    if (store.update) {
+      await store.update(listKey(role), (current) => {
+        const table = tableOf(current)
+        return edit(table) ? (trim(table) as unknown as SeenJson) : undefined
+      })
+      return
+    }
+    const table = await load(role)
+    if (edit(table)) await store.set(listKey(role), trim(table) as unknown as SeenJson)
   }
-  const save = (role: string, table: Table) => store.set(listKey(role), table as unknown as SeenJson)
 
   return {
     list: (role) => serial(role, async () => ordered(await load(role))),
@@ -138,42 +154,52 @@ export function createSeenList(store: SeenStore): SeenList {
       serial(role, async () => {
         // A read that found nothing writes nothing: the list can be large.
         if (occurrences.length === 0) return { added: [] }
-        const table = await load(role)
-        const added: string[] = []
-        for (const { signature, at, sample } of occurrences) {
-          const known = table[signature]
-          if (!known) {
-            table[signature] = { firstSeen: at, lastSeen: at, count: 1, sample: boundSample(sample) }
-            added.push(signature)
-            continue
+        let added: string[] = []
+        await change(role, (table) => {
+          added = []
+          for (const { signature, at, sample } of occurrences) {
+            const known = table[signature]
+            if (!known) {
+              table[signature] = { firstSeen: at, lastSeen: at, count: 1, sample: boundSample(sample) }
+              added.push(signature)
+              continue
+            }
+            known.count += 1
+            known.firstSeen = Math.min(known.firstSeen, at)
+            if (at >= known.lastSeen) {
+              known.lastSeen = at
+              known.sample = boundSample(sample)
+            }
           }
-          known.count += 1
-          known.firstSeen = Math.min(known.firstSeen, at)
-          if (at >= known.lastSeen) {
-            known.lastSeen = at
-            known.sample = boundSample(sample)
-          }
-        }
-        const kept = trim(table)
-        await save(role, kept)
-        return { added: added.filter((signature) => signature in kept) }
+          const kept = trim(table)
+          added = added.filter((signature) => signature in kept)
+          return true
+        })
+        return { added }
       }),
     mark: (role, signatures, at) =>
-      serial(role, async () => {
-        const table = await load(role)
-        for (const signature of signatures) {
-          const known = table[signature]
-          if (known && known.markedAt === undefined) known.markedAt = at
-        }
-        await save(role, table)
-      }),
+      serial(role, () =>
+        change(role, (table) => {
+          let changed = false
+          for (const signature of signatures) {
+            const known = table[signature]
+            if (known && known.markedAt === undefined) {
+              known.markedAt = at
+              changed = true
+            }
+          }
+          // Marking nothing writes nothing.
+          return changed
+        })
+      ),
     forget: (role, signature) =>
-      serial(role, async () => {
-        const table = await load(role)
-        if (!(signature in table)) return
-        delete table[signature]
-        await save(role, table)
-      }),
+      serial(role, () =>
+        change(role, (table) => {
+          if (!(signature in table)) return false
+          delete table[signature]
+          return true
+        })
+      ),
     newCount: (role) => serial(role, async () => Object.values(await load(role)).filter((record) => record.markedAt === undefined).length)
   }
 }

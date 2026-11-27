@@ -1,6 +1,7 @@
 // The errors piece's texts in English and Spanish: its view, its notification and its status bar
-// item. A notification says how many, never what.
-import { defineMessages } from '../../core/i18n'
+// item, and the report of the command line (bin/errors.ts). A notification says how many, never
+// what. The command line loads this file under plain Node: explicit `.ts` imports only.
+import { defineMessages } from '../../core/i18n.ts'
 
 export const messages = defineMessages(
   {
@@ -150,3 +151,96 @@ export function openFailureKey(reason: string | undefined): ErrorsMessageKey {
   const key = `openFailed.${reason}`
   return key in messages.en ? (key as ErrorsMessageKey) : 'openFailed'
 }
+
+/**
+ * The command line's texts (bin/errors.ts): its report and its help. Its JSON has no words, only
+ * codes and data.
+ */
+export const cliMessages = defineMessages(
+  {
+    title: 'SFCC error report, {time}',
+    configMissing: 'No dw.json at the path given.',
+    configInvalid: 'The dw.json given is not a JSON object.',
+    seenMissing: 'No seen list yet: nothing is marked as seen.',
+    seenInvalid: 'The seen list could not be read: nothing counts as marked.',
+    reportInvalid: 'The last report could not be read: its cursor is not moved.',
+    since: 'since {time}',
+    summary: '{new} new, {unmarked} still unmarked',
+    nothing: 'nothing new, nothing unmarked',
+    notRead: 'not read ({code})',
+    newGroup: 'New since the last report',
+    unmarkedGroup: 'Still unmarked',
+    row: '{signature}  {count}×  first {first}, last {last}',
+    more: '… and {count} more',
+    marked: '{count} marked as seen, not listed',
+    missed: 'Some entries may have been missed: the log returned a full window.',
+    help: [
+      'Usage: node bin/errors.ts --config-file <dw.json> --role <role>... [--json] [--since <time>] [--lang <en|es>]',
+      '',
+      'Reads the ERROR and FATAL entries of each environment’s log through b2c and prints, per',
+      'environment, what is new since the last report and what is still not marked as seen in the',
+      'plugin. Signatures, counts and normalised messages with values masked; never a raw entry.',
+      '',
+      '  --config-file <path>  the dw.json that names each environment (read, never printed)',
+      '  --role <role>         sandbox, development, staging or production; repeat for several',
+      '  --json                one JSON document instead of text',
+      '  --since <time>        start of the window: an ISO 8601 time, or 90m, 12h, 2d ago;',
+      '                        default the last report, else one day ago',
+      '  --lang <en|es>        language of the text report (default: from LANG)',
+      '',
+      'Exit 0 with a report; 1 when an environment could not be read (the report says which);',
+      '2 when the arguments are wrong.'
+    ].join('\n'),
+    usage: 'Wrong arguments: {reason}. See --help.',
+    'usage.config': 'give --config-file once',
+    'usage.role': 'give at least one --role (sandbox, development, staging, production)',
+    'usage.roleUnknown': 'unknown role',
+    'usage.since': '--since takes an ISO 8601 time or a duration such as 12h',
+    'usage.lang': '--lang takes en or es',
+    'usage.unknown': 'unknown argument'
+  },
+  {
+    title: 'Informe de errores de SFCC, {time}',
+    configMissing: 'No hay ningún dw.json en la ruta dada.',
+    configInvalid: 'El dw.json dado no es un objeto JSON.',
+    seenMissing: 'Aún no hay lista de vistos: nada está marcado como visto.',
+    seenInvalid: 'No se ha podido leer la lista de vistos: nada cuenta como marcado.',
+    reportInvalid: 'No se ha podido leer el último informe: su cursor no se mueve.',
+    since: 'desde {time}',
+    summary: '{new} nuevos, {unmarked} aún sin marcar',
+    nothing: 'nada nuevo, nada sin marcar',
+    notRead: 'sin leer ({code})',
+    newGroup: 'Nuevos desde el último informe',
+    unmarkedGroup: 'Aún sin marcar',
+    row: '{signature}  {count}×  primera {first}, última {last}',
+    more: '… y {count} más',
+    marked: '{count} marcados como vistos, sin listar',
+    missed: 'Puede que falten entradas: el log ha devuelto una ventana llena.',
+    help: [
+      'Uso: node bin/errors.ts --config-file <dw.json> --role <rol>... [--json] [--since <momento>] [--lang <en|es>]',
+      '',
+      'Lee las entradas ERROR y FATAL del log de cada entorno con b2c e imprime, por entorno, lo',
+      'nuevo desde el último informe y lo que sigue sin marcar como visto en el plugin. Firmas,',
+      'cuentas y mensajes normalizados con los valores enmascarados; nunca una entrada en bruto.',
+      '',
+      '  --config-file <ruta>  el dw.json que nombra cada entorno (se lee, nunca se imprime)',
+      '  --role <rol>          sandbox, development, staging o production; repítelo para varios',
+      '  --json                un documento JSON en lugar de texto',
+      '  --since <momento>     inicio de la ventana: un momento ISO 8601, o hace 90m, 12h, 2d;',
+      '                        por defecto el último informe, si no hace un día',
+      '  --lang <en|es>        idioma del informe en texto (por defecto: según LANG)',
+      '',
+      'Sale con 0 con un informe; con 1 cuando no se ha podido leer un entorno (el informe dice',
+      'cuál); con 2 cuando los argumentos no son válidos.'
+    ].join('\n'),
+    usage: 'Argumentos no válidos: {reason}. Mira --help.',
+    'usage.config': 'da --config-file una vez',
+    'usage.role': 'da al menos un --role (sandbox, development, staging, production)',
+    'usage.roleUnknown': 'rol desconocido',
+    'usage.since': '--since toma un momento ISO 8601 o una duración como 12h',
+    'usage.lang': '--lang toma en o es',
+    'usage.unknown': 'argumento desconocido'
+  }
+)
+
+export type CliMessageKey = keyof (typeof cliMessages)['en']

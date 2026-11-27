@@ -2,7 +2,8 @@
 // b2c, what it keeps, what it tells the person, and the sandbox's timer.
 import { assert, mockHost, mountWorker, test, type MockHost, type TestWorker } from 'orca/testing'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createB2c, type B2c } from '../../core/b2c'
 import type { Role } from '../../core/instances'
@@ -14,6 +15,7 @@ import { createStore } from '../../core/store'
 import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, type SpawnCall } from '../../core/test-support'
 import { createWorkspaces } from '../../core/workspaces'
 import { createActivate, deactivate } from '../../worker/worker'
+import { DATA_FOLDER_ENV, SEEN_FILE } from './data-folder'
 import { cartError, LOGS_GET, paymentError } from './fixtures/logs'
 import type { RoleErrors } from './protocol'
 import { createErrorsPiece, FIRST_READ_MS, FULL_WINDOW_BYTES, intervalOf, MAX_ENTRIES, OVERLAP_MS, readArguments, RESUME_MS, START_DELAY_MS, STATUS_ITEM, type ErrorsDeps } from './worker'
@@ -27,6 +29,25 @@ const MACHINE = {
   isDirectory: async () => true
 }
 const NOW = Date.UTC(2026, 10, 26, 12, 0, 0)
+
+// Nothing here may reach the person's own data folder: every worker of this file gets a folder of
+// its host's (the same machine across a restart), and the default points at a throwaway one.
+process.env[DATA_FOLDER_ENV] = mkdtempSync(join(tmpdir(), 'sfcc-tools-data-'))
+const dataFolders = new WeakMap<MockHost, string>()
+function dataFolderOf(host: MockHost): string {
+  let folder = dataFolders.get(host)
+  if (!folder) dataFolders.set(host, (folder = mkdtempSync(join(tmpdir(), 'sfcc-tools-data-'))))
+  return folder
+}
+
+/** `seen.json` of a host's data folder, parsed; null when it does not exist. */
+function seenFileOf(host: MockHost): { version: number; roles: Record<string, Record<string, { sample: { message: string } }>> } | null {
+  try {
+    return JSON.parse(readFileSync(join(dataFolderOf(host), SEEN_FILE), 'utf8'))
+  } catch {
+    return null
+  }
+}
 
 function hostFor(root: string, settings: Record<string, string | number> = {}, storage: Record<string, never> = {}) {
   return mockHost({
@@ -56,6 +77,7 @@ function b2cAnswering(answer: () => unknown = () => LOGS_GET, files: () => unkno
 /** The whole worker, as Orca starts it, over `host`. */
 async function mountPlugin(host: MockHost, script: (call: SpawnCall) => void = b2cAnswering()) {
   const spawn = fakeSpawner(script)
+  process.env[DATA_FOLDER_ENV] = dataFolderOf(host)
   const worker = await mountWorker({ default: createActivate({ ...MACHINE, spawn: spawn.spawn, killTree: (child) => child.kill() }), deactivate }, { host })
   return { worker, calls: spawn.calls }
 }
@@ -80,6 +102,7 @@ async function mountPiece(host: MockHost, script: (call: SpawnCall) => void, dep
       return timer
     },
     clearTimer: (timer) => void ((timer as { cleared: boolean }).cleared = true),
+    dataFolder: dataFolderOf(host),
     ...deps
   })
   let disposable: { dispose(): void } | void = undefined
@@ -133,9 +156,24 @@ async function readNow(worker: TestWorker, { role }: { role: Role }): Promise<Ro
   return readEnded(worker, role)
 }
 
-/** Lets the worker run until `done` holds; fails after a while. */
+/**
+ * Lets the worker run until `done` holds; fails after 2,000 turns of the event loop and at least
+ * five seconds, since the seen list waits on the disk too.
+ */
 async function until(done: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 2_000 && !done(); i++) await new Promise((resolve) => setImmediate(resolve))
+  const end = Date.now() + 5_000
+  for (let i = 0; (i < 2_000 || Date.now() < end) && !done(); i++) await new Promise((resolve) => setImmediate(resolve))
+  assert.ok(done(), what)
+  await settle()
+}
+
+/**
+ * Waits until `done` holds, for up to `ms` of real time: what goes through the data folder waits on
+ * the disk and its lock, not only on the event loop.
+ */
+async function waitFor(done: () => boolean, what: string, ms = 10_000): Promise<void> {
+  const end = Date.now() + ms
+  while (!done() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 5))
   assert.ok(done(), what)
   await settle()
 }
@@ -443,10 +481,14 @@ test('what is stored is the counters and a masked, bounded sample: never a raw e
     const secretEntry = paymentError('2026-11-26 11:00:00.000 GMT', '00012345', 'jane.doe@example.com', '59.90')
     secretEntry.message = secretEntry.message.replace('Payment authorization failed', `Payment authorization failed at ${INVENTED_DW.hostname} for ${INVENTED_DW['client-id']}`) + 'x'.repeat(5000)
     secretEntry.raw = `[${secretEntry.timestamp}] ERROR ${secretEntry.message}`
-    const { worker } = await mountPiece(hostFor(root), b2cAnswering(() => ({ entries: [...LOGS_GET.entries, secretEntry] })))
+    const host = hostFor(root)
+    const { worker } = await mountPiece(host, b2cAnswering(() => ({ entries: [...LOGS_GET.entries, secretEntry] })))
     await readNow(worker, { role: 'sandbox' })
     const storage = worker.host.data().storage
-    const stored = JSON.stringify(storage)
+    const seenFile = seenFileOf(host)
+    assert.ok(seenFile, 'the seen list is in the data folder')
+    // What the plugin's storage and its data folder hold, together.
+    const stored = JSON.stringify(storage) + JSON.stringify(seenFile)
     assertNoSecrets(stored, 'storage')
     assert.ok(stored.includes('Payment authorization failed at *** for ***'), 'the host and the client id are masked')
     for (const entry of LOGS_GET.entries) {
@@ -458,8 +500,11 @@ test('what is stored is the counters and a masked, bounded sample: never a raw e
       assert.ok(!stored.includes(volatile), volatile)
     }
     const keys = Object.keys(storage).filter((key) => key.startsWith('errors.'))
-    assert.deepEqual(keys.sort(), ['errors.cursor.sandbox', 'errors.seen.sandbox', 'errors.status.sandbox'])
-    for (const record of Object.values(storage['errors.seen.sandbox'] as Record<string, { sample: { message: string } }>)) {
+    // The seen list is no longer in storage: only the cursor, the state of the read and the mark of the move.
+    assert.deepEqual(keys.sort(), ['errors.cursor.sandbox', 'errors.seenMoved', 'errors.status.sandbox'])
+    assert.deepEqual(Object.keys(seenFile.roles), ['sandbox'])
+    assert.equal(seenFile.version, 1)
+    for (const record of Object.values(seenFile.roles.sandbox)) {
       assert.ok(record.sample.message.length <= 300)
       assert.deepEqual(Object.keys(record).sort(), ['count', 'firstSeen', 'lastSeen', 'sample'])
     }
@@ -515,16 +560,19 @@ test('the status bar counts the sandbox’s new errors, hidden at zero', async (
   const root = makeWorkspace()
   try {
     const { worker } = await mountPiece(hostFor(root), b2cAnswering())
-    await settle()
     const updates = () => paramsOf(worker.host, 'statusBar.update') as { id: string; text: string; visible: boolean }[]
+    // The first count waits for the seen list's one-time copy.
+    await waitFor(() => updates().length > 0, 'the first count')
     assert.deepEqual(updates().at(-1), { id: STATUS_ITEM, text: '0', tooltip: 'New errors on the sandbox: 0', visible: false })
     const list = await readNow(worker, { role: 'sandbox' })
+    // The count is read from the data folder once the read ended: it follows a moment after.
+    await waitFor(() => updates().at(-1)?.text === '5', 'the count follows the read')
     assert.deepEqual(updates().at(-1), { id: STATUS_ITEM, text: '5', tooltip: 'New errors on the sandbox: 5', visible: true })
     const before = updates().length
     await readNow(worker, { role: 'development' })
     assert.equal(updates().length, before, 'another environment leaves it alone')
     await worker.request('errors.mark', { role: 'sandbox', signatures: list.rows.map((row) => row.signature) })
-    assert.equal(updates().at(-1)?.visible, false)
+    await waitFor(() => updates().at(-1)?.visible === false, 'hidden once every error is marked')
     assert.deepEqual(worker.refusals, [])
     await worker.deactivate()
   } finally {
@@ -624,14 +672,14 @@ test('the timer reads the sandbox every interval and never overlaps two reads', 
     pending.shift()?.child.finish(0, JSON.stringify(LOGS_GET))
     const list = await readEnded(worker, 'sandbox')
     assert.equal(list.rows.length, 5)
-    await until(() => live().length === 1, 'the next tick is scheduled once the read ended')
+    await waitFor(() => live().length === 1, 'the next tick is scheduled once the read ended')
     assert.equal(live()[0].ms, 5 * 60_000)
 
     live()[0].run()
     await until(() => logsCalls().length === 2, 'the second tick reads')
     assert.deepEqual(logsCalls().map((call) => call.options.env.SFCC_SERVER), [INVENTED_DW.hostname, INVENTED_DW.hostname])
     pending.shift()?.child.finish(0, JSON.stringify({ entries: [] }))
-    await until(() => live().length === 1, 'and schedules the third')
+    await waitFor(() => live().length === 1, 'and schedules the third')
     await worker.deactivate()
     assert.equal(live().length, 0, 'disposing clears the timer')
   } finally {
@@ -871,4 +919,92 @@ test('intervalOf and readArguments', () => {
   assert.equal(intervalOf(99999), 1440)
   for (const off of [0, -1, '', 'x', null, undefined, Number.NaN]) assert.equal(intervalOf(off), 0, String(off))
   assert.deepEqual(readArguments(['error'], 0), ['logs', 'get', '--no-normalize', '--filter=error', '--level=ERROR', '--level=FATAL', `--count=${MAX_ENTRIES}`, '--since=1970-01-01T00:00:00.000Z'])
+})
+
+test('the seen lists an older version kept in storage are copied to seen.json once, and storage is left as it is', async () => {
+  const root = makeWorkspace()
+  try {
+    const marked = { firstSeen: 1, lastSeen: 2, count: 3, markedAt: 2, sample: { message: 'Old error', logger: null, frames: [] } }
+    const fresh = { firstSeen: 5, lastSeen: 6, count: 1, sample: { message: 'Old new error', logger: null, frames: [] } }
+    const storage = { 'errors.seen.sandbox': { aaaa: marked, bbbb: fresh }, 'errors.seen.staging': { cccc: fresh }, 'errors.cursor.sandbox': { at: 6, files: {}, sizes: {} } }
+    const host = hostFor(root, {}, storage as unknown as Record<string, never>)
+    const { worker } = await mountPiece(host, b2cAnswering())
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
+    assert.deepEqual(seenFileOf(host), { version: 1, roles: { sandbox: { aaaa: marked, bbbb: fresh }, staging: { cccc: fresh } } })
+    // Storage is left alone: an older copy of the plugin still reads it.
+    assert.deepEqual(worker.host.data().storage['errors.seen.sandbox'], storage['errors.seen.sandbox'])
+    const list = await worker.request('errors.list', { role: 'sandbox' })
+    assert.deepEqual(list.rows.map((row) => [row.signature, row.markedAt]), [['bbbb', null], ['aaaa', 2]])
+    await waitFor(() => (paramsOf(worker.host, 'statusBar.update').at(-1) as { text?: string } | undefined)?.text === '1', 'the counter shows what was copied')
+    await worker.request('errors.mark', { role: 'sandbox', signatures: ['bbbb'] })
+    await worker.deactivate()
+
+    // Restarted: nothing is copied again, even once the file is gone.
+    const second = await mountPiece(host, b2cAnswering())
+    await settle()
+    assert.notEqual(seenFileOf(host)?.roles.sandbox.bbbb, undefined)
+    assert.equal((await second.worker.request('errors.list', { role: 'sandbox' })).rows.filter((row) => row.markedAt === null).length, 0, 'the mark in seen.json stands')
+    await second.worker.deactivate()
+    rmSync(join(dataFolderOf(host), SEEN_FILE))
+    const third = await mountPiece(host, b2cAnswering())
+    await settle()
+    assert.equal(seenFileOf(host), null, 'the copy ran once')
+    assert.equal((await third.worker.request('errors.list', { role: 'sandbox' })).rows.length, 0)
+    await third.worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a seen.json another copy of the plugin already wrote is never overwritten by the copy', async () => {
+  const root = makeWorkspace()
+  try {
+    const record = { firstSeen: 1, lastSeen: 2, count: 1, sample: { message: 'Stored error', logger: null, frames: [] } }
+    const host = hostFor(root, {}, { 'errors.seen.sandbox': { aaaa: record } } as unknown as Record<string, never>)
+    const written = { version: 1, roles: { sandbox: { zzzz: { ...record, markedAt: 2 } } } }
+    writeFileSync(join(dataFolderOf(host), SEEN_FILE), JSON.stringify(written))
+    const { worker } = await mountPiece(host, b2cAnswering())
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
+    assert.deepEqual(seenFileOf(host), written)
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('with nothing in storage to copy, starting writes nothing to the data folder', async () => {
+  const root = makeWorkspace()
+  try {
+    const host = hostFor(root)
+    const { worker } = await mountPiece(host, b2cAnswering())
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
+    assert.deepEqual(readdirSync(dataFolderOf(host)), [])
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a mark right after the start waits for the copy: the old marks are never lost to it', async () => {
+  const root = makeWorkspace()
+  try {
+    const old = { firstSeen: 1, lastSeen: 2, count: 3, markedAt: 2, sample: { message: 'Old error', logger: null, frames: [] } }
+    const fresh = { firstSeen: 5, lastSeen: 6, count: 1, sample: { message: 'Old new error', logger: null, frames: [] } }
+    const host = hostFor(root, {}, { 'errors.seen.sandbox': { aaaa: old, bbbb: fresh } } as unknown as Record<string, never>)
+    const { worker } = await mountPiece(host, b2cAnswering())
+    // At once, before the copy could have ended: the view was open while the worker restarted.
+    const [marked, unknown] = await Promise.all([
+      worker.request('errors.mark', { role: 'sandbox', signatures: ['bbbb'] }),
+      worker.request('errors.mark', { role: 'staging', signatures: ['nothing'] })
+    ])
+    assert.deepEqual(marked.rows.map((row) => [row.signature, row.markedAt === null]), [['bbbb', false], ['aaaa', false]], 'both marked, newest first')
+    assert.equal(unknown.rows.length, 0)
+    const file = seenFileOf(host)
+    assert.equal(file?.roles.sandbox.aaaa !== undefined, true, 'the old mark is in seen.json')
+    assert.deepEqual(Object.keys(file?.roles ?? {}), ['sandbox'], 'marking nothing wrote nothing')
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
