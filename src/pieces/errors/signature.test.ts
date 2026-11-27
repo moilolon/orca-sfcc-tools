@@ -395,7 +395,11 @@ test('normalize removes each volatile part, and keeps the words around it', () =
     ['in Sites-Example-Site today', 'in <site> today'],
     ['(app_x/cartridge/scripts/a.js#118) and a.js:12:7', '(app_x/cartridge/scripts/a.js) and a.js'],
     ['object 0x7f3a9c at 9f3a6c21e4 moved', 'object <hex> at <hex> moved'],
-    ['session k3Jd8sLq0aZx2Vb7Nn4Mc1Pq expired', 'session <id> expired'],
+    // A value after `session` is a secret now (see the secrets test); a shorter random id elsewhere stays <id>.
+    ['session k3Jd8sLq0aZx2Vb7Nn4Mc1Pq expired', 'session <secret> expired'],
+    ['request k3Jd8sLq0aZx2Vb7 expired', 'request <id> expired'],
+    // Of 20 characters or more, a random run counts as a secret.
+    ['request k3Jd8sLq0aZx2Vb7Nn4Mc1Pq expired', 'request <secret> expired'],
     ['order 00012345 of 59.90 EUR', 'order # of #.# EUR'],
     ['  many   spaces\tand\nlines ', 'many spaces and lines']
   ]
@@ -426,6 +430,82 @@ test('signature.ts and seen.ts stay pure: no Orca import, and no Node import bey
   for (const file of ['signature.ts', 'seen.ts', 'reader.ts']) {
     const source = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')
     const imports = [...source.matchAll(/(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]|import\s*['"]([^'"]+)['"]/g)].map((m) => m[1] ?? m[2])
-    for (const spec of imports) assert.ok(spec === 'node:crypto' || spec === './reader', `${file} imports ${spec}`)
+    for (const spec of imports) assert.ok(spec === 'node:crypto' || spec === './reader.ts', `${file} imports ${spec}`)
+  }
+})
+
+test('secrets never survive normalisation: keys, passwords, tokens, cookies, JWTs and long runs become <secret>', () => {
+  // Every value here is invented.
+  const cases: [string, string][] = [
+    ['Call failed: apiKey=inv_key_Q4mZ8rT2wX6pL1nB9cV3 for the provider', 'Call failed: apiKey=<secret> for the provider'],
+    ['Call failed: api_key: AbCdEf123456 for the provider', 'Call failed: api_key: <secret> for the provider'],
+    ['Login refused with password Hunter2Secret! for the account', 'Login refused with password <secret> for the account'],
+    ['Login refused: passwd=Invented-Pass-9, user blocked', 'Login refused: passwd=<secret>, user blocked'],
+    ['Login refused: PWD:Invented9', 'Login refused: PWD:<secret>'],
+    ['secret: s3cr3t-value, next', 'secret: <secret>, next'],
+    ['refresh failed for TOKEN=abc.def-123&next=1', 'refresh failed for TOKEN=<secret>&next=#'],
+    ['{"token":"abc.def-123","user":"x"}', '{<q>:<secret>,<q>:<q>}'],
+    ['request with dwsecuretoken_ab12=XyZ8kLm3QrSt and more', 'request with dwsecuretoken_ab#=<secret> and more'],
+    ['Set-Cookie: dwsecuretoken_9f2e=XyZ8kLm3; path=/; HttpOnly', 'Set-Cookie: <secret>'],
+    ['cookie dwsid=Q1w2E3r4T5', 'cookie <secret>'],
+    ['Session k3Jd8sLq0aZx2Vb7Nn4Mc1Pq invalid', 'Session <secret> invalid'],
+    ['Header Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U rejected', 'Header Authorization: <secret> rejected'],
+    ['sent Bearer abc123DEF456ghi rejected', 'sent Bearer <secret> rejected'],
+    ['auth header Basic dXNlcjpwYXNzd29yZA== refused', 'auth header Basic <secret> refused'],
+    ['jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlMTIz expired', 'jwt <secret> expired'],
+    ['id abcdefghijklmnop1.qrstuvwxyzabcdef2.ghijklmnopqrstuv3 refused', 'id <secret> refused'],
+    ['hash 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b mismatch', 'hash <secret> mismatch'],
+    ['blob QWxhZGRpbjpvcGVuIHNlc2FtZQ+abc= end', 'blob <secret> end']
+  ]
+  for (const [text, expected] of cases) assert.equal(normalize(text), expected, text)
+  // Ordinary words after those words are the sentence going on, and names and paths stay.
+  for (const text of [
+    'Payment authorization failed for order',
+    'session expired for basket',
+    'Basic authentication failed',
+    'token is missing',
+    'script app_example/cartridge/scripts/helpers/cartHelper.js failed in PaymentProcessorAdapter calculateLineTotalForBasket'
+  ]) {
+    assert.equal(normalize(text), text, text)
+  }
+})
+
+test('after a word of the password family, a plain lowercase word is masked unless the sentence goes on with it', () => {
+  // Invented passwords, each a plain lowercase word: masked.
+  for (const [text, expected] of [
+    ['Login failed with password sunshine', 'Login failed with password <secret>'],
+    ['login failed for password letmein', 'login failed for password <secret>'],
+    ['password correcthorsebatterystaple', 'password <secret>'],
+    ['passwd qwerty rejected', 'passwd <secret> rejected'],
+    ['invalid pwd monkey', 'invalid pwd <secret>'],
+    ['secret mysecretvalue leaked', 'secret <secret> leaked'],
+    ['apikey liveabcdefghij refused', 'apikey <secret> refused'],
+    ['api_key liveabcdefghij refused', 'api_key <secret> refused'],
+    ['passphrase opensesame refused', 'passphrase <secret> refused'],
+    ['token abcdefghijklmnop rejected', 'token <secret> rejected'],
+    ['used Bearer abcdefghijklmnop', 'used Bearer <secret>']
+  ]) {
+    assert.equal(normalize(text), expected, text)
+  }
+  // Invented sentences: kept as they are.
+  for (const text of [
+    'Payment authorization failed',
+    'Session expired for basket',
+    'Token expired, refreshing',
+    'token refresh failed',
+    'token is missing',
+    'Password reset email could not be sent',
+    'password policy violated: too short',
+    'Secret store unavailable',
+    'Secret manager timeout',
+    'Password must contain a digit',
+    'Missing password for service account',
+    'Password expired for account',
+    'password mismatch on confirmation',
+    'Password field empty',
+    'cookie missing from request',
+    'sent Bearer token without scope'
+  ]) {
+    assert.equal(normalize(text), text, text)
   }
 })

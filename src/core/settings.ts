@@ -1,6 +1,6 @@
 // Typed reads of the plugin's settings (declared in src/manifest.base.json) and their changes.
 import type { JsonValue } from 'orca'
-import type { Suffixes } from './instances'
+import type { Suffixes } from './instances.ts'
 
 export type SettingsValues = {
   /** The b2c executable: a name looked up on PATH, or a full path. */

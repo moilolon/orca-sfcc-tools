@@ -69,6 +69,25 @@ npm test
 
 ---
 
+## ☀️ Morning error report
+
+The errors piece also runs outside Orca, for a bot that reports each morning. It reads each
+environment's log through `b2c` and prints what is new since its last report and what is still
+not marked as seen in the panel: signatures, counts and normalised messages with values masked,
+never a raw entry, a host or a credential.
+
+```bash
+node bin/errors.ts --config-file <dw.json> --role sandbox --role production --json
+```
+
+It needs Node 22.18 or later and no build. It reads the panel's seen list and never writes it;
+it keeps its own cursor beside it, in the plugin's data folder. It exits 1 when an environment
+could not be read, and says which. The bot `sfcc` runs it each morning with the prompt in
+[`docs/bot-prompt.md`](docs/bot-prompt.md) and leaves one short summary per environment in its
+own chat.
+
+---
+
 <div align="center">
 <sub><a href="https://moilolon.com">moilolon.com</a> · <a href="https://github.com/moilolon">@moilolon</a></sub>
 </div>

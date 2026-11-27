@@ -4,7 +4,7 @@
 // message.
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { ROLES, suffixFor, type ConfigState, type Role, type RoleState, type Suffixes } from './instances'
+import { ROLES, suffixFor, type ConfigState, type Role, type RoleState, type Suffixes } from './instances.ts'
 
 /** The keys of dw.json the plugin reads (each with the role's suffix) and the variable b2c gets. */
 export const DW_KEYS = {
