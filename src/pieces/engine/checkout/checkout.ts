@@ -1059,7 +1059,12 @@ export class CheckoutIndex {
       counts.bundles += ofCartridge.size
       for (const keys of ofCartridge.values()) counts.resourceKeys += keys.size
     }
+    // What does not depend on the requiring file is resolved once per name: the same module, key
+    // or template is used from many files.
     const templateCache = new Map<string, TemplateResolution>()
+    const moduleCache = new Map<string, ModuleResolution>()
+    const resourceCache = new Map<string, ResourceResolution>()
+    const fileFree = (module: string) => !module.startsWith('./') && !module.startsWith('../') && !module.startsWith('~/')
     for (const [path, record] of this.records) {
       if (record.kind !== 'script' && record.kind !== 'controller' && record.kind !== 'template') continue
       if (record.kind === 'template') counts.templates++
@@ -1070,7 +1075,11 @@ export class CheckoutIndex {
       }
       for (const use of record.facts.requires) {
         counts.requires++
-        const resolved = this.resolveModule(path, use.module)
+        let resolved = fileFree(use.module) ? moduleCache.get(use.module) : undefined
+        if (!resolved) {
+          resolved = this.resolveModule(path, use.module)
+          if (fileFree(use.module)) moduleCache.set(use.module, resolved)
+        }
         let bad: boolean
         if (resolved.kind === 'dw') bad = resolved.id === null
         else if (resolved.kind === 'file') bad = resolved.path === null
@@ -1087,7 +1096,9 @@ export class CheckoutIndex {
       }
       for (const use of record.facts.resources) {
         counts.resourceUses++
-        const resolved = this.resolveResource(use.key, use.bundle)
+        const cacheKey = `${use.bundle ?? ''}\u0000${use.key}`
+        let resolved = resourceCache.get(cacheKey)
+        if (!resolved) resourceCache.set(cacheKey, (resolved = this.resolveResource(use.key, use.bundle)))
         if (this.unresolvedOn(path, resolved.copies.map((copy) => ({ storefront: copy.storefront, found: copy.key !== null })), resolved.candidates.length)) counts.resourceUsesUnresolved++
       }
     }
