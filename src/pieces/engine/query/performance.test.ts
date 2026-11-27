@@ -14,7 +14,7 @@ import type { QueryContext } from './modules'
 import { references } from './references'
 import { signatureHelp } from './signature'
 import { BASE, committedDw, dwLookup } from './testing'
-import { settledTime, timed } from '../fixtures/timing'
+import { blockTime, settledTime, timed } from '../fixtures/timing'
 
 /**
  * The bound the editor needs is 50 ms; alone, the first query on a 5,000-line text takes 7 to 16 ms
@@ -100,9 +100,10 @@ test('timings: every query on a 5,000-line script and template, once the index i
     assert.ok(query.expect(once.value.answer), query.name)
     const { analysis } = once.value
     const nextRun = () => run(query.kind, analysis, query.offset)
-    const first = settledTime(once.ms, firstRun, (ms) => ms < BUSY_BOUND_MS)
-    const next = settledTime(timed(nextRun).ms, nextRun, (ms) => ms < NEXT_BOUND_MS)
-    lines.push(`${query.name}: first ${first.toFixed(1)} ms, then ${next.toFixed(2)} ms`)
+    // Each timed over a block, so the log says what a run takes: one run reads 0 or a tick of 16 ms.
+    const first = settledTime(blockTime(firstRun), firstRun, (ms) => ms < BUSY_BOUND_MS)
+    const next = settledTime(blockTime(nextRun), nextRun, (ms) => ms < NEXT_BOUND_MS)
+    lines.push(`${query.name}: first ${first.toFixed(1)} ms, then ${next < 0.1 ? `${(next * 1000).toFixed(0)} µs` : `${next.toFixed(2)} ms`}`)
     assert.ok(first < BUSY_BOUND_MS, `${query.name}: the first query took ${first.toFixed(1)} ms`)
     assert.ok(next < NEXT_BOUND_MS, `${query.name}: the next query took ${next.toFixed(2)} ms`)
   }
