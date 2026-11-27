@@ -1,0 +1,1 @@
+<div class="outlet-banner">${Resource.msg('label.sale', 'product', null)}</div>

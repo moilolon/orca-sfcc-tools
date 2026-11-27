@@ -29,6 +29,7 @@ time.
 | 🚦 | **Sandbox** | Started, stopped or busy, with start and stop, and which workspace uploads to which code version, in the status bar |
 | 🪵 | **Errors** | The new errors of each environment's log, one row per error however often it repeats, until marked as seen; each with its detail, its stack trace and a breakpoint on any of its frames; the sandbox's count in the status bar |
 | 🐞 | **Debugger** | Breakpoints on the sandbox, set by clicking a line of a script, and the threads, call stack and variables of a request halted on one, with continue and step |
+| 🔎 | **Problems** | Reads the workspace's cartridges and lists what would fail: custom attributes and site preferences the metadata lacks, templates and resource keys missing on a storefront, SFRA route chains the platform refuses, broken form definitions and `steptypes.json`; each opens at its line, and a save or an agent's edit that adds some is notified, never with what |
 
 ---
 
@@ -82,7 +83,7 @@ node bin/errors.ts --config-file <dw.json> --role sandbox --role production --js
 
 It needs Node 22.18 or later and no build. It reads the panel's seen list and never writes it;
 it keeps its own cursor beside it, in the plugin's data folder. It exits 1 when an environment
-could not be read, and says which. The bot `sfcc` runs it each morning with the prompt in
+could not be read, and says which. The bot `sfcc-tools` runs it each weekday morning with the prompt in
 [`docs/bot-prompt.md`](docs/bot-prompt.md) and leaves one short summary per environment in its
 own chat.
 

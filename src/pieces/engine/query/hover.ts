@@ -10,7 +10,7 @@ import type { Range } from '../js/ast'
 import { isSuperModule } from '../js/facts'
 import type { ModuleResolution, RouteProblemCode, SuperModuleCopy, TemplateCopy } from '../checkout/checkout'
 import { SITE_PREFERENCES, type ObjectTypeKind } from '../checkout/metadata'
-import { DEFINING_METHODS, type ExportedMember, type RouteMethod, type RouteOperation } from '../checkout/scan'
+import { DEFINING_METHODS, resourceBundle, type ExportedMember, type RouteMethod, type RouteOperation } from '../checkout/scan'
 import { signature, type DwMemberKind } from '../dw/index'
 import { pathAt, rootAt, type Analysis, type Root } from './analysis'
 import { callRole, customTags, elementAt, stringArgumentAt } from './complete'
@@ -123,7 +123,8 @@ function hoverScript(ctx: QueryContext, analysis: Analysis, root: Root, offset: 
     if (role === 'require' && argument.index === 0) content = moduleHover(ctx, analysis.path, value)
     else if (role === 'resource' && argument.index <= 1) {
       const key = literal(argument.call, 0)
-      if (key !== null) content = resourceHover(ctx, key, literal(argument.call, 1))
+      const bundle = argument.call.type === 'CallExpression' && argument.call.callee.type === 'MemberExpression' ? resourceBundle(memberName(argument.call.callee) ?? '', argument.call.arguments) : undefined
+      if (key !== null && bundle !== undefined) content = resourceHover(ctx, key, bundle)
     } else if (role === 'template' && argument.index === 0) content = templateHover(ctx, value)
     else if (role === 'route' && argument.index === 0) content = routeHover(ctx, value)
     else if (role === 'route-declaration' && argument.index === 0 && argument.call.type === 'CallExpression') content = declarationHover(ctx, analysis, argument.call, value)

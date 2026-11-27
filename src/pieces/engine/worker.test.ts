@@ -75,7 +75,7 @@ async function mount(host: MockHost, roots: Record<string, CheckoutFiles>, extra
         api = orca
         const settings = createSettings(orca.settings)
         const workspaces = createWorkspaces(orca.host, createStore(orca.storage, 'core'))
-        const ctx: PieceContext = { orca, b2c: {} as B2c, settings, store: createStore(orca.storage, 'engine'), workspaces, t: translator(() => 'en'), log: (message) => orca.log(message) }
+        const ctx: PieceContext = { orca, b2c: { mask: async (text: string) => text } as unknown as B2c, settings, store: createStore(orca.storage, 'engine'), workspaces, t: translator(() => 'en'), log: (message) => orca.log(message) }
         disposable = await piece.activate(ctx)
       },
       deactivate: () => disposable?.dispose()
@@ -265,6 +265,21 @@ test('a folder that is gone says so, is looked for on each request and every FOL
   assert.equal(timers.filter((timer) => timer.ms === FOLDER_RETRY_MS).length, 2 + FOLDER_RETRIES)
   there = true
   assert.equal((await ready()).state, 'ready', 'a request still finds it')
+  await dispose()
+})
+
+test('a folder gone before its first build is never built over, not even when the problems are asked again', async () => {
+  let there = false
+  const { worker, status, ready, watched, dispose } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { exists: async () => there })
+  const gone = await status()
+  assert.deepEqual([gone.state, gone.error, gone.watching, gone.index], ['failed', 'folder_missing', false, null])
+  await worker.request('engine.problems.refresh', {} as never)
+  await settle()
+  const still = await status()
+  assert.deepEqual([still.state, still.error, still.index], ['failed', 'folder_missing', null], 'no build ran')
+  assert.equal(watched.length, 0)
+  there = true
+  assert.equal((await ready()).index?.cartridges.length, 4)
   await dispose()
 })
 

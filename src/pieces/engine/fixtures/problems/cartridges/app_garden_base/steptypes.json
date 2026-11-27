@@ -1,0 +1,35 @@
+{
+    "step-types": {
+        "script-module-step": [
+            {
+                "@type-id": "custom.Garden.Export",
+                "module": "app_garden_base/cartridge/scripts/helpers/priceHelper.js",
+                "function": "execute"
+            },
+            {
+                "@type-id": "custom.Garden.Missing",
+                "module": "app_garden_base/cartridge/scripts/jobs/nowhere.js"
+            },
+            {
+                "@type-id": "custom.Garden.External",
+                "module": "int_garden_payments/cartridge/scripts/jobs/pay.js"
+            },
+            {
+                "module": "app_garden_base/cartridge/scripts/helpers/priceHelper.js"
+            },
+            {
+                "@type-id": "custom.Garden.Export",
+                "module": "app_garden_base/cartridge/scripts/helpers/priceHelper"
+            }
+        ],
+        "chunk-script-module-step": [
+            {
+                "@type-id": "custom.Garden.Chunk",
+                "module": "~/cartridge/scripts/util/collections.js",
+                "read-function": "read",
+                "process-function": "process",
+                "write-function": "write"
+            }
+        ]
+    }
+}

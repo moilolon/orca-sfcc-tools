@@ -40,7 +40,7 @@ export type TemplateUse = {
 export type ResourceUse = {
   method: 'msg' | 'msgf'
   key: string
-  /** The bundle, when written as a literal; `null` for the default bundle (`locale`). */
+  /** The bundle the call reads (`resourceBundle`); `null` for the default bundle (`message`). */
   bundle: string | null
   /** The range of the key, quotes excluded. */
   start: number
@@ -80,6 +80,15 @@ export type ControllerFacts = {
   extends: ControllerBase | null
   /** `module.exports = server.exports()`. */
   exported: boolean
+  /**
+   * Where the controller reads `module.superModule` without `server.extend`: `top` when once at
+   * least outside every function (the base loads with the controller and, through the one
+   * server SFRA's `require('server')` gives a request, declares its routes first), `nested`
+   * when only inside functions (when it loads is not known), null when it does not.
+   */
+  readsSuperModule: 'top' | 'nested' | null
+  /** Whether it requires another controller (`…/controllers/…`), whose routes join the same server. */
+  requiresController: boolean
 }
 
 /** A member of a module a file reads: the module as written (or `SUPER_MODULE`), the member, the range of its name. */
@@ -180,6 +189,22 @@ function memberOf(node: Node): { object: Node; name: string } | null {
   return { object: node.object, name: node.property.name }
 }
 
+/**
+ * The bundle a `Resource.msg` or `Resource.msgf` call reads, as `dw.web.Resource` documents it:
+ * `msg(key)` and `msg(key, defaultMessage)` read the default bundle (`message`, null here);
+ * `msg(key, bundle, defaultMessage)` and `msgf(key, bundle, defaultMessage, …)` the bundle named,
+ * the default one when it is `null`. Undefined when the bundle is known only at run time.
+ */
+export function resourceBundle(method: string, args: readonly Node[]): string | null | undefined {
+  if (method === 'msg' && args.length <= 2) return null
+  const bundle = args[1]
+  if (!bundle) return null
+  if (bundle.type === 'Literal' && bundle.kind === 'null') return null
+  if (bundle.type === 'Identifier' && bundle.name === 'undefined') return null
+  const literal = stringLiteral(bundle)
+  return literal ? (literal.value as string) : undefined
+}
+
 /** Collects template and resource uses from the calls of a tree. */
 function collectCalls(root: Node, templates: TemplateUse[], resources: ResourceUse[], visit?: (node: Node) => void): void {
   walk(root, (node) => {
@@ -195,8 +220,9 @@ function collectCalls(root: Node, templates: TemplateUse[], resources: ResourceU
     const first = stringLiteral(node.arguments[0])
     if (isIdentifier(member.object, 'Resource') && (member.name === 'msg' || member.name === 'msgf')) {
       if (!first) return
-      const bundle = stringLiteral(node.arguments[1])
-      resources.push({ method: member.name, key: first.value as string, bundle: bundle ? (bundle.value as string) : null, ...innerRange(first) })
+      const bundle = resourceBundle(member.name, node.arguments)
+      // A bundle known only at run time cannot be resolved: the use is not kept.
+      if (bundle !== undefined) resources.push({ method: member.name, key: first.value as string, bundle, ...innerRange(first) })
       return
     }
     if (!first) return
@@ -410,7 +436,13 @@ function controllerFacts(text: string, facts: ScriptFacts, calls: AST.CallExpres
     // The callee's object is a name bound to `require('server')`.
     return facts.declarations.some((declaration) => declaration.name === object && servers.has(declaration.id))
   })
-  return { operations, extends: base, exported }
+  let readsSuperModule: ControllerFacts['readsSuperModule'] = null
+  if (!base && facts.exports.superModule.uses.length > 0) {
+    const inside = (at: number) => [...functions.values()].some((fn) => fn.start <= at && at < fn.end)
+    readsSuperModule = facts.exports.superModule.uses.some((use) => !inside(use.start)) ? 'top' : 'nested'
+  }
+  const requiresController = facts.requires.some((call) => call.module !== null && /(^|\/)controllers\//.test(call.module))
+  return { operations, extends: base, exported, readsSuperModule, requiresController }
 }
 
 const TEMPLATE_TAGS: ReadonlySet<string> = new Set(['isinclude', 'isdecorate', 'ismodule'])

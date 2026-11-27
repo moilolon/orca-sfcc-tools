@@ -125,7 +125,7 @@ Changing it needs the owner's yes.
       The command line has the same limit, and says so per environment (`mayHaveMissed`).
     - **The command line** (`bin/errors.ts`, a shim over `src/pieces/errors/cli.ts`, the report in
       `report.ts`): `node bin/errors.ts --config-file <dw.json> --role <role>… [--json]
-      [--since <time>] [--lang en|es]`, for the bot `sfcc` (its prompt is `docs/bot-prompt.md`).
+      [--since <time>] [--lang en|es]`, for the bot `sfcc-tools` (its prompt is `docs/bot-prompt.md`).
       It builds the plugin's own runner with the file given as its `configFile` setting and the
       default suffixes, so `dw-config.ts` stays the only reader and values reach `b2c` only in
       the child's environment; the path is never printed. It reads `seen.json` and never writes
@@ -159,10 +159,10 @@ Changing it needs the owner's yes.
       breakpoint here* on a frame. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
-    - `src/pieces/engine/` (phase 6, still `delivered: false`): the syntax layer and the
-      checkout index (below), pure modules with no Node and no Orca imports (a test checks it)
-      that the editor will load in its frame too, exported with their types by `index.ts`, the
-      contract of 6.3 and 6.4.
+    - `src/pieces/engine/` (phase 6, delivered with its **Problems** view since 6.5): the syntax
+      layer, the checkout index, the queries and the problems (below), pure modules with no Node
+      and no Orca imports (a test checks it) that the editor will load in its frame too,
+      exported with their types by `index.ts`, the contract of 6.3 to 6.5.
       `js/lexer.ts` and `js/parser.ts` read SFCC scripts (ES5 plus what Rhino accepts, `for
       each` and conditional `catch` included) into an ESTree-shaped tree (`js/ast.ts`) with
       `start` and `end` offsets on every node; they never throw, report problems by code
@@ -225,10 +225,17 @@ Changing it needs the owner's yes.
       a cartridge's name to the `main` of its `package.json`; `dw/…` a class or a package of the
       `dw.*` index; `module.superModule` the next cartridge after the file's own on each path.
       Templates and bundles go locale (`fr_FR`, `fr`, `default`) first, then cartridge; a bundle
-      `x_fr` or `x_fr_FR` is a locale of `x`, `x_tile` is a bundle of its own. A route chain
+      `x_fr` or `x_fr_FR` is a locale of `x` only when `fr` is an ISO 639-1 language
+      (`checkout/locales.ts`): `x_tile` and `x_ui` are bundles of their own. `Resource.msg` reads
+      the bundle `dw.web.Resource` documents (`resourceBundle` of `scan.ts`): `message`
+      (`DEFAULT_BUNDLE`) for `msg(key)`, `msg(key, defaultMessage)` and a `null` bundle, else the
+      literal of `msg(key, bundle, default)` and `msgf(key, bundle, …)`. A route chain
       applies the deepest base first (`extend(module.superModule)` or a required controller): a
       `get`/`post`/`use` declares, `prepend` runs before and `append` after in the order applied,
-      `replace` drops the chain. A controller with no `require('server')` (written before SFRA)
+      `replace` drops the chain. A controller that reads `module.superModule` at its top without
+      `server.extend` gets that base applied too (SFRA's `require('server')` is one server per
+      request, on which the base declares its routes first), with no `base_missing`. A
+      controller with no `require('server')` (written before SFRA)
       declares a route by exporting it (`exports.Show = guard.ensure([…], show)`, a function, a
       name of one, `module.exports = { Show: … }`): method `export`, its `handler` the function. A
       call is a route only when it wraps a function (`guard.ensure([…], show)`), never a value
@@ -246,7 +253,11 @@ Changing it needs the owner's yes.
       timeout and an output cap; stderr is never kept, a failure is a code (`GitFailure`). It
       writes nothing. The worker (`worker.ts`) indexes the uploading workspace, else the
       focused one, when local; `engine.index.status` answers at once and starts a build on its
-      own when the target changed. A watcher's changes are debounced: taken in once no change
+      own when the target changed. A folder that is gone (a removed worktree) is said so
+      (`failed`, `folder_missing`), never built over, and looked for on every status request
+      and every `FOLDER_RETRY_MS` (at most `FOLDER_RETRIES` times); once back it is watched and
+      rebuilt. The watcher stops on its own once its folder is gone (`disk.ts`: on Windows, Node
+      reports a removed folder thousands of times a second and never fails). A watcher's changes are debounced: taken in once no change
       came for `DEBOUNCE_MS`, at the latest `MAX_WAIT_MS` after the first. A change of
       `.git/HEAD`, `packed-refs` or `refs/`, and a timer every `REF_CHECK_MS` (a worktree's refs
       are outside the folder watched), ask whether the ref moved (`refreshRef`: one `rev-parse`,
@@ -317,6 +328,43 @@ Changing it needs the owner's yes.
       (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to `DESCRIBE_WAIT_MS` for
       a description read through `dw/describe.ts`. `query/performance.test.ts` times each on a
       5,000-line script and template.
+    - `src/pieces/engine/problems/` (phase 6.5): the warnings, pure like the rest (a test
+      checks it), each a code with its severity (`PROBLEM_SEVERITY`: `error` what the platform
+      refuses, `warning` a name that exists nowhere, `info` one some storefronts lack), a range,
+      its line and column, and the names its message needs (`args`), worded by `i18n.ts`
+      (`problemMessage`). Each rule is written beside its code: `code.ts` (unknown custom
+      attribute and site preference, template, resource key and bundle), `routes.ts` (the
+      checkout index's route problems, on the route's name in the controller where they happen),
+      `forms.ts` (over the strict `xml.ts`; its elements, children and attributes are those of
+      the official `form.xsd`, `b2c docs schema form`, names and structure only, plus `checked`
+      on a `field`, which SFRA's forms carry) and `steptypes.ts` (over `json.ts`, which keeps
+      positions). **No false warnings:** a type is only one the types of 6.4 know, never a
+      guess; metadata counts for a type only when a site import defines some of its attributes
+      (a `meta/` beside a `sites/` folder) or the `metadataRef` ref does, never a cartridge's own
+      metadata or loose files; a name is looked for only along the storefronts whose path holds
+      the file's cartridge (`lookup.ts`, `presence`), a storefront whose path names a cartridge
+      the checkout lacks counts neither way, a file of a cartridge on no path gets no warning,
+      and a route chain that extends past such a cartridge is not read on that storefront, nor
+      one whose base is read inside a function or that requires another controller; an
+      attribute or preference the code tests for existence (`in`, `hasOwnProperty`, `typeof`, a
+      comparison with `undefined` or `null`) is not warned after that test, in the same function
+      (the whole file for a test outside every function); a truthiness test (`if`, `!`, `?:`,
+      `&&`) and a fallback (`|| ''`) are no existence test.
+      `analyse.ts` splits a file in two steps: `readUses` (what the text names, parsed once per
+      change) and `checkUses` (against `Lookup`, read once per state of the index, its
+      `generation`). `checkout.ts` (`CheckoutProblems`) keeps them per file: a pass reads every
+      file whose time changed after a build, only the paths named after an update, and checks
+      every file again, pausing every `SLICE_MS`. `list.ts` pages them for the view. The worker
+      runs one pass at a time after each build, update and change of settings (a ref that did
+      not move runs none), posts `engine.problems.changed` when the results changed, and answers
+      `engine.problems` (a text, now), `engine.problems.list`, `.file`, `.open` (through
+      `src/core/open-file.ts`) and `.refresh`, every name masked. The `editor.save.before` hook
+      only schedules an analysis of the text saved and returns at once, never changing or
+      refusing a save; a save, or a watcher's batch, that brings a file new problems
+      (`newProblems`: by code and names, not place) is told in one notification of how many,
+      never what or where, a file at most once per `NOTICE_INTERVAL_MS`, nothing before the first
+      pass. The fixtures are `fixtures/problems/`, laid over `fixtures/checkout/`
+      (`problems/testing.ts`).
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

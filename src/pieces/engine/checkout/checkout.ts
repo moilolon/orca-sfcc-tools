@@ -9,6 +9,7 @@
 // only the files named (a folder named is walked again). Everything derived from the files (the
 // cartridges, the paths, the bundles, the routes) is recomputed in memory after each change.
 import { basename, dirname, eachLimited, extname, isUnder, joinPath, normalizePath, skippedPath, walkFiles, type CheckoutFiles } from './files'
+import { bundleBase, isBundleOf } from './locales'
 import { isMetadataPath, parseMetadata, SITE_PREFERENCES, type AttributeDefinition, type ObjectTypeDefinition, type ObjectTypeKind } from './metadata'
 import { parseProperties, type PropertyKey } from './properties'
 import { DEFINING_METHODS, scanScript, scanTemplate, type ControllerFacts, type RouteOperation, type ScriptFileFacts, type TemplateFileFacts } from './scan'
@@ -151,6 +152,17 @@ export type RouteProblemCode =
 
 export type RouteProblem = { code: RouteProblemCode; path: string; start: number; end: number }
 
+/** A problem of a route chain on one storefront: see `routeProblems()`. */
+export type RouteProblemEntry = {
+  storefront: string
+  controller: string
+  route: string
+  line: number
+  /** The range of the route's name in the call, quotes excluded; null for a problem of the whole file. */
+  name: { start: number; end: number } | null
+  problem: RouteProblem
+}
+
 export type RouteChain = {
   storefront: string
   /** The controller copy that runs on the storefront; null when none does. */
@@ -266,6 +278,9 @@ type CartridgeEntry = Cartridge & {
 }
 
 const MODULE_EXTENSIONS = ['.js', '.ds', '.json']
+
+/** The bundle `Resource.msg` reads when none is named (`msg(key)`, `msg(key, default)`, a null bundle). */
+export const DEFAULT_BUNDLE = 'message'
 const MAX_CHAIN_DEPTH = 64
 
 /** The locale fallbacks of a template or bundle: `fr_FR`, then `fr`, then `default`. */
@@ -296,10 +311,6 @@ type GitCache = { ref: string; commit: string; archives: SiteArchive[]; metadata
 /** A cartridge folder as the files show it now: where it is, its name and kind. */
 type RootInfo = { name: string; root: string; kind: CartridgeKind }
 
-/** A bundle file's name is `name`, or `name` and a locale: `_xx` or `_xx_XX`. `name_tile` is another bundle. */
-function isBundleOf(file: string, name: string): boolean {
-  return file === name || (file.startsWith(name + '_') && /^[a-z]{2}(_[A-Z]{2})?$/.test(file.slice(name.length + 1)))
-}
 
 /** The cartridge folders of a set of paths: a folder with `.project` and a `cartridge/` folder, or `modules` with `.project`. */
 function findRoots(paths: Iterable<string>): Map<string, RootInfo> {
@@ -408,6 +419,7 @@ export class CheckoutIndex {
   /** Lists the queries read often, computed once per published state. */
   private lists: { templates?: TemplateEntry[]; scripts?: ScriptEntry[]; bundles?: string[] } = {}
   private countsCache: IndexCounts | null = null
+  private publishedGeneration = 0
   private builtAt: number | null = null
   private buildMs: number | null = null
   private updatedAt: number | null = null
@@ -657,6 +669,12 @@ export class CheckoutIndex {
     this.routeTables = new Map()
     this.lists = {}
     this.countsCache = null
+    this.publishedGeneration++
+  }
+
+  /** How many states have been published: it changes with every build, update and change of settings that ends. */
+  get generation(): number {
+    return this.publishedGeneration
   }
 
   private deriveCartridges(next: Published): void {
@@ -1015,7 +1033,7 @@ export class CheckoutIndex {
   bundleNames(): readonly string[] {
     if (this.lists.bundles) return this.lists.bundles
     const names = new Set<string>()
-    for (const ofCartridge of this.bundles.values()) for (const file of ofCartridge.keys()) names.add(file.replace(/_[a-z]{2}(_[A-Z]{2})?$/, ''))
+    for (const ofCartridge of this.bundles.values()) for (const file of ofCartridge.keys()) names.add(bundleBase(file))
     return (this.lists.bundles = [...names].sort())
   }
 
@@ -1024,9 +1042,9 @@ export class CheckoutIndex {
     return this.keyIndex
   }
 
-  /** `Resource.msg(key, bundle)` along each storefront's path; a null bundle is the default one, `locale`. */
+  /** `Resource.msg(key, bundle, default)` along each storefront's path; a null bundle is the default one, `message`. */
   resolveResource(key: string, bundle: string | null, locale = 'default'): ResourceResolution {
-    const name = bundle ?? 'locale'
+    const name = bundle ?? DEFAULT_BUNDLE
     const fallbacks = localeFallbacks(locale).map((folder) => (folder === 'default' ? name : `${name}_${folder}`))
     const copies: ResourceCopy[] = this.storefrontList.map((storefront) => {
       for (const file of fallbacks) {
@@ -1083,11 +1101,14 @@ export class CheckoutIndex {
     seen.add(path)
     const problems: RouteProblem[] = []
     let base: string | null = null
-    if (facts.extends?.kind === 'superModule') {
+    // A controller that reads `module.superModule` at its top without `server.extend` loads its base
+    // first, and the base declares its routes on the one server of the request: as if extended,
+    // but a base that is not there is no problem (`module.superModule` is then null).
+    if (facts.extends?.kind === 'superModule' || facts.readsSuperModule === 'top') {
       const at = storefront.cartridges.indexOf(cartridge.name)
       const rel = path.slice(cartridge.root.length + 1)
       base = at === -1 ? null : this.firstOnPath(storefront.cartridges, rel.replace(/\.(js|ds)$/i, ''), at + 1)
-      if (!base) problems.push({ code: 'base_missing', path, start: 0, end: 0 })
+      if (!base && facts.extends) problems.push({ code: 'base_missing', path, start: 0, end: 0 })
     } else if (facts.extends?.kind === 'require') {
       const resolved = this.resolveModule(path, facts.extends.module)
       base = resolved.kind === 'file' ? resolved.path : resolved.kind === 'path' ? (resolved.copies.find((copy) => copy.storefront === storefront.id)?.path ?? null) : null
@@ -1162,6 +1183,31 @@ export class CheckoutIndex {
       return { storefront: storefront.id, controller, steps: [], applied: [], problems: [] }
     })
     return { controller: parts.controller, name: parts.name, storefronts }
+  }
+
+  /**
+   * Every problem of the route chains that run, per storefront: the controller whose chain it was
+   * found in (the copy that runs there), the route, and the problem with its line (1 for a problem
+   * of the whole file). A problem found in several routes of one storefront is listed once.
+   */
+  routeProblems(): RouteProblemEntry[] {
+    const out: RouteProblemEntry[] = []
+    for (const storefront of this.storefrontList) {
+      const seen = new Set<string>()
+      for (const routes of this.routeTable(storefront).values()) {
+        for (const [route, chain] of routes) {
+          for (const problem of chain.problems) {
+            const key = `${problem.code} ${problem.path} ${problem.start} ${problem.end}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            const operation = this.controllerRecord(problem.path)?.operations.find((each) => each.start === problem.start && each.end === problem.end)
+            const name = operation ? { start: operation.nameStart, end: operation.nameEnd } : null
+            out.push({ storefront: storefront.id, controller: chain.controller ?? problem.path, route, line: operation?.line ?? 1, name, problem: { ...problem } })
+          }
+        }
+      }
+    }
+    return out
   }
 
   /** Every `Controller-Name` served on a storefront, sorted. */
