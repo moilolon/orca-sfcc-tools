@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<iscontent type="text/html" charset="UTF-8" compact="true"/>
+<ismodule template="components/price" name="price" attribute="value" attribute="currency"/>
+<isdecorate template="common/layout/page">
+<isscript>
+    var URLUtils = require('dw/web/URLUtils');
+    var assets = require('*/cartridge/scripts/assets');
+    assets.addJs('/js/productDetail.js');
+</isscript>
+<iscomment>An invented product page: <isif> and ${here} are not parsed.</iscomment>
+<!-- ISML still runs in a comment: ${pdict.product.id} -->
+<isset name="showPrice" value="${pdict.product.price !== null}" scope="page"/>
+<div class="product-detail ${pdict.product.online ? 'online' : 'offline'}" data-pid="${pdict.product.id}">
+    <h1 class="name">${pdict.product.productName}</h1>
+    <isif condition="${showPrice}">
+        <isprice value="${pdict.product.price}" currency="${'EUR'}"/>
+    <iselseif condition="${pdict.product.custom.comingSoon}">
+        <span>${Resource.msg('label.soon', 'product', null)}</span>
+    <iselse>
+        <span>${Resource.msgf('label.none', 'product', null, {a: {b: '}'}})}</span>
+    </isif>
+    <ul class="variations" <isif condition="${pdict.product.variants}">data-variants="true"</isif>>
+        <isloop items="${pdict.product.variants}" var="variant" status="loopState">
+            <li class="${loopState.first ? 'first' : ''}"><a href="${URLUtils.url('Product-Show', 'pid', variant.id)}">${variant.name}</a></li>
+        </isloop>
+    </ul>
+    <img src="${URLUtils.staticURL('/images/logo.png')}" alt="logo">
+    <br/>
+    <isinclude template="product/components/details" />
+    <script>
+        window.productId = '${pdict.product.id}';
+        if (window.a < window.b) { window.c = "<div>"; }
+    </script>
+    <isprint value="${pdict.product.longDescription}" encoding="off"></isprint>
+</div>
+</isdecorate>
