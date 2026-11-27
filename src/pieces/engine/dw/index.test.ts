@@ -48,10 +48,14 @@ test('members resolve inheritance: own first, a redeclared one hides the farther
     'Plant.KIND',
     'Plant.STAGE_SEED',
     'Plant.STAGE_WILTED',
+    'Plant.DEPTH',
+    'Plant.ID',
     'Plant.count',
     'Plant.leaves',
     'Plant.name',
     'Plant.oldName',
+    'Plant.getCount()',
+    'Plant.getID()',
     'Plant.getOldName()',
     'Plant.tag(String[])',
     'Plant.water(Number, Boolean)',
@@ -113,6 +117,62 @@ test('a member’s signature, a constant’s value and deprecation', () => {
   // One variant of grow is deprecated, the other is not: the name as a whole is not.
   assert.equal(index.isDeprecated(tree, 'grow'), false)
   assert.equal(index.isDeprecated(tree, 'nothing'), false)
+})
+
+test('static and constant: what the index marks, and every constant', () => {
+  const index = loadDwIndex(GARDEN)
+  const tree = find(index, 'dw.garden.Tree')
+  const flags = (name: string) => {
+    const [member] = index.member(tree, name)
+    return { static: member.static, constant: member.constant }
+  }
+  // A constant of the constant summary: read off the class and off an instance alike.
+  assert.deepEqual(flags('STAGE_SEED'), { static: true, constant: true })
+  // One the documentation lists as a property: marked static, a constant's name, no getter.
+  assert.deepEqual(flags('DEPTH'), { static: true, constant: true })
+  // A static property (its getter is static) is the class's only.
+  assert.deepEqual(flags('count'), { static: true, constant: false })
+  assert.deepEqual(flags('getCount'), { static: true, constant: false })
+  // An instance's: an upper-case name with an instance getter, and a plain property.
+  assert.deepEqual(flags('ID'), { static: false, constant: false })
+  assert.deepEqual(flags('name'), { static: false, constant: false })
+  // A static upper-case property that has a getter is not a constant (`Log.NDC`).
+  const data = JSON.parse(JSON.stringify(GARDEN)) as DwIndexData
+  const plantData = data.classes['dw.garden.Plant']
+  plantData.properties = plantData.properties?.map((property) => (property.name === 'ID' ? { ...property, static: true } : property))
+  plantData.methods = plantData.methods?.map((method) => (method.name === 'getID' ? { ...method, static: true } : method))
+  const marked = loadDwIndex(data)
+  const [id] = marked.member(find(marked, 'dw.garden.Plant'), 'ID')
+  assert.deepEqual([id.static, id.constant], [true, false])
+  // The word is written for a static property, never for a constant.
+  assert.equal(signature(index.member(tree, 'count')[0]), 'static count: Number (read-only)')
+  assert.equal(signature(index.member(tree, 'DEPTH')[0]), 'static DEPTH: Number')
+  assert.equal(signature(index.member(tree, 'STAGE_SEED')[0]), 'STAGE_SEED: Number = 0')
+})
+
+test('the committed index marks static properties and the constants it lists as properties', () => {
+  const index = loadDwIndex(COMMITTED)
+  const flags = (cls: string, name: string) => {
+    const member = index.member(find(index, cls), name).find((each) => each.kind === 'property' || each.kind === 'constant')
+    assert.ok(member, `${cls}.${name}`)
+    return [member.static, member.constant]
+  }
+  assert.deepEqual(flags('dw.system.Site', 'current'), [true, false])
+  assert.deepEqual(flags('dw.system.Log', 'NDC'), [true, false])
+  assert.deepEqual(flags('dw.system.Status', 'ERROR'), [true, true])
+  assert.deepEqual(flags('dw.util.List', 'EMPTY_LIST'), [true, true])
+  assert.deepEqual(flags('dw.catalog.Product', 'ID'), [false, false])
+  assert.deepEqual(flags('dw.system.Site', 'ID'), [false, false])
+  assert.deepEqual(flags('dw.order.Order', 'ORDER_STATUS_NEW'), [true, true])
+  // Every property the index marks static has a static getter, or is a constant listed as one.
+  for (const cls of index.classes()) {
+    for (const member of cls.own) {
+      if (member.kind !== 'property' || !member.static || member.constant) continue
+      const capital = member.name.charAt(0).toUpperCase() + member.name.slice(1)
+      const getter = cls.own.find((each) => each.kind === 'method' && each.static && (each.name === `get${capital}` || each.name === `is${capital}`))
+      assert.ok(getter, `${cls.id}.${member.name} has a static getter`)
+    }
+  }
 })
 
 test('links go to the class page, at the member’s section', () => {
