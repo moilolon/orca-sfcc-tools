@@ -202,6 +202,76 @@ test('replaceAll changes only the differing range and keeps the caret in the tex
   assert.ok(!model.replaceAll('a\nB\nB2\nc\nd'), 'the same text changes nothing')
 })
 
+test('an outside write during an IME composition is held, then merged with what was composed', () => {
+  const { model } = modelOf('hello\nworld\n')
+  const sent: string[] = []
+  model.onUpdate((event) => {
+    if (event.textChanged && !event.provisional) sent.push(model.text())
+  })
+  model.setSelection({ line: 0, col: 5 })
+  model.startComposition()
+  model.updateComposition('に')
+  model.updateComposition('にほ')
+  // An agent writes the file: the composition goes on, untouched.
+  assert.equal(model.replaceAll('hello\nWORLD\n'), false)
+  assert.equal(model.text(), 'helloにほ\nworld\n')
+  assert.ok(model.composition, 'still composing')
+  model.updateComposition('にほん')
+  // A second write before it ends: the latest is the one merged.
+  model.replaceAll('hello\nWORLD!\n')
+  model.endComposition('日本')
+  assert.equal(model.text(), 'hello日本\nWORLD!\n', 'both the composed text and the outside write')
+  assert.equal(sent.at(-1), 'hello日本\nWORLD!\n', 'the merged text goes to Orca')
+  // A write that changes the line being composed keeps the composed text there.
+  model.setSelection({ line: 1, col: 6 })
+  model.startComposition()
+  model.updateComposition('´')
+  model.replaceAll('hello日本\nWORLD!?\n')
+  model.endComposition('á')
+  assert.equal(model.text(), 'hello日本\nWORLD!á\n')
+  // A cancelled composition still takes the write in.
+  model.startComposition()
+  model.updateComposition('x')
+  model.replaceAll('changed\n')
+  model.endComposition('')
+  assert.equal(model.text(), 'changed\n')
+})
+
+test('a byte order mark is held apart: never deleted, never typed before, always written back', () => {
+  const { model } = modelOf('﻿<isif>\r\n</isif>\r\n')
+  assert.equal(model.bom, true)
+  assert.equal(model.buffer.line(0), '<isif>', 'not in the editable text')
+  // Select all and paste.
+  model.selectAll()
+  model.paste('<div/>')
+  assert.equal(model.text(), '﻿<div/>')
+  // Home twice, then type: after the mark, never before it.
+  const { model: home } = modelOf('﻿  foo\r\n')
+  home.setSelection({ line: 0, col: 4 })
+  home.move('lineEdge', -1, false)
+  home.move('lineEdge', -1, false)
+  home.type('x')
+  assert.equal(home.text(), '﻿x  foo\r\n')
+  // Backspace at the start deletes nothing.
+  const { model: back } = modelOf('﻿foo')
+  back.setSelection({ line: 0, col: 0 })
+  back.deleteBy(-1, false)
+  back.deleteBy(-1, true)
+  assert.equal(back.text(), '﻿foo')
+  // Undo of everything gives the file back exactly, and offsets count the mark.
+  while (home.undo()) {
+    // all of it
+  }
+  assert.equal(home.text(), '﻿  foo\r\n')
+  assert.equal(home.textOffset({ line: 0, col: 2 }), 3)
+  // An outside write may add or drop the mark: the file's own say.
+  assert.ok(back.replaceAll('foo'))
+  assert.equal(back.bom, false)
+  assert.equal(back.text(), 'foo')
+  assert.ok(back.replaceAll('﻿foo'))
+  assert.equal(back.text(), '﻿foo')
+})
+
 test('the history is bounded', () => {
   const history = new History(() => 0)
   const change = { from: { line: 0, col: 0 }, removed: '', inserted: 'x', end: { line: 0, col: 1 } }

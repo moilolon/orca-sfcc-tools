@@ -1,13 +1,15 @@
 // Which file an editor shows (spike S3). The frame knows the text and its workspace, never the
-// path. Three sources, in order:
+// path. Here, two sources, in order:
 //   (a) a file the plugin itself opened in its editor (src/core/open-file.ts records it, with the
-//       line to show), when that file holds this text now;
-//   (b) the last save of this text in the workspace (`editor.save.before` gives the path);
-//   (c) the workspace's `.isml`, `.js`, `.xml` and `.properties` files whose text hashes the same:
+//       line to show) in the last `OPEN_WINDOW_MS`, when that file holds this text now: given to
+//       the first editor that asks and then forgotten, so a copy opened later is never taken for it;
+//   (b) the workspace's `.isml`, `.js`, `.xml` and `.properties` files whose text hashes the same:
 //       an index of every one, built in the background and refreshed by file time.
-// Several files with one text and none of the first two: the candidates, unless the person chose
-// one for this workspace and text before. Hashes are SHA-256 of the text as Orca decodes it (a
-// BOM kept as U+FEFF, every line break as written), as UTF-8, in hex.
+// Several files with one text: the candidates, unless the person chose one for this workspace and
+// text before. A save names a file only for the editor that saved it: the frame knows it was the
+// one flushed before the save (locate-client.ts), so a save never names any other editor with
+// the same text. Hashes are SHA-256 of the text as Orca decodes it (a BOM kept as U+FEFF, every
+// line break as written), as UTF-8, in hex.
 import { createHash } from 'node:crypto'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { posix, win32 } from 'node:path'
@@ -28,6 +30,8 @@ export const MAX_FILE_BYTES = 4 * 1024 * 1024
 export const MAX_CANDIDATES = 20
 /** Saves remembered per workspace, and choices kept per workspace. */
 export const MAX_SAVES = 50
+/** How long after the plugin opened a file the first editor holding its text is taken for it. */
+export const OPEN_WINDOW_MS = 60_000
 export const MAX_CHOICES = 200
 /** An index younger than this answers a miss without being refreshed first. */
 export const FRESH_MS = 2_000
@@ -189,9 +193,6 @@ export class FileIndex {
   }
 }
 
-/** A save the hook saw: where, and the hash of the text saved. */
-type Save = { path: string; hash: string }
-
 export type LocatorDeps = {
   fs?: IndexFs
   platform?: string
@@ -211,7 +212,8 @@ export class Locator {
   private readonly opens: EditorOpens
   private readonly store: Store | null
   private readonly indexes = new Map<string, FileIndex>()
-  private readonly saves = new Map<string, Save[]>()
+  /** The files saved per workspace, newest last: only for the command that opens the last one. */
+  private readonly saves = new Map<string, string[]>()
 
   constructor(deps: LocatorDeps = {}) {
     this.fs = deps.fs ?? nodeFs
@@ -252,40 +254,42 @@ export class Locator {
     return rel === '' ? null : rel
   }
 
-  /** A save of `text` at `path` (relative to `root`). */
-  recordSave(root: string, path: string, text: string): void {
+  /**
+   * A save at `path` (relative to `root`): the relative path, or null outside the workspace. It
+   * names no editor here (the editor that saved knows it was itself); it is kept for the command
+   * and makes the index read the file again.
+   */
+  recordSave(root: string, path: string): string | null {
     const rel = this.relative(root, path)
-    if (rel === null) return
+    if (rel === null) return null
     const key = this.key(root)
-    const list = (this.saves.get(key) ?? []).filter((save) => save.path !== rel)
-    list.push({ path: rel, hash: hashText(text) })
+    const list = (this.saves.get(key) ?? []).filter((saved) => saved !== rel)
+    list.push(rel)
     if (list.length > MAX_SAVES) list.shift()
     this.saves.set(key, list)
-    // The index reads the file again when it next looks.
     void this.index(root).refreshFile(rel).catch(() => {})
+    return rel
   }
 
   /** The newest file saved in a workspace, relative; null when none was. */
   lastSaved(root: string, accept: (path: string) => boolean = () => true): string | null {
     const list = this.saves.get(this.key(root)) ?? []
-    for (let i = list.length - 1; i >= 0; i--) if (accept(list[i].path)) return list[i].path
+    for (let i = list.length - 1; i >= 0; i--) if (accept(list[i])) return list[i]
     return null
   }
 
   /** Which file of the workspace at `root` holds the text with this hash. */
   async locate(root: string, workspaceId: string, hash: string): Promise<EditorLocated> {
-    // (a) A file the plugin opened in its editor, newest first, when it holds this text now.
+    // (a) A file the plugin opened in its editor just now, newest first, when it holds this text.
     const index = this.index(root)
     for (const open of this.opens.under(this.api.resolve(root), this.platform)) {
+      if (this.now() - open.at > OPEN_WINDOW_MS) continue
       const rel = this.relative(root, open.file)
       if (rel === null) continue
       if ((await index.refreshFile(rel)) !== hash) continue
-      return this.withLine(rel, open)
+      return this.taken(rel, open)
     }
-    // (b) The last save of this text.
-    const saves = this.saves.get(this.key(root)) ?? []
-    for (let i = saves.length - 1; i >= 0; i--) if (saves[i].hash === hash) return { path: saves[i].path }
-    // (c) The workspace's files: refreshed by time on a miss, unless just refreshed.
+    // (b) The workspace's files: refreshed by time on a miss, unless just refreshed.
     if (!index.fresh && index.lookup(hash).length === 0) await index.refresh()
     const found = index.lookup(hash)
     if (found.length === 0) return null
@@ -295,13 +299,14 @@ export class Locator {
     return { candidates: found.slice(0, MAX_CANDIDATES), more: Math.max(0, found.length - MAX_CANDIDATES) }
   }
 
-  private withLine(path: string, open: EditorOpen): EditorLocated {
+  /** A recorded open, given to the editor that asked and forgotten: never handed to a second one. */
+  private taken(path: string, open: EditorOpen): EditorLocated {
     const answer: { path: string; line?: number; column?: number } = { path }
     if (open.line !== undefined) {
       answer.line = open.line
       if (open.column !== undefined) answer.column = open.column
-      this.opens.takeLine(open)
     }
+    this.opens.forget(open)
     return answer
   }
 

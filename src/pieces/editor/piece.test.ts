@@ -31,10 +31,10 @@ test('.isml opens in the editor by default; .js, .xml and .properties offer it; 
   const byExtension = new Map(editors.flatMap((editor) => editor.extensions.map((extension) => [extension, editor] as const)))
   assert.equal(byExtension.get('.isml')?.priority, 'default')
   for (const extension of ['.js', '.xml', '.properties']) assert.equal(byExtension.get(extension)?.priority, 'option', extension)
-  for (const editor of editors) {
-    assert.equal(editor.frame, 'isolated')
-    assert.equal(editor.entry, 'src/pieces/editor/main.ts')
-  }
+  for (const editor of editors) assert.equal(editor.frame, 'isolated')
+  // Each editor has its own entry: the `.isml` one knows its files are templates without guessing.
+  assert.equal(byExtension.get('.isml')?.entry, 'src/pieces/editor/main.ts')
+  for (const extension of ['.js', '.xml', '.properties']) assert.equal(byExtension.get(extension)?.entry, 'src/pieces/editor/main-view.ts', extension)
   assert.deepEqual([...byExtension.keys()].sort(), [...EDITOR_EXTENSIONS].sort(), 'open-file.ts opens there exactly the types the editor takes')
   assert.equal(manifest.id, PLUGIN_ID)
 })
@@ -55,7 +55,7 @@ test('the command, its shortcut and the save hook are declared; the hook observe
 /** Every module the editor's entry loads, followed through its imports. */
 function frameModules(): string[] {
   const seen = new Set<string>()
-  const queue = [join(HERE, 'main.ts')]
+  const queue = [join(HERE, 'main.ts'), join(HERE, 'main-view.ts')]
   while (queue.length > 0) {
     const file = queue.pop() as string
     if (seen.has(file)) continue

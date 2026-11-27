@@ -277,6 +277,7 @@ test('inEditor: a plugin open that fails falls back to orca file open; a file ty
     failing.calls.map((call) => call.args[0] + ' ' + call.args[1]),
     ['plugin list', 'plugin open', 'file open']
   )
+  assert.deepEqual(failing.opens.under(WINDOWS_ROOT, 'win32'), [], 'no line left behind for a later editor')
   const other = editorMachine(listed([{ pluginKey: 'local.sfcc-tools', status: 'running' }]))
   await other.open({ root: WINDOWS_ROOT, path: 'package.json', inEditor: true })
   assert.deepEqual(other.calls.map((call) => call.args[0] + ' ' + call.args[1]), ['file open'])
@@ -304,6 +305,7 @@ test('the recorded opens are bounded, newest first, per workspace', () => {
   assert.equal(mine[0].file, `C:\\work\\shop\\f${EditorOpens.MAX + 4}.isml`)
   const entry = { root: '/w', file: '/w/a.isml', line: 3, column: 2, at: 1 }
   opens.record(entry)
-  opens.takeLine(entry)
-  assert.deepEqual(opens.under('/w', 'linux')[0], { root: '/w', file: '/w/a.isml', at: 1 })
+  assert.equal(opens.under('/w', 'linux').length, 1)
+  opens.forget(entry)
+  assert.deepEqual(opens.under('/w', 'linux'), [])
 })

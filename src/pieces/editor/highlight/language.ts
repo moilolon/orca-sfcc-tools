@@ -31,16 +31,45 @@ export function languageOfPath(path: string): Language | null {
   }
 }
 
-/** A guess from the start of the text: ISML when it holds `<is…>` or `${`, XML for markup, `.properties` for `key=value` lines, else JavaScript. */
-export function guessLanguage(text: string): Language {
-  const head = text.slice(0, 20_000)
-  if (/<\/?is[a-z]/i.test(head) || (/\$\{/.test(head) && /<[A-Za-z]/.test(head))) return 'isml'
-  const first = /^﻿?\s*(\S)/.exec(head)?.[1]
-  if (first === '<') return /^﻿?\s*<\?xml/.test(head) || !/<(html|div|span|body|head)\b/i.test(head) ? 'xml' : 'isml'
-  const lines = head.split(/\r\n|\r|\n/).filter((line) => line.trim() !== '')
-  if (lines.length > 0) {
-    const looks = lines.filter((line) => /^\s*([#!].*|[\w.\-\\]+\s*[=:].*)$/.test(line) && !/[;{}()]\s*$/.test(line)).length
-    if (looks / lines.length >= 0.8) return 'properties'
+/** Lines that only a script has: a statement or a block ending a line, a declaration, a comment opener. */
+// A keyword must be followed by what follows it in code: `return.label=` is a key, not a return.
+const SCRIPT_LINE = /(;|\{|\(|,)\s*$|^\s*(\}|\/\/|\/\*|\*|(var|let|const)\s+[\w$[{]|function\s*[\w$(]|return[\s;(]|if\s*\(|module\.exports|require\()/
+// A bundle's comment: `#`, or `!` but not a minified script's `!function(…)` or `!(…)`.
+const BUNDLE_COMMENT = /^\s*(#|!(?!\s*(function\b|\()))/
+
+/** Whether most lines are `key=value` (or comments) and almost none read as script. */
+function looksLikeProperties(lines: readonly string[]): boolean {
+  let pairs = 0
+  let script = 0
+  let counted = 0
+  let continued = false
+  for (const line of lines) {
+    const wasContinued = continued
+    continued = /(^|[^\\])(\\\\)*\\$/.test(line)
+    if (wasContinued) continue
+    counted++
+    const comment = BUNDLE_COMMENT.test(line)
+    if (comment || /^\s*[^\s=:#!/*{}][^\s=:]*\s*[=:]/.test(line)) pairs++
+    if (!comment && SCRIPT_LINE.test(line)) script++
   }
-  return 'javascript'
+  return counted > 0 && pairs / counted >= 0.7 && script / counted < 0.1
+}
+
+/**
+ * A guess from the start of the text, among `among` (every language by default): ISML when it
+ * holds `<is…>` or `${` with markup, XML for other markup, `.properties` for `key=value` lines,
+ * else JavaScript.
+ */
+export function guessLanguage(text: string, among: readonly Language[] = ['isml', 'javascript', 'xml', 'properties']): Language {
+  const head = text.slice(0, 20_000)
+  const first = /^﻿?\s*(\S)/.exec(head)?.[1]
+  const markup = first === '<'
+  if (among.includes('isml') && (/<\/?is[a-z]+[\s/>]/i.test(head) || (markup && /\$\{/.test(head)))) return 'isml'
+  if (markup) {
+    if (among.includes('xml') && (/^﻿?\s*<\?xml/.test(head) || !among.includes('isml') || !/<(html|div|span|body|head|p|a|ul|li)\b/i.test(head))) return 'xml'
+    if (among.includes('isml')) return 'isml'
+  }
+  const lines = head.split(/\r\n|\r|\n/).filter((line) => line.trim() !== '')
+  if (among.includes('properties') && looksLikeProperties(lines)) return 'properties'
+  return among.includes('javascript') ? 'javascript' : among[0]
 }

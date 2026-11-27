@@ -9,7 +9,7 @@
 import { comparePos, type Pos } from './buffer'
 import { Highlighter } from '../highlight/highlighter'
 import { CLASSES, type LineLexer } from '../highlight/tokens'
-import { EditorModel, isEmpty, ordered, TAB_SIZE, type Geometry } from './model'
+import { EditorModel, isEmpty, ordered, TAB_SIZE, visualColumn, type Geometry } from './model'
 
 /** Lines drawn above and below the visible ones. */
 export const OVERSCAN = 30
@@ -279,7 +279,12 @@ export class SurfaceView implements Geometry {
     if (this.textDirty) {
       let widest = 0
       const lines = buffer.lines
-      for (let i = 0; i < lines.length; i++) if (lines[i].length > widest) widest = lines[i].length
+      // In columns as drawn: a tab counts as the columns it takes.
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        const width = line.indexOf('\t') === -1 ? line.length : visualColumn(line, line.length)
+        if (width > widest) widest = width
+      }
       this.inner.style.height = `${(count + 3) * height}px`
       this.inner.style.width = `${this.gutterWidth + (widest * 1.2 + 8) * this.charWidth}px`
       this.sizeGutter()

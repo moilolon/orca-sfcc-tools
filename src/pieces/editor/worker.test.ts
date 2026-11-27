@@ -13,7 +13,7 @@ import type { PieceContext } from '../../core/piece'
 import { createSettings } from '../../core/settings'
 import { createStore } from '../../core/store'
 import { createWorkspaces } from '../../core/workspaces'
-import { hashText, Locator, MAX_CANDIDATES } from './locate'
+import { hashText, Locator, MAX_CANDIDATES, OPEN_WINDOW_MS } from './locate'
 import type { EditorLocated } from './protocol'
 import { createEditorPiece, hashOf, OPEN_COMMAND, workspaceOfSave } from './worker'
 
@@ -137,38 +137,43 @@ test('(c) a file changed on disk is found by its new text: the index is refreshe
   }
 })
 
-test('(a) a file the plugin opened in its editor wins, with its line given once; never a file whose text differs', async () => {
+test('(a) a file the plugin just opened in its editor goes, with its line, to the first editor holding its text, and only to it', async () => {
   const root = workspace()
   try {
     const opens = new EditorOpens()
     const { worker, locate } = await mount(root, { opens })
+    const both = ['cartridges/app_one/cartridge/templates/default/product/tile.isml', 'cartridges/app_two/cartridge/templates/default/product/tile.isml']
     const two = join(root, 'cartridges', 'app_two', 'cartridge', 'templates', 'default', 'product', 'tile.isml')
-    opens.record({ root, file: two, line: 2, column: 5, at: 1 })
-    assert.deepEqual(await locate({ text: TILE }), { path: 'cartridges/app_two/cartridge/templates/default/product/tile.isml', line: 2, column: 5 })
-    // Shown again (the frame mounts again): the same file, no line.
-    assert.deepEqual(await locate({ text: TILE }), { path: 'cartridges/app_two/cartridge/templates/default/product/tile.isml' })
     // A frame with another text is not taken for it.
+    opens.record({ root, file: two, line: 2, column: 5, at: Date.now() })
     assert.deepEqual(await locate({ text: HOME }), { path: 'cartridges/app_one/cartridge/templates/default/home.isml' })
+    assert.deepEqual(await locate({ text: TILE }), { path: both[1], line: 2, column: 5 })
+    // A second editor with the same text (the identical copy, opened by Orca) is never taken for it.
+    assert.deepEqual(await locate({ text: TILE }), { candidates: both, more: 0 })
+    // An open older than the window counts for nobody.
+    opens.record({ root, file: two, at: Date.now() - OPEN_WINDOW_MS - 1 })
+    assert.deepEqual(await locate({ text: TILE }), { candidates: both, more: 0 })
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('(b) the last save names the file, as Orca’s tab names its workspace (<project>::<folder>); the hook never refuses', async () => {
+test('a save is posted with its path and the hash of its text, as Orca’s tab names its workspace (<project>::<folder>); it names no file in locate; the hook never refuses', async () => {
   const root = workspace()
   try {
     const { worker, locate } = await mount(root)
-    const path = 'cartridges/app_one/cartridge/templates/default/product/tile.isml'
-    const decision = await worker.hooks.fire('editor.save.before', { workspaceId: `repo-1::${root}`, path, languageId: 'plaintext', text: TILE })
+    const both = ['cartridges/app_one/cartridge/templates/default/product/tile.isml', 'cartridges/app_two/cartridge/templates/default/product/tile.isml']
+    const decision = await worker.hooks.fire('editor.save.before', { workspaceId: `repo-1::${root}`, path: both[0], languageId: 'plaintext', text: TILE })
     assert.equal(decision.kind, 'continue')
     for (let i = 0; i < 20 && worker.posts.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10))
-    assert.deepEqual(worker.posts, [{ event: 'editor.saved', payload: { workspaceId: 'identity:wt2:shop' } }])
-    assert.deepEqual(await locate({ text: TILE }), { path }, 'the save settles the ambiguity')
-    // A save of a text no file holds yet (it is being written) still names it.
-    await worker.hooks.fire('editor.save.before', { workspaceId: `repo-1::${root}`, path: 'cartridges/app_one/cartridge/templates/default/new.isml', text: '<div>new</div>' })
+    assert.deepEqual(worker.posts, [{ event: 'editor.saved', payload: { workspaceId: 'identity:wt2:shop', path: both[0], hash: hashText(TILE) } }])
+    // The base copy was saved (in Orca's own editor, say): the override's editor still gets the picker.
+    assert.deepEqual(await locate({ text: TILE }), { candidates: both, more: 0 })
+    // A save outside the workspace is not posted.
+    await worker.hooks.fire('editor.save.before', { workspaceId: null, path: join(tmpdir(), 'elsewhere.isml'), text: TILE })
     await new Promise((resolve) => setTimeout(resolve, 30))
-    assert.deepEqual(await locate({ text: '<div>new</div>' }), { path: 'cartridges/app_one/cartridge/templates/default/new.isml' })
+    assert.equal(worker.posts.length, 1)
     await worker.deactivate()
   } finally {
     rmSync(root, { recursive: true, force: true })

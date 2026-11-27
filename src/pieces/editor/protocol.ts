@@ -2,10 +2,11 @@
 // editors. src/protocol.ts imports this file.
 //
 // The editor frame gets the document's text and the focused workspace, never the file's path
-// (spike S3). `editor.locate` names the file: the path the plugin recorded when it opened the file
-// itself, else the last save whose text matches, else the files of the workspace whose text
-// matches. The text travels as given (`text`) or as its SHA-256 in hex (`hash`), computed on the
-// text exactly as the editor holds it (a BOM and every line break included, as UTF-8).
+// (spike S3). `editor.locate` names the file: the path the plugin recorded when it had just opened
+// the file itself, else the files of the workspace whose text matches. A save names the file only
+// for the editor that saved it (`editor.saved`, matched in the frame). The text travels as given
+// (`text`) or as its SHA-256 in hex (`hash`), computed on the text exactly as the editor holds it
+// (a BOM and every line break included, as UTF-8).
 
 /** The text the editor shows, as itself or as its hash; one of the two. */
 export type EditorText = { text?: string; hash?: string }
@@ -32,7 +33,11 @@ declare module 'orca' {
     'editor.choose': { input: EditorChooseInput; output: { ok: boolean } }
   }
   interface PluginPanelEvents {
-    /** A file was saved from an editor tab: an editor that could not name its file asks again. */
-    'editor.saved': { workspaceId: string | null }
+    /**
+     * A file was saved from an editor tab: its path (relative to the workspace) and the hash of
+     * the text saved. Only the editor that was flushed for this save takes the path as its own;
+     * the others ask again only when they could not name their file.
+     */
+    'editor.saved': { workspaceId: string | null; path: string; hash: string }
   }
 }

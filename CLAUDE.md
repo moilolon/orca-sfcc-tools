@@ -368,12 +368,15 @@ Changing it needs the owner's yes.
     - `src/pieces/editor/` (phase 7.1, the surface): the plugin's editor, `customEditors` of its
       manifest, `frame: "isolated"`: the default for `.isml`, an option of the view toggle for
       `.js`, `.xml` and `.properties` (Orca keeps `.js` for its own editor whatever the manifest
-      says). `main.ts` is the entry Orca loads in the frame: it imports only relative files (a test
-      walks them: the piece's frame modules, `core/i18n.ts` and the engine's `js/` and `isml/`,
-      never Node or worker code). `surface/` is the editing surface written here (spike S9):
-      `buffer.ts` (lines with the break written after each, so CRLF, LF, a lone CR and a BOM come
-      back as read), `history.ts` (its own undo: Orca keeps none for a plugin's editor),
-      `model.ts` (selection and every command, no DOM: what typing does is tested in Node),
+      says). Each editor has its entry, `main.ts` (`.isml`) and `main-view.ts` (the others), both
+      starting `app.ts`: the frame imports only relative files (a test walks them: the piece's
+      frame modules, `core/i18n.ts` and the engine's `js/` and `isml/`, never Node or worker code).
+      `surface/` is the editing surface written here (spike S9): `buffer.ts` (lines with the break
+      written after each, so CRLF, LF and mixed breaks come back as read), `history.ts` (its own
+      undo: Orca keeps none for a plugin's editor), `model.ts` (selection and every command, no
+      DOM: what typing does is tested in Node; a leading BOM is held apart from the editable text
+      and written back by `text()`, and `textOffset()` counts it; an outside write that comes
+      during an IME composition is held and merged with what the composition commits),
       `view.ts` (a hidden textarea at the caret takes keys, IME and the clipboard; only the lines
       in view and `OVERSCAN` around them are in the DOM; a gutter with numbers and a mark column
       for 7.3; for 7.2 a layer of underlines drawn from ranges, a pop-up layer, `caretBox()` and
@@ -382,19 +385,23 @@ Changing it needs the owner's yes.
       agrees again, never past what is drawn: JavaScript through the engine's own `Lexer`, ISML
       (tags, values, `${…}` also inside values and among attributes, comments, `<isscript>` and
       `<script>` through the JavaScript one), `.xml` and `.properties` with small lexers of their
-      own. The frame gets no file name, so the language is guessed from the text until the file is
-      named. `sync.ts` is the only code that talks to Orca about the document
+      own. The frame gets no file name: the `.isml` editor colours a template, the other guesses
+      among JavaScript, XML and `.properties` from the text, until the file is named. `sync.ts` is the only code that talks to Orca about the document
       (`orca.document.session`), with the three-way line merge of `merge.ts` (an overlap keeps the
       person's version and is said in a one-line notice). Typography and theme come from Orca
       (`editor.readTypography`, `editor.typography.changed`, `--orca-*`, `theme`); syntax colours
       are the editor's own, one set per scheme. **Which file it shows** (spike S3):
       `editor.locate { workspaceId, text | hash }` answers `{ path, line?, column? }`,
-      `{ candidates, more }` or null, from (a) a file the plugin opened in its editor that holds
-      this text now (with its line, given once), (b) the last `editor.save.before` of this text in
-      the workspace (the hook observes only and never refuses), (c) the SHA-256 of every `.isml`,
-      `.js`, `.xml` and `.properties` of the workspace (`locate.ts`, built in the background,
-      refreshed by file time on a miss). Identical files: a picker in a notice, the choice kept
-      per workspace and hash (`editor.choose`). Not named: a one-line notice, and
+      `{ candidates, more }` or null, from (a) a file the plugin opened in its editor within
+      `OPEN_WINDOW_MS` that holds this text now, with its line, given to the first editor that
+      asks and then forgotten, (b) the SHA-256 of every `.isml`, `.js`, `.xml` and `.properties`
+      of the workspace (`locate.ts`, built in the background, refreshed by file time on a miss).
+      A save names a file only for the editor that saved it: the worker posts every
+      `editor.save.before` (observed only, never refused) as `editor.saved { path, hash }`, and an
+      editor takes the path only when Orca flushed it (`editor.flush`) within `OWN_SAVE_MS` with
+      that text and the saves gathered for that flush name one file (`locate-client.ts`); an
+      identical copy in another cartridge is never named by another tab's save. Identical files:
+      a picker in a notice, the choice kept per workspace and hash (`editor.choose`). Not named: a one-line notice, and
       `identity.ts` says so to the features that read other files (7.2). The command
       `editor.openInEditor` ("SFCC: Open in SFCC editor", `Alt+Shift+E`; `Mod+Alt+E` is AltGr
       text on Windows, so Orca never matches it on a Spanish layout) opens the file last saved in

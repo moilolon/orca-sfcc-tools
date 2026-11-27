@@ -136,6 +136,16 @@ test('the language comes from the extension, else from the text', () => {
     ["'use strict';\nvar a = require('x');", 'javascript']
   ]
   for (const [text, language] of guesses) assert.equal(guessLanguage(text), language, text)
+  // The editor of `.js`, `.xml` and `.properties` guesses among those three only.
+  const others: Language[] = ['javascript', 'xml', 'properties']
+  const viewGuesses: [string, Language][] = [
+    ['var tpl = "${name}";\nmodule.exports = { tpl: tpl };', 'javascript'],
+    ['!function(e){e.x=1}(window);', 'javascript'],
+    ['return.label=Return\nfunction.title=Function\n! a comment\nprice={0} items', 'properties'],
+    ['<form xmlns="http://www.example.com/form">\n  <field formid="email" type="string"/>\n</form>', 'xml'],
+    ['exports.total = total;', 'javascript']
+  ]
+  for (const [text, language] of viewGuesses) assert.equal(guessLanguage(text, others), language, text)
 })
 
 test('the incremental highlighter gives every line what lexing from the start gives, after any edits', () => {

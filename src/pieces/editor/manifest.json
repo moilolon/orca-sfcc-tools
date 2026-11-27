@@ -14,7 +14,7 @@
         "title": "SFCC",
         "extensions": [".js", ".xml", ".properties"],
         "priority": "option",
-        "entry": "src/pieces/editor/main.ts",
+        "entry": "src/pieces/editor/main-view.ts",
         "frame": "isolated"
       }
     ],

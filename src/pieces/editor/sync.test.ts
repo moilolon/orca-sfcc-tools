@@ -124,6 +124,32 @@ test('CRLF files keep their line breaks through edits and merges', async () => {
   }
 })
 
+test('a byte order mark survives select all and paste, and an outside write, on every write to the file', async () => {
+  const bom = '﻿' + TEMPLATE
+  const host = mockEditorHost({ text: bom })
+  const sync = await startSync(host.orca, { debounceMs: 10_000 })
+  const model = new EditorModel(sync.initial)
+  sync.onReplace((text) => model.replaceAll(text))
+  model.onUpdate((event) => {
+    if (event.textChanged && !event.provisional) sync.change(model.text())
+  })
+  try {
+    model.selectAll()
+    model.paste('<div/>')
+    await host.flush()
+    assert.equal(host.text, '﻿<div/>')
+    host.replace('﻿<div/>\n<p/>')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    model.setSelection({ line: 0, col: 0 })
+    model.type('x')
+    await host.flush()
+    assert.equal(host.text, '﻿x<div/>\n<p/>')
+  } finally {
+    sync.dispose()
+    host.dispose()
+  }
+})
+
 test('a read-only document sends nothing', async () => {
   const host = mockEditorHost({ text: TEMPLATE }, { readOnly: true })
   const sync = await startSync(host.orca, { debounceMs: 5 })

@@ -89,8 +89,10 @@ export function createEditorPiece(deps: EditorDeps = {}): WorkerPiece {
         if (typeof event?.path !== 'string' || typeof event.text !== 'string') return
         const workspace = workspaceOfSave(await ctx.workspaces.list(), event.workspaceId, event.path, platform)
         if (!workspace) return
-        locator.recordSave(workspace.path, event.path, event.text)
-        if (!stopped) ctx.orca.panels.post('editor.saved', { workspaceId: workspace.id })
+        const path = locator.recordSave(workspace.path, event.path)
+        if (path === null || stopped) return
+        // Every editor hears it; only the one that was flushed for this save, with this text, takes the path.
+        ctx.orca.panels.post('editor.saved', { workspaceId: workspace.id, path, hash: hashText(event.text) })
       }
 
       const word = (key: keyof (typeof messages)['en'], vars?: Record<string, string>) => ctx.t(messages, key, vars)

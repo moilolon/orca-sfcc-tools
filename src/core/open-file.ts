@@ -126,10 +126,10 @@ export class EditorOpens {
     return this.entries.filter((e) => fold(e.root) === fold(root)).reverse()
   }
 
-  /** Forgets an entry's line once an editor showed it: a frame shown again stays where it is. */
-  takeLine(entry: EditorOpen): void {
-    delete entry.line
-    delete entry.column
+  /** Forgets an entry: an editor took it, or the open failed. */
+  forget(entry: EditorOpen): void {
+    const at = this.entries.indexOf(entry)
+    if (at >= 0) this.entries.splice(at, 1)
   }
 
   clear(): void {
@@ -367,11 +367,14 @@ export function createOpenFile(deps: OpenFileDeps = {}): OpenFile {
         const whole = (value: number | undefined): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0
         const line = whole(request.line) ? request.line : undefined
         const column = line !== undefined && whole(request.column) ? request.column : undefined
-        editorOpens.record({ root, file: opened, line, column, at: now() })
+        const entry: EditorOpen = { root, file: opened, line, column, at: now() }
+        editorOpens.record(entry)
         const { result } = await run(pluginOpenArguments(found, opened), false)
         if (result === 'ok') return { opened: true }
         // After a timeout the first call may still land: nothing is opened twice.
         if (result === 'timeout') return { opened: false, reason: 'orca_timeout' }
+        // No editor of the plugin opened: a later one must not take this line.
+        editorOpens.forget(entry)
         deps.log?.('orca plugin open failed; the file opens in Orca’s editor')
       }
     }

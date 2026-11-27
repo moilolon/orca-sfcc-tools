@@ -3,6 +3,7 @@
 // what typing does is tested here in Node. One selection (no multiple cursors).
 import { comparePos, diffRange, pos, samePos, TextBuffer, type Change, type Pos } from './buffer'
 import { History, type ChangeKind, type Selection } from './history'
+import { merge3 } from '../merge'
 
 export type { Selection }
 
@@ -73,10 +74,21 @@ export class EditorModel {
   /** An IME composition: where it started and the provisional text it has put in. */
   composition: { from: Pos; text: string } | null = null
   geometry: Geometry | null = null
+  /**
+   * Whether the file starts with a byte order mark. It is held apart from the editable text, so
+   * no key, selection or paste can delete it or put text before it, and `text()` puts it back.
+   */
+  bom: boolean
+  /**
+   * An outside write that came during a composition: held, then merged with what the composition
+   * committed when it ends. `base` is the text (without the provisional part) when it first came.
+   */
+  private heldOutside: { base: string; outside: string } | null = null
   private readonly listeners: ((event: ModelEvent) => void)[] = []
 
   constructor(text: string, options: { readOnly?: boolean; now?: () => number } = {}) {
-    this.buffer = new TextBuffer(text)
+    this.bom = text.charCodeAt(0) === 0xfeff
+    this.buffer = new TextBuffer(this.bom ? text.slice(1) : text)
     this.history = new History(options.now)
     this.readOnly = Boolean(options.readOnly)
     this.indentUnit = detectIndent(this.buffer.lines)
@@ -90,8 +102,23 @@ export class EditorModel {
     for (const listener of this.listeners) listener({ textChanged, provisional })
   }
 
+  /** The whole text as the file holds it: the byte order mark (when there is one) and every break as written. */
   text(): string {
-    return this.buffer.text()
+    return (this.bom ? '﻿' : '') + this.buffer.text()
+  }
+
+  /** The offset of a position in `text()` (a byte order mark counted): what the engine's queries take. */
+  textOffset(p: Pos): number {
+    return (this.bom ? 1 : 0) + this.buffer.offsetAt(p)
+  }
+
+  /** The text without the provisional part of a composition in progress, as `text()` writes it. */
+  private committedText(): string {
+    const composition = this.composition
+    const full = this.text()
+    if (!composition || !composition.text) return full
+    const at = this.textOffset(composition.from)
+    return full.slice(0, at) + full.slice(at + composition.text.length)
   }
 
   selectedText(): string {
@@ -376,6 +403,12 @@ export class EditorModel {
     if (text) this.replaceSelection(this.normalize(text), 'compose')
     else this.emit(true)
     this.history.seal()
+    // An outside write that came while composing: merged now with what was composed, never over it.
+    const held = this.heldOutside
+    if (held) {
+      this.heldOutside = null
+      this.replaceAll(merge3(held.base, held.outside, this.text()).text)
+    }
   }
 
   /** Drops a composition in progress and its provisional text. */
@@ -393,12 +426,24 @@ export class EditorModel {
 
   /**
    * The text changed outside (an agent wrote the file, or a merge): only the range that differs is
-   * replaced, as one undo step, and the caret keeps its place in the text around it.
+   * replaced, as one undo step, and the caret keeps its place in the text around it. During an IME
+   * composition the write is held (the input method still owns the provisional text) and merged
+   * with what the composition commits when it ends: false then, as nothing changed yet.
    */
-  replaceAll(text: string): boolean {
-    this.cancelComposition()
+  replaceAll(incoming: string): boolean {
+    if (this.composition) {
+      this.heldOutside = { base: this.heldOutside?.base ?? this.committedText(), outside: incoming }
+      return false
+    }
+    const bom = incoming.charCodeAt(0) === 0xfeff
+    const text = bom ? incoming.slice(1) : incoming
+    const bomChanged = bom !== this.bom
+    this.bom = bom
     const current = this.buffer.text()
-    if (current === text) return false
+    if (current === text) {
+      if (bomChanged) this.emit(true)
+      return bomChanged
+    }
     const range = diffRange(current, text)
     const from = this.buffer.posAt(range.start)
     const to = this.buffer.posAt(range.oldEnd)
