@@ -152,16 +152,26 @@ Changing it needs the owner's yes.
     - `src/pieces/debugger/`: `dap-client.ts` (the debug adapter protocol's framing and
       request matching), `session.ts` (one `b2c debug` session: its states, driven by the
       adapter's events, never by its responses), `breakpoints.ts` (the single store of
-      breakpoints, per workspace, paths relative to it; the editor phase reads and writes it
-      too), `workspace.ts` (which workspace is debugged and how a file is opened, each in one
-      function), `files.ts` (the scripts of the workspace's cartridges, and the cartridges),
+      breakpoints, per workspace, paths relative to it, lines of the file as saved; the editor
+      reads and writes it too), `workspace.ts` (which workspace is debugged and how a file is
+      opened, each in one function), `files.ts` (the scripts of the workspace's cartridges, and
+      the cartridges; `isScriptPath` decides from a path whether a breakpoint can go in it),
+      `inspect.ts` (what the editor may evaluate: a plain name, `this` or a chain of property
+      reads with literal indexes, read by the engine's parser and rebuilt from its tree; any
+      call, `new`, assignment, update, operator or expression index is refused before anything
+      reaches the adapter),
       `source.ts` (one script's lines for the view's source table: read only for a script
       `files.ts` found and only inside the workspace's folder, cut, masked, never stored; the
       view shows a window of `WINDOW_LINES` of them at a time), and `fake-adapter.ts`, the
       scripted adapter its tests use. The open script and folders are kept with the id of the
       workspace they belong to and let go when another is debugged.
       `debugger.breakpoint` sets or removes one line; the Errors view calls it too, for *Add
-      breakpoint here* on a frame. Every
+      breakpoint here* on a frame. The editor names its own workspace (`workspaceId`) on it and on
+      `debugger.setBreakpoints`, and then only a script of its cartridges is taken
+      (`not_script`); it asks `debugger.file { workspaceId, path }` (whether the file takes
+      breakpoints, its lines with the session's verdict, the topmost frame of the halt in it)
+      again on every `debugger.state` post, and `debugger.hover` evaluates an `inspect.ts` read
+      in a frame of the halt in that file, masked and cut to `HOVER_MAX_TEXT`. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
     - `src/pieces/engine/` (phase 6, delivered with its **Problems** view since 6.5): the syntax
@@ -412,6 +422,20 @@ Changing it needs the owner's yes.
       text on Windows, so Orca never matches it on a Spanish layout) opens the file last saved in
       the focused workspace in the editor: no host call gives the focused tab's path. The errors'
       and the debugger's jumps open their file with `inEditor`. The piece has no panel view.
+      **Breakpoints** (phase 7.3, `debug/`, started by `attachDebug` in `app.ts`): for a named
+      file only, `controller.ts` draws the store's lines in the mark column, by shape and in a
+      tooltip (a disc verified, a ring not verified, a ring with a dot with no session, a dashed
+      ring until saved), and a click or `F9` (Orca binds no F9; handled in the frame, no
+      keybinding) sets or removes one through `debugger.breakpoint`, only where the worker says
+      the file is a script of a cartridge. Marks follow edits (`line-map.ts`: lines inserted or
+      removed above move them, Enter at a line's start takes it down, a joined line up); the
+      store keeps lines of the file as saved, so a click on a written line waits (`marks.ts`),
+      and on the editor's own save (`editor.flush`, then an `own` `editor.saved`) every mark is
+      written where it is seen. The halted line (the topmost frame of the halt in this file, or
+      a caller's) is highlighted with its frame's name and scrolled into view once per halt; a
+      halt elsewhere opens nothing. While halted here, a pointer resting on a name asks its
+      value: `expression.ts` takes the chain of reads that ends at it, and the worker checks it
+      again (`inspect.ts`).
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

@@ -61,6 +61,33 @@ export type DebuggerScripts = { cartridges: ScriptCartridge[]; truncated: boolea
  */
 export type DebuggerSource = { path: string; lines: string[]; truncated: boolean }
 
+/** One file of a workspace, as the plugin's editor names it (phase 7.3). */
+export type DebuggerFileInput = { workspaceId: string; path: string }
+
+/**
+ * Where a thread is halted in one file: the topmost frame of the halted thread shown that is in
+ * this file, its line in the file as saved, its function's name (masked), and whether it is the
+ * frame the thread stopped in (`top`) or one that called it.
+ */
+export type StoppedLine = { line: number; name: string; frameId: number; top: boolean }
+
+/**
+ * What the editor shows of the debugger for one file: whether a breakpoint can go in it (a script
+ * of a cartridge of its workspace, as files.ts decides), whether a session runs on its workspace,
+ * its breakpoints from the store (lines of the file as saved; `verified` null while no session
+ * has sent them), and where a thread is halted in it.
+ */
+export type DebuggerFileState = {
+  scriptable: boolean
+  /** `none` when no session runs on this file's workspace. */
+  session: 'none' | 'connecting' | 'attached' | 'halted'
+  lines: { line: number; verified: boolean | null }[]
+  stopped: StoppedLine | null
+}
+
+/** A plain read evaluated for the editor's hover: the expression sent, its value, and whether it has members. */
+export type DebuggerHoverValue = { expression: string; value: string; expandable: boolean }
+
 declare module 'orca' {
   interface PluginRequests {
     /** The state as it is now. */
@@ -70,12 +97,14 @@ declare module 'orca' {
     /** Disconnects and ends the session; answers once it ended. */
     'debugger.stop': { input: Record<string, never>; output: DebuggerState }
     /** Every line of one file (relative to the workspace); an empty list removes the file. */
-    'debugger.setBreakpoints': { input: { path: string; lines: number[] }; output: DebuggerState }
+    'debugger.setBreakpoints': { input: { path: string; lines: number[]; workspaceId?: string }; output: DebuggerState }
     /**
      * Sets (`on`) or removes one line of one file, keeping the file's other lines: what pressing a
-     * line of a script, a frame of the call stack or a frame of an error does.
+     * line of a script, a frame of the call stack or a frame of an error does. This and
+     * `setBreakpoints` act on the debugged workspace, or on `workspaceId` when the editor names its
+     * own: then only a script of its cartridges is taken (`not_script` otherwise).
      */
-    'debugger.breakpoint': { input: { path: string; line: number; on: boolean }; output: DebuggerState }
+    'debugger.breakpoint': { input: { path: string; line: number; on: boolean; workspaceId?: string }; output: DebuggerState }
     /** Removes every breakpoint of the workspace. */
     'debugger.clearBreakpoints': { input: Record<string, never>; output: DebuggerState }
     /** Every script of the workspace's cartridges, by cartridge, for the view's list of scripts. */
@@ -91,6 +120,18 @@ declare module 'orca' {
     'debugger.evaluate': { input: { expression: string; frameId?: number }; output: { result: string; reference: number } }
     /** Continue, step over, in or out; the thread shown when `threadId` is left out. */
     'debugger.step': { input: { kind: StepKind; threadId?: number }; output: DebuggerState }
+    /**
+     * The editor's view of one file: whether it takes breakpoints, its breakpoints and its halted
+     * line. The editor asks again on every `debugger.state` post. A workspace that is not local is
+     * answered as not scriptable, with no lines.
+     */
+    'debugger.file': { input: DebuggerFileInput; output: DebuggerFileState }
+    /**
+     * The value of a plain read (inspect.ts) in a frame of the halted thread that is in this file;
+     * null for any other expression, or when that frame is no longer one of the halt. Masked, cut,
+     * never stored.
+     */
+    'debugger.hover': { input: DebuggerFileInput & { expression: string; frameId: number }; output: DebuggerHoverValue | null }
     /** Opens a frame's file, or a file of the workspace, in Orca's editor. */
     'debugger.open': { input: { frameId?: number; path?: string; line?: number }; output: { opened: boolean } }
   }

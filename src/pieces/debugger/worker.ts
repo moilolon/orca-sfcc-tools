@@ -6,10 +6,11 @@
 import type { RoleState } from '../../core/instances'
 import type { Disposable, PieceContext, Workspace, WorkerPiece } from '../../core/piece'
 import { createBreakpoints, BreakpointsError, normalizePath, type BreakpointFile } from './breakpoints'
-import { byCartridge, scriptFiles, type ReadDir } from './files'
+import { byCartridge, isScriptPath, scriptFiles, type ReadDir } from './files'
+import { plainRead } from './inspect'
 import { readSource, SourceError, type SourceFileSystem } from './source'
 import { messages } from './i18n'
-import type { DebuggerState, DebugWorkspaceState, StepKind } from './protocol'
+import type { DebuggerFileState, DebuggerHoverValue, DebuggerState, DebugWorkspaceState, StepKind } from './protocol'
 import { createSession, SessionError, type SessionSnapshot } from './session'
 import { DapError } from './dap-client'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
@@ -21,6 +22,10 @@ const UNCLEAN_KEY = 'unclean'
 const COALESCE_MS = 200
 /** How long the list of a workspace's scripts is reused before it is read again. */
 const FILES_TTL_MS = 30_000
+/** Workspaces whose lists of scripts are kept at once (the debugged one and the editors' ones). */
+const FILES_KEPT = 4
+/** What the editor's hover is sent of a value at most, once masked. */
+export const HOVER_MAX_TEXT = 1_000
 
 /** An error the panel words by its code (the piece's `reason.*` texts, else core's). */
 export class DebuggerError extends Error {
@@ -67,7 +72,8 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   let lastPosted: DebuggerState | null = null
   /** The workspace the running session debugs; the breakpoints shown are its own while it runs. */
   let sessionWorkspace: Workspace | null = null
-  let filesCache: { root: string; at: number; files: Promise<{ files: string[]; truncated: boolean; cartridges: string[] }> } | null = null
+  /** The scripts of each workspace's cartridges, by folder, the newest last. */
+  const filesCache = new Map<string, { at: number; files: Promise<{ files: string[]; truncated: boolean; cartridges: string[] }> }>()
 
   const session = createSession({
     b2c: ctx.b2c,
@@ -140,6 +146,78 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     return workspace
   }
 
+  /** The local workspace Orca lists under this id (the editor's own), or null. */
+  async function workspaceById(workspaceId: unknown): Promise<Workspace | null> {
+    if (typeof workspaceId !== 'string' || !workspaceId) return null
+    const workspace = (await ctx.workspaces.list().catch((): Workspace[] => [])).find((each) => each.id === workspaceId) ?? null
+    return workspace && isLocal(workspace) ? workspace : null
+  }
+
+  /**
+   * Where a breakpoint request acts: the workspace the editor named, and then only on a script of
+   * its cartridges; else the debugged one.
+   */
+  async function breakpointTarget(input: { workspaceId?: unknown } | undefined, path: string | null): Promise<Workspace> {
+    if (input?.workspaceId === undefined) return localWorkspace()
+    const workspace = await workspaceById(input.workspaceId)
+    if (!workspace) throw new DebuggerError('no_workspace')
+    if (path && !(await scriptable(workspace, path))) throw new DebuggerError('not_script')
+    return workspace
+  }
+
+  /** Whether a session runs, or is starting, on this workspace. */
+  function sessionOn(workspace: Workspace): boolean {
+    const status = session.snapshot().status
+    return (status === 'connecting' || status === 'attached' || status === 'halted') && sessionWorkspace?.id === workspace.id
+  }
+
+  async function scriptable(workspace: Workspace, path: string): Promise<boolean> {
+    return isScriptPath(path, (await scriptsOf(workspace)).cartridges)
+  }
+
+  /** The editor's view of one file of a workspace (`debugger.file`). */
+  async function fileState(input: { workspaceId?: unknown; path?: unknown } | undefined): Promise<DebuggerFileState> {
+    const workspace = await workspaceById(input?.workspaceId)
+    const path = normalizePath(input?.path)
+    if (!workspace || !path) return { scriptable: false, session: 'none', lines: [], stopped: null }
+    const snapshot = session.snapshot()
+    const running = sessionOn(workspace)
+    const lines = (await breakpoints.list(workspace.id)).find((file) => file.path === path)?.lines ?? []
+    const verified = running ? snapshot.verified[path] : undefined
+    let stopped: DebuggerFileState['stopped'] = null
+    if (running && snapshot.status === 'halted') {
+      // The topmost frame of the halt that is in this file: where it stopped, or a caller.
+      const at = snapshot.frames.findIndex((frame) => session.frameLocation(frame.id)?.path === path)
+      const frame = snapshot.frames[at]
+      if (frame && frame.line > 0) stopped = { line: frame.line, name: frame.name, frameId: frame.id, top: at === 0 }
+    }
+    return {
+      scriptable: await scriptable(workspace, path),
+      session: running ? (snapshot.status as DebuggerFileState['session']) : 'none',
+      lines: lines.map((line) => ({ line, verified: verified?.find((each) => each.line === line)?.verified ?? null })),
+      stopped
+    }
+  }
+
+  /**
+   * A plain read (inspect.ts) in a frame of the halt that is in this file; null for anything else.
+   * Only the expression inspect.ts rebuilt is sent, so nothing with a side effect reaches the adapter.
+   */
+  async function hover(input: { workspaceId?: unknown; path?: unknown; expression?: unknown; frameId?: unknown } | undefined): Promise<DebuggerHoverValue | null> {
+    const expression = plainRead(input?.expression)
+    if (expression === null) return null
+    const workspace = await workspaceById(input?.workspaceId)
+    const path = normalizePath(input?.path)
+    const frameId = input?.frameId
+    if (!workspace || !path || typeof frameId !== 'number' || !sessionOn(workspace)) return null
+    const snapshot = session.snapshot()
+    if (snapshot.status !== 'halted' || !snapshot.frames.some((frame) => frame.id === frameId) || session.frameLocation(frameId)?.path !== path) return null
+    // Masked and cut by the session; cut again to what a pop-up shows.
+    const answer = await session.evaluate(expression, frameId)
+    const value = answer.result.length > HOVER_MAX_TEXT ? `${answer.result.slice(0, HOVER_MAX_TEXT)}…` : answer.result
+    return { expression, value, expandable: answer.reference > 0 }
+  }
+
   /**
    * Starts a session unless one runs, without waiting for it to attach: `debugger.state` events
    * follow. Refuses when the sandbox is not ready or there is no local workspace.
@@ -172,10 +250,13 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
 
   /** The scripts of a workspace's cartridges, read again once they are older than FILES_TTL_MS. */
   function scriptsOf(workspace: Workspace): Promise<{ files: string[]; truncated: boolean; cartridges: string[] }> {
-    if (!filesCache || filesCache.root !== workspace.path || Date.now() - filesCache.at > FILES_TTL_MS) {
-      filesCache = { root: workspace.path, at: Date.now(), files: scriptFiles(workspace.path, options.readDir) }
-    }
-    return filesCache.files
+    const kept = filesCache.get(workspace.path)
+    if (kept && Date.now() - kept.at <= FILES_TTL_MS) return kept.files
+    const fresh = { at: Date.now(), files: scriptFiles(workspace.path, options.readDir) }
+    filesCache.delete(workspace.path)
+    filesCache.set(workspace.path, fresh)
+    while (filesCache.size > FILES_KEPT) filesCache.delete(filesCache.keys().next().value as string)
+    return fresh.files
   }
 
   const word = (key: keyof (typeof messages)['en']) => ctx.t(messages, key)
@@ -197,7 +278,7 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     ),
     ctx.orca.panels.handle('debugger.setBreakpoints', (input) =>
       guarded(async () => {
-        const workspace = await localWorkspace()
+        const workspace = await breakpointTarget(input, normalizePath(input?.path))
         const lines = Array.isArray(input?.lines) ? input.lines : []
         const files = await breakpoints.set(workspace.id, String(input?.path ?? ''), lines)
         const path = String(input?.path ?? '').replace(/\\/g, '/')
@@ -207,10 +288,10 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     ),
     ctx.orca.panels.handle('debugger.breakpoint', (input) =>
       guarded(async () => {
-        const workspace = await localWorkspace()
         const path = normalizePath(input?.path)
         const line = input?.line
         if (!path) throw new DebuggerError('invalid_path')
+        const workspace = await breakpointTarget(input, path)
         if (typeof line !== 'number' || !Number.isInteger(line) || line < 1) throw new DebuggerError('invalid_input')
         const existing = (await breakpoints.list(workspace.id)).find((file) => file.path === path)?.lines ?? []
         const lines = input?.on === true ? [...existing, line] : existing.filter((each) => each !== line)
@@ -252,6 +333,8 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
         return { path, lines: masked, truncated }
       })
     ),
+    ctx.orca.panels.handle('debugger.file', (input) => guarded(() => fileState(input))),
+    ctx.orca.panels.handle('debugger.hover', (input) => guarded(() => hover(input))),
     ctx.orca.panels.handle('debugger.threads', () => guarded(() => session.threads())),
     ctx.orca.panels.handle('debugger.stack', (input) =>
       guarded(async () => {

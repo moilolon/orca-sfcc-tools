@@ -15,7 +15,7 @@ import type { ReadDir } from './files'
 import type { SourceFileSystem } from './source'
 import type { DebuggerState } from './protocol'
 import { createActivate, deactivate } from '../../worker/worker'
-import { activateDebugger } from './worker'
+import { activateDebugger, HOVER_MAX_TEXT } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const COMMANDS = ['debugger.start', 'debugger.stop', 'debugger.continue', 'debugger.stepOver', 'debugger.stepIn', 'debugger.stepOut']
@@ -385,4 +385,84 @@ test('a session that did not end cleanly is cleaned up on the next start, from t
   assert.equal(adapter.processes.length, 2)
   assert.deepEqual(adapter.processes[0].commands, ['initialize', 'launch', 'disconnect'])
   assert.equal(worker.host.data().storage['debugger.unclean'], true, 'set again while the new session runs')
+})
+
+// ---- What the plugin's editor asks (phase 7.3) ----
+
+const TEMPLATE = 'cartridges/app_example/cartridge/templates/default/page.isml'
+
+test('the editor’s view of a file: a script of a cartridge takes breakpoints, any other file and any other workspace none', async () => {
+  const { worker } = await mount()
+  const none = { scriptable: false, session: 'none', lines: [], stopped: null }
+  assert.deepEqual(await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE }), { ...none, scriptable: true })
+  // A script saved after the walk counts too: the path decides.
+  assert.equal((await worker.request('debugger.file', { workspaceId: 'w1', path: 'cartridges/app_example/cartridge/scripts/helpers/newHelper.js' })).scriptable, true)
+  for (const path of [TEMPLATE, 'dw.json', 'package.json', 'cartridges/app_example/node_modules/lib/index.js', '../outside.js', `${FAKE_ROOT}/${PAGE}`]) {
+    assert.deepEqual(await worker.request('debugger.file', { workspaceId: 'w1', path }), none, path)
+  }
+  assert.deepEqual(await worker.request('debugger.file', { workspaceId: 'elsewhere', path: PAGE }), none)
+  assert.deepEqual(await worker.request('debugger.file', {} as never), none)
+})
+
+test('the editor sets and removes breakpoints of its own workspace in the one store, only in a script', async () => {
+  const { worker } = await mount()
+  const state = await worker.request('debugger.breakpoint', { workspaceId: 'w1', path: PAGE, line: 11, on: true })
+  assert.deepEqual(state.breakpoints, [{ path: PAGE, lines: [{ line: 11, verified: null }] }], 'the debugger’s view shows it too')
+  assert.deepEqual((await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })).lines, [{ line: 11, verified: null }])
+  // Moved lines written on the editor's save replace the file's lines.
+  await worker.request('debugger.setBreakpoints', { workspaceId: 'w1', path: PAGE, lines: [13, 2] })
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [2, 13] } })
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { workspaceId: 'w1', path: TEMPLATE, line: 3, on: true })), 'not_script')
+  assert.equal(await codeOf(worker.request('debugger.setBreakpoints', { workspaceId: 'w1', path: 'dw.json', lines: [1] })), 'not_script')
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { workspaceId: 'elsewhere', path: PAGE, line: 3, on: true })), 'no_workspace')
+  // Without a workspace named (the debugger's view, an error's frame) it is the debugged one, as before.
+  await worker.request('debugger.breakpoint', { path: PAGE, line: 20, on: true })
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [2, 13, 20] } })
+})
+
+test('while a session runs: the editor sees which lines it verified, the halted line with its frame, and values of plain reads only', async () => {
+  const { worker, adapter, states } = await mount()
+  adapter.config.unverified = { [`${FAKE_ROOT}/${PAGE}`]: [30] }
+  await worker.request('debugger.setBreakpoints', { workspaceId: 'w1', path: PAGE, lines: [11, 30] })
+  await worker.request('debugger.start', {})
+  await until(() => states().some((state) => state.status === 'attached'), 'attached')
+  let file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.equal(file.session, 'attached')
+  assert.deepEqual(file.lines, [
+    { line: 11, verified: true },
+    { line: 30, verified: false }
+  ])
+  assert.equal(file.stopped, null)
+
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => (states().at(-1)?.frames.length ?? 0) > 0, 'the halted stack')
+  file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.equal(file.session, 'halted')
+  assert.deepEqual(file.stopped, { line: 11, name: 'show()', frameId: 70000, top: true })
+  // A halt in another file opens nothing there and shows nothing in this one's neighbours.
+  assert.equal((await worker.request('debugger.file', { workspaceId: 'w1', path: 'cartridges/app_example/cartridge/controllers/Home.js' })).stopped, null)
+
+  const evaluated = () => adapter.last.requests.filter((request) => request.command === 'evaluate').map((request) => (request.arguments as { expression: string; frameId: number }))
+  const hover = (expression: string, frameId = 70000, path = PAGE) => worker.request('debugger.hover', { workspaceId: 'w1', path, expression, frameId })
+  assert.deepEqual(await hover(' basket . totalGrossPrice '), { expression: 'basket.totalGrossPrice', value: 'value of basket.totalGrossPrice at ***', expandable: false })
+  assert.deepEqual(evaluated(), [{ expression: 'basket.totalGrossPrice', context: 'repl', frameId: 70000 }], 'only the rebuilt read reaches the adapter, masked on the way back')
+  for (const expression of ['basket.getTotalGrossPrice()', 'a = 1', 'i++', 'new Date()', 'a[i]', 'delete a.b']) assert.equal(await hover(expression), null, expression)
+  assert.equal(await hover('basket', 99), null, 'a frame that is not one of the halt')
+  assert.equal(await hover('basket', 70000, 'cartridges/app_example/cartridge/controllers/Home.js'), null, 'a frame of another file')
+  assert.equal(evaluated().length, 1, 'nothing refused reached the adapter')
+
+  // A long value is cut for the pop-up, after masking.
+  adapter.handlers.evaluate = () => ({ body: { result: `${FAKE_HOST} ${'x'.repeat(5_000)}`, variablesReference: 4 } })
+  const long = await hover('basket')
+  assert.ok(long && long.value.startsWith('*** x') && long.value.length <= HOVER_MAX_TEXT + 1 && long.expandable)
+
+  // The thread continues: the halted line goes, and a hover evaluates nothing.
+  await worker.request('debugger.step', { kind: 'continue' })
+  file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.equal(file.stopped, null)
+  assert.equal(await hover('basket'), null)
+  await worker.request('debugger.stop', {})
+  file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.deepEqual([file.session, file.lines.map((each) => each.verified)], ['none', [null, null]])
+  assert.ok(!JSON.stringify(worker.posts).includes(FAKE_HOST), 'no host anywhere')
 })
