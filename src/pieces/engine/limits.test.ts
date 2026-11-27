@@ -4,6 +4,7 @@
 // parsers count, and by the clock.
 import { assert, test } from 'orca/testing'
 import { parseScript, parseTemplate, scriptFacts, templateScript, walk } from './index'
+import { timed, settledTime, settledTimes } from './fixtures/timing'
 import { countWork, workCounted } from './work'
 
 test('a 20,000-link else-if chain: facts walk it without recursion, and see every name', () => {
@@ -42,72 +43,14 @@ test('a 100,000-link chain past the bound reports too_deep once', () => {
 // Linear time, proved twice. Without a clock: the parsers count the characters their scans read
 // and the steps of the facts (./work.ts), so a shape's count at four times the size is about four
 // times its count, and a text's count is a small multiple of its length, the same on any machine
-// however busy. With a clock: the processor time of this thread, which a busy machine does not
-// add to (the wall clock counts the time other processes run, and V8's helper threads collecting
-// garbage: under a second test suite a 512 KB parse took ten times a 128 KB one by the wall
-// clock, its own work four). The thread's time is read in ticks of about 16 ms on Windows, so it
-// is read around a block of runs of at least `BLOCK_MS`, and a run's time is the block's
-// average. The best of several blocks at each size is compared; while a timed check fails, more
-// blocks are taken, up to `MOST_BLOCKS`: other work only ever slows a block, so a best time still
-// too slow after them is the code's.
+// however busy. With a clock: the processor time of this thread (./fixtures/timing.ts), on one run
+// first, then on blocks of runs only while a check does not pass.
 
-/** The work counted while `run` runs once. */
-function workOf(run: () => void): number {
+/** The work counted while `run` runs once, and the thread's time it took. */
+function measured(run: () => void): { work: number; ms: number } {
   const before = workCounted()
-  run()
-  return workCounted() - before
-}
-
-/**
- * This thread's processor time, in milliseconds; the wall clock where the runtime cannot say
- * (`process.threadCpuUsage` came with Node 23.9).
- */
-const threadTime: () => number = (() => {
-  const usage = (process as { threadCpuUsage?: () => { user: number; system: number } }).threadCpuUsage
-  if (typeof usage !== 'function') return () => performance.now()
-  return () => {
-    const used = usage.call(process)
-    return (used.user + used.system) / 1000
-  }
-})()
-
-/** The shortest block of runs, in milliseconds of the thread's time: some ten ticks. */
-const BLOCK_MS = 150
-/** The most blocks one timed check takes at each size. */
-const MOST_BLOCKS = 5
-
-/** The time one run of `run` takes, averaged over a block of at least `BLOCK_MS`. */
-function blockTime(run: () => void): number {
-  const started = threadTime()
-  let runs = 0
-  let used = 0
-  do {
-    run()
-    runs++
-    used = threadTime() - started
-  } while (used < BLOCK_MS)
-  return used / runs
-}
-
-/**
- * The best block time of `run`, once `holds` accepts it or after `MOST_BLOCKS` blocks. The caller
- * has run it once already, to count its work, which warms it up.
- */
-function bestTime(run: () => void, holds: (best: number) => boolean): number {
-  let best = Infinity
-  for (let i = 0; i < MOST_BLOCKS && !holds(best); i++) best = Math.min(best, blockTime(run))
-  return best
-}
-
-/** The best block times of `run` on `small` and on `large`, as `bestTime`. */
-function bestTimes(run: (text: string) => void, small: string, large: string, holds: (small: number, large: number) => boolean): [number, number] {
-  let tSmall = Infinity
-  let tLarge = Infinity
-  for (let i = 0; i < MOST_BLOCKS && !holds(tSmall, tLarge); i++) {
-    tSmall = Math.min(tSmall, blockTime(() => run(small)))
-    tLarge = Math.min(tLarge, blockTime(() => run(large)))
-  }
-  return [tSmall, tLarge]
+  const { ms } = timed(run)
+  return { work: workCounted() - before, ms }
 }
 
 /**
@@ -122,8 +65,9 @@ test('runs of unclosed constructs take linear time', () => {
   // linear, each takes tens of milliseconds. The bound leaves room for a busy machine.
   const BOUND = 2000
   const check = (label: string, text: string, run: () => void) => {
-    const work = workOf(run)
-    const took = bestTime(run, (best) => best < BOUND)
+    // The first run is cold: a time that passes then passes warm too.
+    const { work, ms } = measured(run)
+    const took = settledTime(ms, run, (best) => best < BOUND)
     console.log(`${label}: ${took.toFixed(0)} ms, ${(work / text.length).toFixed(1)} steps a character`)
     assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
     assert.ok(took < BOUND, `${label}: ${took.toFixed(0)} ms`)
@@ -156,8 +100,8 @@ test('a 1 MB line of values with an unclosed ${ parses in well under a second', 
   ]
   for (const [label, text] of lines) {
     const run = () => templateScript(text, parseTemplate(text).document)
-    const work = workOf(run)
-    const took = bestTime(run, (best) => best < 1000)
+    const { work, ms } = measured(run)
+    const took = settledTime(ms, run, (best) => best < 1000)
     console.log(`1 MB line of ${label}: ${took.toFixed(0)} ms, ${(work / text.length).toFixed(1)} steps a character`)
     assert.ok(work <= WORK_PER_CHARACTER * text.length, `${label}: ${work} steps for ${text.length} characters`)
     assert.ok(took < 1000, `${label}: ${took.toFixed(0)} ms`)
@@ -203,10 +147,12 @@ test('no input shape grows worse than linear', () => {
   const check = (label: string, run: (text: string) => void, make: (size: number) => string) => {
     const small = make(SIZE)
     const large = make(SIZE * 4)
-    const workSmall = workOf(() => run(small))
-    const workLarge = workOf(() => run(large))
+    // Counted cold, timed warm: a cold small run would read slow and flatter the ratio.
+    const workSmall = measured(() => run(small)).work
+    const workLarge = measured(() => run(large)).work
     const holds = (tSmall: number, tLarge: number) => tLarge < tSmall * 8 + 50
-    const [tSmall, tLarge] = bestTimes(run, small, large, holds)
+    const first: [number, number] = [timed(() => run(small)).ms, timed(() => run(large)).ms]
+    const [tSmall, tLarge] = settledTimes(first, [() => run(small), () => run(large)], holds)
     console.log(`${label}: ${tSmall.toFixed(1)} ms, ×4: ${tLarge.toFixed(1)} ms; work ×${(workLarge / workSmall).toFixed(2)}`)
     assert.ok(workSmall > 0 && workLarge < workSmall * 5, `${label}: ${workSmall} steps, then ${workLarge}`)
     assert.ok(workLarge <= WORK_PER_CHARACTER * large.length, `${label}: ${workLarge} steps for ${large.length} characters`)
@@ -228,6 +174,7 @@ test('the count tells quadratic work from linear', () => {
   }
   const small = '<!--'.repeat(2000)
   const large = '<!--'.repeat(8000)
+  const workOf = (run: () => void) => measured(run).work
   const ratio = workOf(() => quadratic(large)) / workOf(() => quadratic(small))
   assert.ok(ratio > 15, `×${ratio.toFixed(1)}`)
   assert.ok(workOf(() => quadratic(large)) > WORK_PER_CHARACTER * large.length)
