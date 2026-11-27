@@ -14,6 +14,20 @@
 //
 // What is removed from the first line, in this order, each replaced by a placeholder so two texts
 // that differ only there read the same:
+//   - secrets, first, so no rule below leaves a fragment of one (`inv_key_#mZ#…`)    -> `<secret>`:
+//       - a cookie header's value, whole: everything after `cookie:` or `set-cookie:` on the line
+//       - the value after a key naming a secret, `=` or `:` between (`password=…`, `apiKey: …`,
+//         `dwsecuretoken_x=…`, `"token":"…"`), a key holding one of `SECRET_WORDS` anywhere in it,
+//         any letter case, up to the next separator (space, `,`, `;`, `&`, a bracket or a quote;
+//         a quoted value whole), a `Bearer`/`Basic` scheme before it included
+//       - the value after one of those words and a space (`with password Hunter2!`), unless it
+//         is a plain lowercase word, which in a log is the sentence going on (`authorization
+//         failed`, `session expired`)
+//       - `Bearer …` and `Basic …` credentials (not a plain lowercase word)
+//       - JWT-shaped tokens: three base64url parts joined by dots (`eyJ…` first, or each of 16
+//         characters or more, with a digit)
+//       - runs of 20 or more hexadecimal characters, and runs of 20 or more base64 characters
+//         that look random (`looksLikeSecretRun`): never a path, a word or a class name
 //   - timestamps (`2026-11-26 00:10:02.123 GMT`, ISO 8601, `Tue Nov 26 10:15:02 GMT 2026`) -> `<time>`
 //   - a URL's scheme and host, so only its path is kept (`https://www.example.com/on/x` -> `/on/x`),
 //     its query string and fragment, and a locale segment of its path (`/en_GB/`, `/fr/`,
@@ -57,7 +71,9 @@
 //
 // What is not removed: free text. A name or a street a message writes in its own words
 // (`Address validation failed for Jane Doe, # Baker Street`) stays in the sample, which is kept
-// only in the plugin's local storage, bounded, and shown only in the panel.
+// only in the plugin's local data folder, bounded, and shown in the panel; the morning report
+// quotes at most its first 80 characters. Signatures of messages that held a secret changed
+// when the secret rules came in: such an error reads as new once.
 //
 // Too loose a rule hides a new error under an old one; too tight a rule repeats an old one. The
 // rules are tuned on the fixtures of signature.test.ts, near misses included.
@@ -235,7 +251,41 @@ function numbers(text: string): string {
   })
 }
 
+/** Words that, in a key or before a value, say the value is a secret. */
+const SECRET_WORDS = 'password|passwd|pwd|secret|token|apikey|api_key|authorization|set-cookie|cookie|session'
+/** A value up to the next separator; a quoted one whole. */
+const SECRET_VALUE = `(?:(?:Bearer|Basic)\\s+)?(?:"[^"\\n]*"|'[^'\\n]*'|[^\\s,;&()\\[\\]{}<>"']+)`
+
+/** Whether a value after a secret's word and a space is the sentence going on, not a value. */
+function isPlainWord(value: string): boolean {
+  return /^[a-z]+$/.test(value)
+}
+
+/** Whether a run of 20 or more base64 characters looks like a key or a token, not a name or a path. */
+function looksLikeSecretRun(run: string): boolean {
+  const digits = (run.match(/\d/g) ?? []).length
+  const lower = /[a-z]/.test(run)
+  const upper = /[A-Z]/.test(run)
+  if (digits === 0 && !/[+=]/.test(run)) return false
+  // A UUID has a rule of its own.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(run)) return false
+  // A path (`app_x/cartridge/scripts`) is a secret only with base64's own `+` or padding.
+  if (run.includes('/')) return /[+]|=$/.test(run) || (digits >= 4 && lower && upper)
+  // A class name made of words and numbers (`Base64Encoder`) is a name.
+  if (/^(?:[A-Z][a-z]{2,}|\d+)+$/.test(run)) return false
+  return (lower && upper) || (lower && digits >= 4) || (upper && digits >= 4) || /[+=]/.test(run)
+}
+
 const RULES: readonly Rule[] = [
+  // Secrets first (see above).
+  [/\b((?:set-)?cookie)(\s*:\s*)[^\n]*/gi, '$1$2<secret>'],
+  [new RegExp(`(\\b[\\w.-]*?(?:${SECRET_WORDS})[\\w.-]*["']?)(\\s*[=:]\\s*)${SECRET_VALUE}`, 'gi'), '$1$2<secret>'],
+  [new RegExp(`\\b(${SECRET_WORDS})(\\s+)(${SECRET_VALUE})`, 'gi'), (whole: string, word: string, space: string, value: string) => (isPlainWord(value) || value === '<secret>' ? whole : `${word}${space}<secret>`)],
+  [/\b(Bearer|Basic)(\s+)([A-Za-z0-9._~+/=-]{6,})/g, (whole: string, scheme: string, space: string, value: string) => (isPlainWord(value) ? whole : `${scheme}${space}<secret>`)],
+  [/\beyJ[\w-]{2,}\.[\w-]{2,}\.[\w-]{2,}/g, '<secret>'],
+  [/(?<![\w.-])(?=[\w.-]*\d)[\w-]{16,}\.[\w-]{16,}\.[\w-]{16,}(?![\w.-])/g, '<secret>'],
+  [/(?<![\w-])[0-9a-fA-F]{20,}(?![\w-])/g, '<secret>'],
+  [/(?<![\w+/=-])[A-Za-z0-9+/_-]{20,}={0,2}(?![\w+/=-])/g, (run: string) => (looksLikeSecretRun(run) ? '<secret>' : run)],
   [/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?:\s?(?:GMT|UTC|Z|[+-]\d{2}:?\d{2}))?/g, '<time>'],
   [new RegExp(`\\b${DAY} ${MONTH} \\d{1,2} \\d{2}:\\d{2}:\\d{2}(?: [A-Z]{2,5})? \\d{4}\\b`, 'g'), '<time>'],
   // A URL: only its path stays, without its query, fragment or locale.
