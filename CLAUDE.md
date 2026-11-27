@@ -125,7 +125,7 @@ Changing it needs the owner's yes.
       The command line has the same limit, and says so per environment (`mayHaveMissed`).
     - **The command line** (`bin/errors.ts`, a shim over `src/pieces/errors/cli.ts`, the report in
       `report.ts`): `node bin/errors.ts --config-file <dw.json> --role <role>… [--json]
-      [--since <time>] [--lang en|es]`, for the bot `sfcc` (its prompt is `docs/bot-prompt.md`).
+      [--since <time>] [--lang en|es]`, for the bot `sfcc-tools` (its prompt is `docs/bot-prompt.md`).
       It builds the plugin's own runner with the file given as its `configFile` setting and the
       default suffixes, so `dw-config.ts` stays the only reader and values reach `b2c` only in
       the child's environment; the path is never printed. It reads `seen.json` and never writes

@@ -82,7 +82,7 @@ node bin/errors.ts --config-file <dw.json> --role sandbox --role production --js
 
 It needs Node 22.18 or later and no build. It reads the panel's seen list and never writes it;
 it keeps its own cursor beside it, in the plugin's data folder. It exits 1 when an environment
-could not be read, and says which. The bot `sfcc` runs it each morning with the prompt in
+could not be read, and says which. The bot `sfcc-tools` runs it each weekday morning with the prompt in
 [`docs/bot-prompt.md`](docs/bot-prompt.md) and leaves one short summary per environment in its
 own chat.
 

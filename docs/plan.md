@@ -331,7 +331,7 @@ bounded sample per signature is kept.
 
 **Scope.** The error diff as a command line that shares `signature.ts` and `seen.ts` with the
 piece and prints, per instance, what is new since the last report and what is still unmarked.
-A bot named `sfcc` and an automation that runs every morning over the four roles and leaves the
+A bot named `sfcc-tools` and an automation that runs every weekday morning over the four roles and leaves the
 result in the bot's chat. The repository holds the command line and the instructions; the bot
 and the automation are created on the owner's machine with the owner's approval.
 
