@@ -241,7 +241,8 @@ test('a start or stop keeps the dw.json it began with until it settles, whatever
   host.state.focused = NOTES.id
   await timers.advance(FOLLOW_INTERVAL_MS)
   let current = await fake.request('sandbox.refresh')
-  assert.equal(current.config, 'ok')
+  // Nothing global changes: the environments the view shows are the focused workspace's.
+  assert.equal(current.config, 'missing')
   assert.equal(current.sandbox.following, 'start')
   assert.equal(current.sandbox.reason, null)
   assert.equal(current.sandbox.state, 'busy')

@@ -4,7 +4,7 @@
 // used, and only once dw.json makes it `ready`: otherwise every command answers why, and runs
 // nothing.
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
-import { hiddenProjects, holdConfigRoot, isLocal, listWorkspaces } from '../../core/workspaces'
+import { hiddenProjects, isLocal, listWorkspaces } from '../../core/workspaces'
 import { DEFAULT_PREFIX, prefixOf } from './code-version'
 import { messages } from './i18n'
 import { checkable, HOST_TIMEOUT_MS, Ownership, type Listing, type Notice } from './ownership'
@@ -71,8 +71,8 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     void orca.host.call('notifications.show', params).catch(() => undefined)
   }
 
-  // A start or stop keeps the dw.json it began with until it settles, whatever the focus does.
-  const sandbox = new SandboxWatch({ b2c, timers, onChange: () => changed(), onProblem, hold: () => holdConfigRoot(workspaces) })
+  // A start or stop takes the dw.json in force when it is asked, and keeps it until it settles.
+  const sandbox = new SandboxWatch({ b2c, timers, onChange: () => changed(), onProblem, configRoot: () => workspaces.configRoot() })
   const ownership = new Ownership({
     b2c,
     store: ctx.store,
@@ -154,6 +154,8 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
   }
 
   async function refresh(): Promise<void> {
+    // A start or stop being followed reads with its own dw.json, not the one in force now.
+    if (sandbox.isFollowing()) return sandbox.refresh()
     try {
       await ensureReady()
     } catch (error) {

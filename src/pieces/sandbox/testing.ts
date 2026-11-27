@@ -4,7 +4,7 @@
 // example.com.
 import type { JsonValue } from 'orca'
 import type { OrcaWorkerApi } from 'orca/worker'
-import { B2cError, type B2c, type B2cEvent, type Exit, type InstancesState, type RunOptions, type RunResult, type Running, type StartOptions } from '../../core/b2c'
+import { B2cError, type B2c, type B2cEvent, type ConfigChoice, type Exit, type InstancesState, type RunOptions, type RunResult, type Running, type StartOptions } from '../../core/b2c'
 import { createStore, type Store } from '../../core/store'
 import { createWorkspaces, listWorkspaces } from '../../core/workspaces'
 import type { Workspaces } from '../../core/piece'
@@ -18,8 +18,9 @@ export const MISSING: InstancesState = { config: 'missing', instances: { sandbox
 
 /**
  * The dw.json of each folder, as `configRoot()` names one: only its sandbox host. With it, a
- * FakeB2c reads its state, its host and its credentials from the folder `configRoot()` answers at
- * each call, as the real runner does; a folder with none has no dw.json.
+ * FakeB2c reads its state, its host and its credentials from the folder a call names
+ * (`configRoot` option), else from the one `configRoot()` answers at that call, as the real
+ * runner does; a folder with none has no dw.json.
  */
 export type ConfigFiles = { configRoot: () => Promise<string | null>; hosts: Record<string, string> }
 
@@ -87,9 +88,9 @@ export class FakeB2c implements B2c {
     return this.runs.map((run) => run.args.join(' '))
   }
 
-  /** The sandbox host of the dw.json read now, in `files` mode; undefined when there is none. */
-  private async fileHost(): Promise<{ root: string | null; host: string | undefined }> {
-    const root = this.files ? await this.files.configRoot() : null
+  /** The sandbox host of the dw.json a call reads, in `files` mode; undefined when there is none. */
+  private async fileHost(choice: ConfigChoice = {}): Promise<{ root: string | null; host: string | undefined }> {
+    const root = choice.configRoot !== undefined ? choice.configRoot : this.files ? await this.files.configRoot() : null
     return { root, host: root === null ? undefined : this.files?.hosts[root] }
   }
 
@@ -98,7 +99,7 @@ export class FakeB2c implements B2c {
     const record: (typeof this.runs)[number] = { args: [...args], options }
     this.runs.push(record)
     if (this.files) {
-      const { root, host } = await this.fileHost()
+      const { root, host } = await this.fileHost(options)
       record.root = root
       // The runner refuses a role that dw.json does not configure, before starting anything.
       if (options.role === 'sandbox' && host === undefined) throw new B2cError('role_not_configured')
@@ -158,15 +159,15 @@ export class FakeB2c implements B2c {
   async version(): Promise<string | null> {
     return '2.11.0'
   }
-  async instances(): Promise<InstancesState> {
-    if (this.files) return (await this.fileHost()).host === undefined ? MISSING : READY
+  async instances(options: ConfigChoice = {}): Promise<InstancesState> {
+    if (this.files) return (await this.fileHost(options)).host === undefined ? MISSING : READY
     return this.state
   }
   async mask(text: string): Promise<string> {
     return text
   }
-  async isHost(role: string, value: unknown): Promise<boolean> {
-    const host = this.files ? (await this.fileHost()).host : SANDBOX_HOST
+  async isHost(role: string, value: unknown, options: ConfigChoice = {}): Promise<boolean> {
+    const host = this.files ? (await this.fileHost(options)).host : SANDBOX_HOST
     return role === 'sandbox' && typeof value === 'string' && host !== undefined && value.toLowerCase() === host
   }
 }
