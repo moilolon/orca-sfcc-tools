@@ -162,11 +162,8 @@ thrown away; an answered spike moves to the second table with what follows from 
 
 | Id | Question | Before | If no |
 | --- | --- | --- | --- |
-| S3 | Can the open document be matched to its file from its text alone, including identical copies in several cartridges and unsaved edits, and with the path `editor.save.before` gives? | 7 | The editor is opened through a plugin command that records the path, and a tab opened another way asks which file it is. |
-| S4 | Do `.js`, `.xml` and `.properties` open directly in a plugin editor, or only as an alternative view? | 7 | The editor is the default for `.isml` only; the other types are reached from the view toggle and their findings from the problems section. |
-| S9 | Is an editing surface written here (text layer, highlight layer, gutter, pop-ups) good enough inside an editor frame: typing latency on a 3,000-line file, undo, selection, composition input? | 7 | Phase 7 stops and vendoring an open-source editor component is put to the owner, since it bends rule 1. |
 
-S3, S4 and S9 reuse the throwaway plugin the owner already approved.
+None is open.
 
 ### Answered
 
@@ -178,6 +175,9 @@ S3, S4 and S9 reuse the throwaway plugin the owner already approved.
 | S1 | Can a worker drive `b2c debug` over stdio? | Yes. It is a Debug Adapter Protocol adapter on stdin and stdout only, with nothing but protocol on stdout. Breakpoints take the absolute local path of a file inside a cartridge under the adapter's working folder. It uses the sandbox's user and access key. Killed without `disconnect`, it leaves a request halted on the instance for minutes. | Phase 5 frames the stream itself, always disconnects, runs a cleanup session after an unclean end, and passes its own debugger client id. |
 | S5 | Can hosted runners fetch the public Script API pages, and may short descriptions be committed? | No on both. The pages' CDN blocks hosted runners after about a hundred requests, and Salesforce's terms grant no right to reuse the text, only to link to it. The pages exist as Markdown, versioned in their index. | Rule 7 as it now reads: the index is built locally through `b2c docs`, holds facts of the interface and a link, and no description; the weekly workflow only reminds. |
 | S8 | Where can the seen list live so the plugin and a command line outside Orca share it, and how does a bot run that command line? | Not in the plugin's storage: it is one file per plugin, rewritten with no lock, so an outside writer loses updates and a half write wipes it. A bot run is an agent in its own folder, which can run a Node command from the main checkout. | The seen list moves to `seen.json` in the plugin's own data folder (`%APPDATA%\orca-sfcc-tools` on Windows), written by the worker only, under a lock and an atomic rename. The command line reads it and keeps its own cursor in `report.json`. It is given the `dw.json` path as an argument. |
+| S3 | Can the open document be matched to its file? | Partly. The editor frame gets the text and the focused workspace, never a path. A hash of the text matched against the workspace's files finds a saved, unique file (3,000 files: 2.5 s cold, 0.6 s warm); identical copies are ambiguous; unsaved edits match nothing. `editor.save.before` gives the saved file's path relative to its workspace. | The editor identifies its file by hash, then by the last save's path, then by the path the plugin recorded when it opened the file itself. Identical copies: a picker, remembered per workspace. Not identified: the features that need only the text stay, the ones that cross files are off. |
+| S4 | Do `.js`, `.xml` and `.properties` open directly in a plugin editor? | `.isml`, `.xml` and `.properties` yes; `.js` no: Orca keeps it for its own editor whatever the manifest says. An editor is declared per extension for every project, with no condition on the project, and Orca tells a plugin nothing when a file is opened. All four open in the plugin's editor through `orca plugin open --editor`. | The owner's choice: `.isml` opens in the plugin's editor by default; `.js`, `.xml` and `.properties` are an alternative view (`.xml` and `.properties` are common outside SFCC). Every file the plugin itself opens (a problem, an error's or the debugger's frame, go to definition) opens in its editor, `.js` included, and a command with a shortcut opens the current file there. |
+| S9 | Is an editing surface written here good enough inside an editor frame? | Yes for typing and scrolling: inside Orca's frame, on a 3,000-line file, a key is painted in 12.3 ms median and 30.4 ms at worst, and scrolling drops no frame but on a fling. Real keys type `ñ`, `á` and `日`; an unsaved tab merges a change on disk. Undo of 100 edits, a 1,000-line selection, a 1 MB paste and dead-key accents passed in a browser but were not measured inside Orca. | The surface is written here, no library. What was not measured inside Orca is checked in phase 7's live run, with the owner typing. |
 
 ## 6. Phases
 
@@ -452,7 +452,7 @@ Three pull requests.
 
 | Part | Delivers | Depends on |
 | --- | --- | --- |
-| 7.1 Surface | The plugin's editor for `.isml` (and the other types as S4 allows): document sync with merging of outside writes, highlighting from the engine's lexers, theme and typography from the host | 6.4, S3, S4, S9 |
+| 7.1 Surface | The plugin's editor: the default for `.isml`, an alternative view for `.js`, `.xml` and `.properties`; which file it shows (S3); document sync with merging of outside writes; highlighting from the engine's lexers; theme and typography from the host; every file the plugin opens goes to it, and a command with a shortcut opens the current file there | 6.4 |
 | 7.2 Language features | Completion, hover, underlined warnings, go to definition, signature help and references, asked of the engine | 7.1, 6.5 |
 | 7.3 Breakpoints | Breakpoints in the margin, the line where a thread is stopped, and the value under the cursor while stopped | 7.1, 5 |
 
@@ -462,7 +462,8 @@ Three pull requests.
 (`sync` against the mock editor host).
 
 **Contract.** The editor consumes `engine.*` and `debugger.*` and adds
-`editor.locate { text } → { workspaceId, path } | null`.
+`editor.locate { text } → { workspaceId, path } | { candidates } | null`. Opening a file in the
+plugin's editor goes through `src/core/open-file.ts` (`orca plugin open <key> --editor <file>`).
 
 **Accepted when.**
 - Tests: sync and merge against the mock host; each feature against a fake engine.
@@ -470,11 +471,13 @@ Three pull requests.
   warning, and the target of a go to definition.
 - On a real checkout: the same four on a real template; and with the sandbox, a breakpoint set
   in the margin stops a request.
+- With the owner typing, Orca on screen: 200 keys, dead-key accents, undo of 100 edits, a
+  1,000-line selection and a 1 MB paste behave.
 
-**Spikes.** S3, S4, S9.
+**Spikes.** S3, S4 and S9, answered.
 
-**Risks.** An editor written here is the largest quality risk of the plan; S9 measures it
-before anything is built. Every answer crosses from the editor to the worker, so latency is
+**Risks.** An editor written here is the largest quality risk of the plan; S9 measured typing
+and scrolling inside Orca, the rest is checked with the owner. Every answer crosses from the editor to the worker, so latency is
 measured in 7.2. Identical files in several cartridges make S3 ambiguous by nature.
 
 ## 7. Task graph
@@ -492,7 +495,6 @@ graph TD
   P62 --> P63[6.3 Checkout index] --> P64[6.4 Queries] --> P65[6.5 Problems]
   P61 --> P64
   P64 --> P71[7.1 Surface]
-  S3 & S4 & S9 --> P71
   P71 --> P72[7.2 Language features]
   P65 --> P72
   P71 --> P73[7.3 Breakpoints]
@@ -506,9 +508,9 @@ approves, live check, merge, report.
 | --- | --- | --- |
 | Done | 0, 1, 2, 3, 5 | |
 | Next | 4, 6.1, 6.2 | the bot and its automation; the workflow of 6.1 |
-| Then | 6.3, then 6.4, with S3, S4 and S9 alongside | |
-| 5 | 6.5, 7.1 | |
-| 6 | 7.2, 7.3 | |
+| Done | 4, 6.1, 6.2, 6.3, 6.4 | |
+| Next | 6.5, 7.1 | the editor hook of 6.5 |
+| Then | 7.2, 7.3 | the owner typing in the live run |
 
 At the end of each phase the owner gets: what went in, the proof (check output and capture),
 what was not verified, the problems found and what comes next.
