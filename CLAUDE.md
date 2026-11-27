@@ -24,10 +24,8 @@ Changing it needs the owner's yes.
       `b2c.ts` (the only module that starts `b2c`), `dw-config.ts` (the only module that
       reads `dw.json`, called only by `b2c.ts`), `instances.ts` (the four roles, the role guard
       with `ALLOWED_COMMANDS`, and `ALLOWED_FLAGS`), `settings.ts`, `store.ts` (storage, one
-      namespace per piece), `workspaces.ts` (the workspace list, the uploading workspace
-      with its code version: `uploading()`, `upload()`, and `holdConfigRoot()`, which keeps
-      `configRoot()` on the folder it answers now, whatever the focus does, until released;
-      a workspace picked to upload still wins), `i18n.ts` (texts, English and Spanish),
+      namespace per piece), `workspaces.ts` (the workspace list, and the uploading workspace
+      with its code version: `uploading()`, `upload()`), `i18n.ts` (texts, English and Spanish),
       `open-file.ts` (opens a file of a workspace at a line through `orca file open`).
       `b2c.ts` and `open-file.ts` are the only modules that start a process: `open-file.ts`
       imports nothing of `b2c.ts` or `dw-config.ts`, starts `orca.exe` (or `orca`) directly,
@@ -61,9 +59,11 @@ Changing it needs the owner's yes.
       uploading, failed; deletes the version of a removed workspace, deferred while active),
       `code-version.ts` (`<prefix><slug>`, kept per workspace id), `uploader.ts` (reads
       `code watch --jsonl` lines), `status.ts` (the sandbox state from `sandbox list`, start and
-      stop followed on it, holding the `dw.json` they began with until they settle, fail or time
-      out, so moving the focus never loses the sandbox), `status-bar.ts` (its two items'
-      texts), `worker.ts` (requests,
+      stop followed on it: each takes the configuration in force when it is asked, the folder
+      whose `dw.json` is read and the id the list gives under it, and every call of its follow
+      names that folder (`configRoot` of a call), so moving the focus never loses the sandbox;
+      an answer made with another `dw.json` does not count for it), `status-bar.ts` (its two
+      items' texts), `worker.ts` (requests,
       commands, `workspace.removed`); `testing.ts` holds the fakes its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
       beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
@@ -73,12 +73,18 @@ Changing it needs the owner's yes.
       for in is chosen by `frameRoot()` in its `worker.ts`. A read passes `--level ERROR` and
       `--level FATAL`, and the parser drops any other level too. No URL host is kept: a URL is
       reduced to its path, its locale segment to `<locale>`, and a host written without a scheme
-      to `<host>` (never a file name, a `dw.*` name or a Java package); where the text around
-      says it is one, fewer labels do (`domain [<host>]` for a two-label `.eu` inside brackets
-      or quotes, and any known ending after `domain`, `host`, `hostname`, `server`, `url`, `@`
-      or `//`), while a script expression stays. A read is marked as asked in storage until it
-      ends, so one a worker restart cut short runs again when the worker starts (within ten
-      minutes of being asked). Numbers become `#`, but
+      to `<host>`, in any letter case (never a file name, a `dw.*` name or a Java package);
+      where the text around says it is one, two labels do: inside brackets (in a list there
+      too) or quotes, on any country or common ending but one that reads as a property
+      (`(item.id)`), and after `domain`, `host`, `hostname`, `server`, `url`, `@` or `//` on
+      any known ending, with a port or a path after it; a script expression stays. A read that
+      cannot run with the `dw.json` read now (the role is not ready there) answers at once with
+      why, keeps the time of the last read and starts nothing. A read is marked as asked in
+      storage until it ends, so one a worker restart cut short runs again when the worker
+      starts (within ten minutes of being asked; such a read may notify with nobody there, and
+      may count again what the cut one recorded before its cursor was written). Every answer
+      carries its version (the worker, and a number raised on each change of the role), and the
+      view keeps only the newest, since two answers can cross. Numbers become `#`, but
       an HTTP status after `status`, `statusCode` or `HTTP` and an error code after `error code`:
       an order, a gift card, a product or a one-time code is never kept, and a `LETTERS-digits`
       token becomes `<code>`. **The limit of `b2c logs get`:**
@@ -133,6 +139,10 @@ Changing it needs the owner's yes.
       `.cmd` or `.bat` none may hold `" % ^ & | < > !` or a control character
       (`unsafe_argument`, with the position of the argument): a version manager's shim would
       let it run another command.
+    - A call of `run()`, `start()`, `instances()` or `isHost()` may name the folder whose
+      `dw.json` it reads (`configRoot`); left out, it is the one `configRoot()` names at that
+      moment. Only an operation followed over several calls names it (a sandbox start or stop,
+      a deletion), so a focus change in between does not give it another file.
     - `run()` is for one-shot commands and adds `--json`. `start()` is for long-lived ones: it
       hands over stderr line by line and stdout in raw chunks, takes `write()` and `end()` for
       stdin, always reads both streams, and adds `--jsonl` only with `jsonl: true`; its `exited`
@@ -183,7 +193,10 @@ Changing it needs the owner's yes.
       list is never taken as removed. A delete that fails is checked in `code list`: Salesforce
       can answer a timeout and go on deleting, renaming the version `.deleted_<n>_<name>`, so a
       version gone or renamed counts as deleted and one still there waits for the next
-      activation; a `.deleted_…` version is never shown as a workspace's or deleted again. A
+      activation; a `.deleted_…` version is never shown as a workspace's or deleted again.
+      A version is deleted with the `dw.json` of its own workspace (the folder it was picked
+      from), or the one in force when it was queued when that folder no longer configures the
+      sandbox, taken when it is queued and named in every call of its deletion. A
       worker restart restarts the
       watcher without a redeploy, but only for a version whose last full deploy ended; the
       others show that a deploy is needed and are never reloaded.
