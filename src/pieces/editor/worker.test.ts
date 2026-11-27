@@ -216,6 +216,31 @@ test('the command opens the last saved file of the focused workspace in the plug
   }
 })
 
+test('editor.open opens a file of the frame’s workspace in the plugin’s editor at a line; never another host’s, an unknown one or an absolute path', async () => {
+  const root = workspace()
+  try {
+    const opened: OpenFileRequest[] = []
+    const { worker, SHOP, REMOTE } = await mount(root, { opened })
+    const open = (input: Record<string, unknown>) => worker.request('editor.open', input as never)
+    const path = 'cartridges/app_two/cartridge/templates/default/product/tile.isml'
+    assert.deepEqual(await open({ workspaceId: SHOP.id, path, line: 12, column: 3 }), { opened: true })
+    assert.deepEqual(opened, [{ root, path, line: 12, column: 3, inEditor: true, focus: true }])
+    // A line that is not one is left out; a column without a line too.
+    assert.deepEqual(await open({ workspaceId: SHOP.id, path, line: 0, column: 3 }), { opened: true })
+    assert.deepEqual(opened[1], { root, path, line: undefined, column: undefined, inEditor: true, focus: true })
+    assert.deepEqual(await open({ workspaceId: REMOTE.id, path }), { opened: false, reason: 'no_workspace' })
+    assert.deepEqual(await open({ workspaceId: 'identity:wt2:gone', path }), { opened: false, reason: 'no_workspace' })
+    assert.deepEqual(await open({ workspaceId: null, path }), { opened: false, reason: 'no_workspace' })
+    for (const absolute of ['C:/elsewhere/a.isml', '/etc/a.isml', '\\\\server\\share\\a.isml', '']) {
+      assert.deepEqual(await open({ workspaceId: SHOP.id, path: absolute }), { opened: false, reason: 'invalid_path' }, absolute)
+    }
+    assert.equal(opened.length, 2)
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('the focused workspace is indexed in the background once the worker has started', async () => {
   const root = workspace()
   try {

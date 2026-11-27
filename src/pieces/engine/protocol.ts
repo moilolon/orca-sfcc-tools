@@ -62,7 +62,10 @@ export type EngineCompletion = EngineAnswerState & { completion: Completion }
 /** A hover, with the description of a `dw.*` class or member read at run time (masked; null when none was read). */
 export type EngineHoverResult = Hover & {
   description: string | null
-  /** Why the description could not be read (`b2c_not_found`, `wrong_page`, `timeout`, …); null when read or not wanted. */
+  /**
+   * Why the description could not be read (`b2c_not_found`, `wrong_page`, `timeout`, …), or
+   * `pending` for a `cached` hover whose description is being read; null when read or not wanted.
+   */
   descriptionError: string | null
 }
 
@@ -159,9 +162,11 @@ declare module 'orca' {
     /**
      * What is at the offset; with `id`, the completion item of that id instead (its range is
      * null). The description of a `dw.*` class or member is read through `b2c docs read`, waited
-     * for a short while, and kept in memory only.
+     * for a short while (`describe: 'wait'`, the default), and kept in memory only. With
+     * `describe: 'cached'` the answer comes at once: the description when it was read already,
+     * else none with `descriptionError: 'pending'` and the read started.
      */
-    'engine.hover': { input: EngineQuery & { id?: string }; output: EngineHover }
+    'engine.hover': { input: EngineQuery & { id?: string; describe?: 'wait' | 'cached' }; output: EngineHover }
     /** Where the thing at the offset is defined: one place per copy, each with the storefronts it serves. */
     'engine.definition': { input: EngineQuery; output: EngineDefinition }
     /** The references of the exported function at the offset, across every storefront's path (at most 500). */
