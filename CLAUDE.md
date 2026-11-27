@@ -201,7 +201,10 @@ Changing it needs the owner's yes.
       scripts are the `.js`/`.ds` under `cartridge/` but `static/` and `client/`; controllers
       are those directly in `controllers/`. Per file it keeps only what `scan.ts` takes (the
       literal `require`s, template and `Resource.msg`/`msgf` uses with their ranges,
-      `module.superModule`, a controller's route operations, `extend` and export) with the
+      `module.superModule`, a controller's route operations, `extend` and export, what a script
+      exports (each member with its place, parameters and JSDoc cut at `MAX_DOC_CHARACTERS`,
+      whether it builds on `module.superModule`, the modules it re-exports) and a template's
+      `<ismodule>` tags) with the
       file's time: a build reads again only a file whose time changed, `update(paths)` only the
       paths named (a folder is walked again). A change works on its own copies of the files and
       records; at its end it builds a whole new published state (cartridges, paths, bundles,
@@ -241,9 +244,50 @@ Changing it needs the owner's yes.
       came for `DEBOUNCE_MS`, at the latest `MAX_WAIT_MS` after the first. A change of
       `.git/HEAD`, `packed-refs` or `refs/`, and a timer every `REF_CHECK_MS` (a worktree's refs
       are outside the folder watched), ask whether the ref moved (`refreshRef`: one `rev-parse`,
-      read again only when it did). `checkout/testing.ts` reads the invented checkout of
-      `fixtures/checkout/` (two storefronts, three cartridges and `modules`) and generates large
-      ones.
+      read again only when it did). Only a successful read of the ref replaces what it gave: a
+      failed check keeps the last good paths and metadata of the same ref, with `gitError` saying
+      why. `checkout/testing.ts` reads the invented checkout of `fixtures/checkout/` (two
+      storefronts, three cartridges and `modules`, a modules template with a custom tag, a core
+      helper that extends its base through `module.superModule`) and generates large ones.
+    - `src/pieces/engine/query/` (phase 6.4): the queries, pure like the rest (a test checks
+      it), on the two indexes (`QueryContext`), a file's text and an offset, answering in
+      positions of that text. `analysis.ts` reads a text once for every query on it (the tree or
+      the template's fragments, the facts, each use by offset, the values assigned to each
+      declaration, each parameter's JSDoc). `types.ts`: the type of an expression (`QType`): a
+      `dw.*` instance or class, a package, a method before its call, a cartridge module or one of
+      its members, `x.custom` of a metadata type, or `project` (what project code builds, never
+      guessed). From the initialiser (`new`, `require('dw/…')`, a method's return type, chosen
+      among overloads by the number of arguments, `CustomObjectMgr.getCustomObject('T', …)`),
+      then `@type`/`@param`, the globals (`request`, `session`, `customer`, `response`, global
+      functions; `pdict` unknown; `Resource`, `URLUtils`, `StringUtils` in a template only), and
+      the previous call in a chain; a module function's `@returns` when every copy agrees. One
+      variable, one type, over the whole binding (every declaration of a name in one function,
+      its parameter included: `analysis.bindings`): two types, an unknown value, a JSDoc tag that
+      disagrees, any write but a plain `=`, or a name inside a pattern, make it unknown. A
+      parameter is typed by its `@param` only (the caller passes anything); a name inside `with`
+      is unknown. The committed index marks no
+      property static, so a property is static when its getter is (`Site.current`). Statics are
+      read off the class (`Object`'s own aside), the rest off an instance. `modules.ts`: the
+      copies a `require` reaches and the members each exports, its re-exports and
+      `module.superModule` followed (`MAX_MODULE_DEPTH`). `complete.ts` decides where the offset
+      is, then offers at most `MAX_COMPLETION_ITEMS` filtered by what is typed: ISML tags (custom
+      ones of the template and of what it includes, one level) and their attributes
+      (`isml-tags.ts`), template paths, `dw.*` members, custom attributes and site preferences,
+      a module's members, resource keys and bundles, `require` paths, route ids; each item has a
+      kind, a detail and an id `hoverItem` expands. A type is guessed from a name only for
+      `name.custom.` with nothing else known, from `GUESSED_NAMES` (said `guessed`), and only
+      for a name whose values are all read from elsewhere (`guessable`). With no storefront path,
+      routes are those every cartridge's controllers declare, labelled with their cartridge
+      (`routes.ts`). `hover.ts`
+      answers data, not words (the editor words it from `i18n.ts`): a `dw.*` member or class with
+      `describe`, a module and its copy per storefront, a member and where each copy defines it,
+      `module.superModule`, a route (its steps in the order they run and the one that serves),
+      a template, a resource key, a custom attribute, a tag; lists cut at `MAX_HOVER_ENTRIES`.
+      The worker answers `engine.complete` and `engine.hover` (`{ workspaceId, path, text,
+      offset }`, the path checked by `checkQuery`) with the index of the workspace indexed, else
+      an empty one (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to
+      `DESCRIBE_WAIT_MS` for a description read through `dw/describe.ts`.
+      `query/performance.test.ts` times both on a 5,000-line script and template.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

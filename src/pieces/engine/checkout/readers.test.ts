@@ -178,3 +178,49 @@ test('the checkout modules that the editor may load import nothing but each othe
     assert.ok(!/\brequire\(|process\.|globalThis\.orca/.test(source.replace(/\/\/.*$|\/\*[\s\S]*?\*\//gm, '').replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, "''")), `${module} uses a runtime global`)
   }
 })
+
+test('scan: what a script exports, each member with its place, parameters and JSDoc; what it builds on and re-exports', () => {
+  const text = [
+    "'use strict';",
+    "var base = require('*/cartridge/scripts/helpers/base');",
+    '/**',
+    ' * Waters a plant.',
+    ' * @param {number} litres - how much',
+    ' */',
+    'function water(litres, warm) {}',
+    'var rest = function (first, ...others) {};',
+    'module.exports = Object.assign({}, base, {',
+    '    water: water,',
+    '    rest: rest,',
+    '    /** A count. */',
+    '    count: 3',
+    '});'
+  ].join('\n')
+  const exports = scanScript(text).exports
+  assert.deepEqual(
+    exports.members.map((member) => [member.name, member.kind, member.params, member.line, member.definition?.line ?? null, member.doc]),
+    [
+      ['water', 'function', ['litres', 'warm'], 10, 7, 'Waters a plant.\n@param {number} litres - how much'],
+      ['rest', 'function', ['first', '...others'], 11, 8, null],
+      ['count', 'value', null, 13, null, 'A count.']
+    ]
+  )
+  assert.deepEqual([exports.value, exports.place?.line, exports.extendsSuper, exports.reexports], ['assign', 9, false, ['*/cartridge/scripts/helpers/base']])
+  // A model's constructor, a module re-exported whole, a member read off one (not a re-export).
+  const model = scanScript('/** A garden model. */\nfunction Garden(apiGarden, options) {}\nmodule.exports = Garden;').exports
+  assert.deepEqual([model.value, model.params, model.doc], ['function', ['apiGarden', 'options'], 'A garden model.'])
+  assert.deepEqual(scanScript("module.exports = require('*/cartridge/scripts/x');").exports.reexports, ['*/cartridge/scripts/x'])
+  assert.deepEqual(scanScript("module.exports = require('*/cartridge/scripts/x').y;").exports.reexports, [])
+  // A copy that extends module.superModule.
+  const extended = scanScript('var base = module.superModule;\nbase.first = function (list) {};\nmodule.exports = base;').exports
+  assert.deepEqual([extended.extendsSuper, extended.members.map((member) => member.name)], [true, ['first']])
+  // A name exported twice keeps its last.
+  assert.deepEqual(scanScript('exports.a = 1;\nexports.a = function (x) {};').exports.members.map((member) => [member.name, member.kind, member.line]), [['a', 'function', 2]])
+  assert.deepEqual(scanScript('var x = 1;').exports, { members: [], value: null, place: null, params: null, doc: null, extendsSuper: false, reexports: [] })
+})
+
+test('scan: the custom tags a template’s <ismodule> declares, with their attributes and line', () => {
+  const facts = scanTemplate('<iscomment>tags</iscomment>\n<ismodule template="components/badge" name="badge" attribute="label" attribute="tone" />\n')
+  assert.deepEqual(facts.modules.map(({ name, template, attributes, line }) => ({ name, template, attributes, line })), [{ name: 'badge', template: 'components/badge', attributes: ['label', 'tone'], line: 2 }])
+  assert.deepEqual(scanTemplate('<div></div>').modules, [])
+})

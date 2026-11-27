@@ -45,7 +45,7 @@ test('1. cartridges: every folder with .project and cartridge/, with its folders
   assert.deepEqual(base.folders, ['controllers', 'forms/default', 'models', 'scripts', 'static/default', 'templates/default', 'templates/fr_FR', 'templates/resources'])
   assert.deepEqual(base.templateLocales, ['default', 'fr_FR'])
   assert.deepEqual(base.formLocales, ['default'])
-  assert.equal(base.files, 15)
+  assert.equal(base.files, 17)
   assert.equal(index.cartridgeOf(`${CORE}/cartridge/models/product.js`)?.name, 'app_garden_core')
   assert.equal(index.cartridgeOf('sites/site_template/meta/system-objecttype-extensions.xml'), null)
   // Client code under static/ is listed, never read as a server script.
@@ -447,10 +447,10 @@ test('the status counts the invented checkout: what resolves and what dangles', 
   const index = await built()
   const { counts } = index.status()
   assert.deepEqual(counts, {
-    files: 34,
-    scripts: 12,
+    files: 37,
+    scripts: 13,
     controllers: 5,
-    templates: 6,
+    templates: 8,
     bundles: 5,
     resourceKeys: 8,
     objectTypes: 3,
@@ -461,7 +461,7 @@ test('the status counts the invented checkout: what resolves and what dangles', 
     requiresResolved: 14,
     // The cart helper nobody wrote.
     requiresUnresolved: 1,
-    templateUses: 9,
+    templateUses: 10,
     // quickView, compare, cart/cart and the decorator: not in the checkout.
     templateUsesUnresolved: 4,
     resourceUses: 7,

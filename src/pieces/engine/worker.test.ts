@@ -13,8 +13,11 @@ import { GitError, type RefReader } from './checkout/checkout'
 import type { CheckoutFiles } from './checkout/files'
 import { MemoryFiles } from './checkout/memory'
 import { fixtureFiles, FakeRef } from './checkout/testing'
-import type { EngineIndexStatus } from './protocol'
-import { createEnginePiece, DEBOUNCE_MS, loadDw, MAX_WAIT_MS, REF_CHECK_MS, START_DELAY_MS, type EngineDeps } from './worker'
+import { createDescriber, type Describer } from './dw/describe'
+import type { EngineCompletion, EngineHover, EngineIndexStatus } from './protocol'
+import { MAX_COMPLETION_ITEMS } from './query/complete'
+import { committedDw } from './query/testing'
+import { createEnginePiece, DEBOUNCE_MS, DESCRIBE_WAIT_MS, loadDw, MAX_WAIT_MS, REF_CHECK_MS, START_DELAY_MS, type EngineDeps } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const SHOP = { id: 'w-shop', kind: 'worktree', name: 'Shop', path: 'C:/work/shop', branch: 'main', hostId: 'local' }
@@ -255,4 +258,123 @@ test('a timer asks every REF_CHECK_MS whether the ref moved: a worktree’s refs
   fire(REF_CHECK_MS)
   await settle()
   assert.deepEqual((await ready()).index?.storefronts.map((s) => s.cartridges), [['app_garden_core', 'app_garden_base']])
+})
+
+// ---------------------------------------------------------------------------------------------
+// The queries (phase 6.4)
+
+const SCRIPT = 'cartridges/app_garden_base/cartridge/scripts/helpers/garden.js'
+const MEMBERS = "var collections = require('*/cartridge/scripts/util/collections');\ncollections."
+
+/** A docs page of b2c for an invented class, with a host the fake masker hides. */
+function docsPage(id: string): unknown {
+  const content = ['# Class ProductMgr', '', 'Reads the products of example-host.example.com.', '', '## Method Details', '', '### getProduct(String)', '', 'Returns the product of example-host.example.com.'].join('\n')
+  return { entry: { id }, content }
+}
+
+function fakeDocs(answer: (id: string) => unknown = docsPage) {
+  const calls: string[][] = []
+  const b2c = {
+    async run(args: readonly string[]) {
+      calls.push([...args])
+      const json = answer(args[2])
+      if (json instanceof Error) throw json
+      return { stdout: '', stderr: '', json }
+    },
+    async mask(text: string) {
+      return text.replace(/example-host\.example\.com/g, '***')
+    }
+  }
+  return { calls, describer: () => createDescriber(b2c as unknown as B2c) }
+}
+
+test('engine.complete and engine.hover answer on the editor’s text with the index of the workspace named, in positions of that text', async () => {
+  const docs = fakeDocs()
+  const { worker, ready } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw(), describer: docs.describer })
+  await ready()
+  const complete = (input: Record<string, unknown>) => worker.request('engine.complete', input as never) as Promise<EngineCompletion>
+  const hover = (input: Record<string, unknown>) => worker.request('engine.hover', input as never) as Promise<EngineHover>
+  // A text the disk does not have yet: the editor's.
+  const members = await complete({ workspaceId: 'w-shop', path: SCRIPT, text: MEMBERS, offset: MEMBERS.length })
+  assert.deepEqual([members.index, members.error], ['ready', null])
+  assert.deepEqual(members.completion.items.map((item) => item.label), ['first', 'map'])
+  assert.deepEqual(members.completion.range, { start: MEMBERS.length, end: MEMBERS.length })
+  // A completion item's id, then a place, hovered.
+  const item = await hover({ workspaceId: 'w-shop', path: SCRIPT, text: MEMBERS, offset: MEMBERS.length, id: members.completion.items[0].id })
+  assert.equal(item.hover?.kind, 'module-member')
+  assert.equal(item.hover?.range, null)
+  const text = MEMBERS + 'first(list);'
+  const at = await hover({ workspaceId: 'w-shop', path: SCRIPT, text, offset: text.indexOf('first') + 2 })
+  assert.deepEqual(at.hover?.range, { start: text.indexOf('first'), end: text.indexOf('first') + 5 })
+  assert.deepEqual([at.hover?.description, at.hover?.descriptionError], [null, null])
+  // Backslashes and `./` are read as the same path.
+  const windows = await complete({ workspaceId: 'w-shop', path: `./${SCRIPT.replace(/\//g, '\\')}`, text: MEMBERS, offset: MEMBERS.length })
+  assert.deepEqual(windows.completion.items.map((each) => each.label), ['first', 'map'])
+  // Another workspace is not the one indexed: what needs no checkout still answers.
+  const other = await complete({ workspaceId: 'w-fix', path: SCRIPT, text: MEMBERS, offset: MEMBERS.length })
+  assert.deepEqual([other.index, other.completion.items], ['none', []])
+  const tags = await complete({ workspaceId: 'w-fix', path: 'c/x.isml', text: '<isif', offset: 5 })
+  assert.deepEqual(tags.completion.items.map((each) => each.label), ['isif'])
+  assert.equal(docs.calls.length, 0)
+})
+
+test('engine.hover reads a dw description through b2c docs read, masked, once per page, and waits at most DESCRIBE_WAIT_MS', async () => {
+  const docs = fakeDocs()
+  const { worker, ready } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw(), describer: docs.describer })
+  await ready()
+  const text = "var ProductMgr = require('dw/catalog/ProductMgr');\nProductMgr.getProduct(pid);"
+  const query = { workspaceId: 'w-shop', path: SCRIPT, text, offset: text.indexOf('getProduct') + 1 }
+  const member = (await worker.request('engine.hover', query)) as EngineHover
+  assert.equal(member.hover?.kind, 'dw-member')
+  assert.equal(member.hover?.description, 'Returns the product of ***.')
+  assert.equal(member.hover?.descriptionError, null)
+  const cls = (await worker.request('engine.hover', { ...query, offset: text.indexOf('ProductMgr.') + 1 })) as EngineHover
+  assert.deepEqual([cls.hover?.kind, cls.hover?.description], ['dw-class', 'Reads the products of ***.'])
+  // One page read for both: kept in memory, never stored.
+  assert.deepEqual(docs.calls, [['docs', 'read', 'dw.catalog.ProductMgr', '--workspace', 'all']])
+  // A failure is a code; the hover is there without its description.
+  const failing = fakeDocs(() => Object.assign(new Error('no b2c'), { code: 'b2c_not_found' }))
+  const second = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw(), describer: failing.describer })
+  await second.ready()
+  const failed = (await second.worker.request('engine.hover', query)) as EngineHover
+  assert.deepEqual([failed.hover?.kind, failed.hover?.description, failed.hover?.descriptionError], ['dw-member', null, 'b2c_not_found'])
+  // A page that does not come in time: answered without it after DESCRIBE_WAIT_MS.
+  const slow: Describer = { describe: () => new Promise<string | null>(() => undefined) }
+  const third = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw(), describer: () => slow })
+  await third.ready()
+  const pending = third.worker.request('engine.hover', query) as Promise<EngineHover>
+  await settle()
+  third.fire(DESCRIBE_WAIT_MS)
+  const late = await pending
+  assert.deepEqual([late.hover?.kind, late.hover?.description, late.hover?.descriptionError], ['dw-member', null, 'timeout'])
+})
+
+test('a query is bounded and checked: at most 200 items; a path that leaves the workspace or an offset outside the text answers nothing', async () => {
+  const { worker, ready } = await mount(hostFor('w-shop'), { 'C:/work/shop': fixtureFiles() }, { api: async () => committedDw() })
+  await ready()
+  const complete = (input: Record<string, unknown>) => worker.request('engine.complete', input as never) as Promise<EngineCompletion>
+  const many = "require('dw/')"
+  const bounded = await complete({ workspaceId: 'w-shop', path: SCRIPT, text: many, offset: many.length - 2 })
+  assert.equal(bounded.completion.items.length, MAX_COMPLETION_ITEMS)
+  assert.equal(bounded.completion.truncated, true)
+  const cases: [Record<string, unknown>, string][] = [
+    [{ workspaceId: 'w-shop', path: '../outside.js', text: 'a.', offset: 2 }, 'file_invalid'],
+    [{ workspaceId: 'w-shop', path: 'C:/work/shop/a.js', text: 'a.', offset: 2 }, 'file_invalid'],
+    [{ workspaceId: 'w-shop', path: '', text: 'a.', offset: 2 }, 'file_invalid'],
+    [{ path: SCRIPT, text: 'a.', offset: 2 }, 'file_invalid'],
+    [{ workspaceId: 'w-shop', path: SCRIPT, text: 'a.', offset: 3 }, 'offset_invalid'],
+    [{ workspaceId: 'w-shop', path: SCRIPT, text: 'a.', offset: -1 }, 'offset_invalid'],
+    [{ workspaceId: 'w-shop', path: SCRIPT, text: 'a.', offset: 1.5 }, 'offset_invalid'],
+    [{ workspaceId: 'w-shop', path: SCRIPT, text: 'x'.repeat(2_000_001), offset: 0 }, 'text_too_large']
+  ]
+  for (const [input, error] of cases) {
+    const answer = await complete(input)
+    assert.equal(answer.error, error, JSON.stringify(input).slice(0, 80))
+    assert.deepEqual(answer.completion.items, [])
+    const hovered = (await worker.request('engine.hover', input as never)) as EngineHover
+    assert.deepEqual([hovered.error, hovered.hover], [error, null])
+  }
+  // A file the engine does not read: nothing, and no error.
+  const other = await complete({ workspaceId: 'w-shop', path: 'README.md', text: 'a.b', offset: 2 })
+  assert.deepEqual([other.error, other.completion.items], [null, []])
 })

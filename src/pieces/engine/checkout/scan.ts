@@ -4,7 +4,7 @@
 // Pure: no Node, no Orca.
 import type * as AST from '../js/ast'
 import { walk, type Node } from '../js/ast'
-import { scriptFacts, type Reference, type ScriptFacts } from '../js/facts'
+import { scriptFacts, type Declaration, type Reference, type ScriptFacts, type ValueFacts } from '../js/facts'
 import { parseScript } from '../js/parser'
 import { templateScript } from '../isml/embedded'
 import { attribute, parseTemplate, walkTemplate } from '../isml/parser'
@@ -12,6 +12,12 @@ import { lineAt, lineStarts } from './files'
 
 /** A file larger than this is listed but not parsed (a bundled library, a generated file). */
 export const MAX_PARSED_CHARACTERS = 2_000_000
+
+/** The longest JSDoc kept per exported member: the rest is cut, so a file's record stays small. */
+export const MAX_DOC_CHARACTERS = 600
+
+/** At most this many exported members are kept per script. */
+export const MAX_EXPORTED_MEMBERS = 500
 
 export type RequireUse = {
   module: string
@@ -73,6 +79,40 @@ export type ControllerFacts = {
   exported: boolean
 }
 
+/** Where something is written in a file: the range of its name, and its 1-based line. */
+export type Place = { start: number; end: number; line: number }
+
+/** A member a script exports (`module.exports = { price: price }`, `exports.price = …`, `base.price = …`). */
+export type ExportedMember = Place & {
+  name: string
+  /** `function` when its value is a function written or declared in the file. */
+  kind: 'function' | 'value'
+  /** The parameters' names of a function (`...rest`, `?` for a pattern); null for a value. */
+  params: string[] | null
+  /** Where the value is declared, when the member names a declaration (`price: price`); null when the member is the definition. */
+  definition: Place | null
+  /** The JSDoc of the member, else of the declaration it names, without its delimiters; cut at `MAX_DOC_CHARACTERS`. */
+  doc: string | null
+}
+
+/** What `module.exports` is, as the last assignment to it writes it. */
+export type ExportedValue = 'object' | 'function' | 'class' | 'superModule' | 'assign' | 'require' | 'identifier' | 'call' | 'other'
+
+export type ModuleExports = {
+  /** The members exported, by name: a name exported twice keeps its last. In source order. */
+  members: ExportedMember[]
+  /** The last `module.exports = …`; null when the script assigns none (members only, or nothing). */
+  value: ExportedValue | null
+  /** Where the last assignment is, and its value's parameters when it is a function (a model's constructor). */
+  place: Place | null
+  params: string[] | null
+  doc: string | null
+  /** Whether what is exported is, or builds on, `module.superModule`: its members include the next copy's. */
+  extendsSuper: boolean
+  /** The modules whose members are exported too: `module.exports = require('x')`, or a name bound to one passed to `Object.assign`. */
+  reexports: string[]
+}
+
 export type ScriptFileFacts = {
   kind: 'script'
   requires: RequireUse[]
@@ -82,10 +122,22 @@ export type ScriptFileFacts = {
   superModule: { start: number; end: number }[]
   /** Set for a script read as a controller (under `cartridge/controllers/`). */
   controller: ControllerFacts | null
+  /** What the script exports. */
+  exports: ModuleExports
   /** Syntax problems found; the index does not keep them. */
   problems: number
   /** Too large to parse: nothing above was read. */
   skipped: boolean
+}
+
+/** A custom tag an `<ismodule>` declares (`name="price"` declares `<isprice>`). */
+export type TemplateModule = Place & {
+  /** The name without `is`. */
+  name: string
+  /** The template that renders it, when written as plain text. */
+  template: string | null
+  /** The attributes it takes. */
+  attributes: string[]
 }
 
 export type TemplateFileFacts = {
@@ -93,6 +145,8 @@ export type TemplateFileFacts = {
   requires: RequireUse[]
   templates: TemplateUse[]
   resources: ResourceUse[]
+  /** The custom tags its `<ismodule>` tags declare. */
+  modules: TemplateModule[]
   problems: number
   skipped: boolean
 }
@@ -148,13 +202,17 @@ function requiresOf(facts: ScriptFacts): RequireUse[] {
 
 /** The facts of a script; `controller` reads its SFRA routes too. */
 export function scanScript(text: string, options: { controller?: boolean } = {}): ScriptFileFacts {
-  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'script', requires: [], templates: [], resources: [], superModule: [], controller: null, problems: 0, skipped: true }
+  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'script', requires: [], templates: [], resources: [], superModule: [], controller: null, exports: noExports(), problems: 0, skipped: true }
   const parsed = parseScript(text)
   const facts = scriptFacts(parsed.program)
   const templates: TemplateUse[] = []
   const resources: ResourceUse[] = []
   const calls: AST.CallExpression[] = []
-  collectCalls(parsed.program, templates, resources, options.controller ? (node) => void (node.type === 'CallExpression' && calls.push(node)) : undefined)
+  const functions = new Map<number, FunctionNode>()
+  collectCalls(parsed.program, templates, resources, (node) => {
+    if (options.controller && node.type === 'CallExpression') calls.push(node)
+    if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression' || node.type === 'FunctionDeclaration') functions.set(node.start, node)
+  })
   return {
     kind: 'script',
     requires: requiresOf(facts),
@@ -162,6 +220,7 @@ export function scanScript(text: string, options: { controller?: boolean } = {})
     resources,
     superModule: facts.exports.superModule.uses.map(({ start, end }) => ({ start, end })),
     controller: options.controller ? controllerFacts(text, facts, calls) : null,
+    exports: exportsOf(text, facts, functions),
     problems: parsed.problems.length,
     skipped: false
   }
@@ -241,7 +300,7 @@ const TEMPLATE_TAGS: ReadonlySet<string> = new Set(['isinclude', 'isdecorate', '
 
 /** The facts of a template: the templates its tags name, and its JavaScript's requires and resource keys. */
 export function scanTemplate(text: string): TemplateFileFacts {
-  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'template', requires: [], templates: [], resources: [], problems: 0, skipped: true }
+  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'template', requires: [], templates: [], resources: [], modules: [], problems: 0, skipped: true }
   const parsed = parseTemplate(text)
   const templates: TemplateUse[] = []
   const resources: ResourceUse[] = []
@@ -256,5 +315,107 @@ export function scanTemplate(text: string): TemplateFileFacts {
   for (const fragment of script.fragments) collectCalls(fragment.node, templates, resources)
   templates.sort((a, b) => a.start - b.start)
   resources.sort((a, b) => a.start - b.start)
-  return { kind: 'template', requires: requiresOf(script.facts), templates, resources, problems: parsed.problems.length + script.problems.length, skipped: false }
+  const starts = lineStarts(text)
+  const modules: TemplateModule[] = parsed.document.modules.map((module) => ({
+    name: module.name,
+    template: module.template,
+    attributes: [...module.attributes],
+    start: module.start,
+    end: module.end,
+    line: lineAt(starts, module.start)
+  }))
+  return { kind: 'template', requires: requiresOf(script.facts), templates, resources, modules, problems: parsed.problems.length + script.problems.length, skipped: false }
+}
+
+// ---------------------------------------------------------------------------------------------
+// What a script exports
+
+type FunctionNode = AST.FunctionExpression | AST.ArrowFunctionExpression | AST.FunctionDeclaration
+
+export function noExports(): ModuleExports {
+  return { members: [], value: null, place: null, params: null, doc: null, extendsSuper: false, reexports: [] }
+}
+
+/** A parameter's name: `a`, `a = 1` as `a`, `...rest`, `?` for a pattern. */
+export function paramName(param: AST.Pattern): string {
+  let at: AST.Pattern = param
+  let prefix = ''
+  for (let depth = 0; depth < 8; depth++) {
+    if (at.type === 'Identifier') return prefix + at.name
+    if (at.type === 'AssignmentPattern') at = at.left
+    else if (at.type === 'RestElement') {
+      prefix = '...'
+      at = at.argument
+    } else break
+  }
+  return prefix + '?'
+}
+
+/** A JSDoc's text, the leading `*` of each line removed, cut at `MAX_DOC_CHARACTERS`; null when empty. */
+export function docText(text: string | undefined): string | null {
+  if (text === undefined) return null
+  const plain = text
+    .split(/\r\n?|\n/)
+    .map((line) => line.replace(/^\s*\*+\s?/, '').trimEnd())
+    .join('\n')
+    .trim()
+  if (!plain) return null
+  return plain.length > MAX_DOC_CHARACTERS ? `${plain.slice(0, MAX_DOC_CHARACTERS)}…` : plain
+}
+
+function exportsOf(text: string, facts: ScriptFacts, functions: ReadonlyMap<number, FunctionNode>): ModuleExports {
+  const starts = lineStarts(text)
+  const place = (range: { start: number; end: number }): Place => ({ start: range.start, end: range.end, line: lineAt(starts, range.start) })
+  const declaration = (id: number | null | undefined): Declaration | null => (id === null || id === undefined ? null : (facts.declarations[id] ?? null))
+  /** The function a value is, or names; null for anything else. */
+  const functionOf = (value: ValueFacts): FunctionNode | null => {
+    if (value.kind === 'function') return functions.get(value.start) ?? null
+    if (value.kind !== 'identifier') return null
+    const init = declaration(value.declaration)?.init
+    return init && (init.type === 'FunctionDeclaration' || init.type === 'FunctionExpression' || init.type === 'ArrowFunctionExpression') ? init : null
+  }
+  const byName = new Map<string, ExportedMember>()
+  for (const member of facts.exports.members) {
+    if (!byName.has(member.name) && byName.size >= MAX_EXPORTED_MEMBERS) continue
+    const fn = functionOf(member.value)
+    const named = member.value.kind === 'identifier' ? declaration(member.value.declaration) : null
+    byName.delete(member.name)
+    byName.set(member.name, {
+      name: member.name,
+      ...place(member),
+      kind: fn ? 'function' : 'value',
+      params: fn ? fn.params.map(paramName) : null,
+      definition: named ? place(named) : null,
+      doc: docText(member.doc?.text ?? named?.doc?.text)
+    })
+  }
+  const out = noExports()
+  out.members = [...byName.values()].sort((a, b) => a.start - b.start)
+  out.extendsSuper = facts.exports.superModule.extended
+  // A name bound to `require('x')`, by its declaration.
+  const required = new Map<number, string>()
+  for (const call of facts.requires) {
+    if (call.module !== null && call.member === null && call.binding?.kind === 'name' && call.binding.declaration !== null) required.set(call.binding.declaration, call.module)
+  }
+  const last = facts.exports.assignments[facts.exports.assignments.length - 1]
+  if (last) {
+    const value = last.value
+    const fn = functionOf(value)
+    out.value = fn ? 'function' : value.kind
+    out.place = place(last)
+    out.params = fn ? fn.params.map(paramName) : null
+    const named = value.kind === 'identifier' ? declaration(value.declaration) : null
+    out.doc = docText(last.doc?.text ?? named?.doc?.text)
+    const reexported = (each: ValueFacts) => {
+      // `require('x')` itself, not `require('x').member`.
+      if (each.kind === 'require' && each.module) return /\)\s*$/.test(text.slice(each.start, each.end)) ? each.module : null
+      if (each.kind === 'identifier' && each.declaration !== null && each.declaration !== undefined) return required.get(each.declaration) ?? null
+      return null
+    }
+    for (const each of [value, ...(last.bases ?? [])]) {
+      const module = reexported(each)
+      if (module !== null && !out.reexports.includes(module)) out.reexports.push(module)
+    }
+  }
+  return out
 }

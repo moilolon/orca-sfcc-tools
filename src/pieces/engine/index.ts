@@ -111,10 +111,12 @@ export {
   type RouteProblemCode,
   type RouteResolution,
   type RouteStep,
+  type ScriptEntry,
   type Storefront,
   type SuperModuleCopy,
   type SuperModuleResolution,
   type TemplateCopy,
+  type TemplateEntry,
   type TemplateResolution
 } from './checkout/checkout'
 export { type CheckoutFiles, type DirEntry, type EntryKind } from './checkout/files'
@@ -122,4 +124,47 @@ export { MemoryFiles } from './checkout/memory'
 export { SITE_PREFERENCES, type AttributeDefinition, type ObjectTypeKind } from './checkout/metadata'
 export { type PropertyKey } from './checkout/properties'
 export { SETTING_STOREFRONT, type PathSource, type SiteArchive } from './checkout/sites'
-export { type ControllerBase, type ControllerFacts, type RequireUse, type ResourceUse, type RouteMethod, type RouteOperation, type ScriptFileFacts, type TemplateFileFacts, type TemplateUse, type TemplateVia } from './checkout/scan'
+export {
+  type ControllerBase,
+  type ControllerFacts,
+  type ExportedMember,
+  type ExportedValue,
+  type ModuleExports,
+  type Place,
+  type RequireUse,
+  type ResourceUse,
+  type RouteMethod,
+  type RouteOperation,
+  type ScriptFileFacts,
+  type TemplateFileFacts,
+  type TemplateModule,
+  type TemplateUse,
+  type TemplateVia
+} from './checkout/scan'
+
+// The `dw.*` index (phase 6.1): the committed data/dw-api.json, checked and queried. Pure; the
+// caller reads the file, and descriptions are the worker's (`dw/describe.ts`).
+export { anchorOf, callableKey, DwIndexError, loadDwIndex, signature, simpleName, type DwCallableData, type DwClass, type DwClassData, type DwConstantData, type DwIndex, type DwIndexData, type DwMember, type DwMemberKind, type DwParam, type DwPropertyData, type DwType } from './dw/index'
+
+// The queries (phase 6.4): pure functions of the two indexes, a file's text and an offset,
+// answering in positions of that text. `analyse` reads the text once for every query on it.
+export { analyse, fileKind, type Analysis, type FileKind } from './query/analysis'
+export { complete, MAX_COMPLETION_ITEMS, type Completion, type CompletionContext, type CompletionItem, type CompletionKind } from './query/complete'
+export {
+  hover,
+  hoverItem,
+  MAX_HOVER_ENTRIES,
+  type CartridgeRouteEntry,
+  type Describe,
+  type DwMemberEntry,
+  type Hover,
+  type HoverContent,
+  type MemberDefinitionEntry,
+  type ResourceEntry,
+  type RouteEntry,
+  type RouteStepEntry
+} from './query/hover'
+export { ISML_TAG_ATTRIBUTES } from './query/isml-tags'
+export { cartridgeRoutes, type CartridgeRoute } from './query/routes'
+export { moduleCopies, moduleMember, moduleMembers, type MemberPlace, type ModuleCopy, type QueryContext } from './query/modules'
+export { GUESSED_NAMES, guessedClass, metadataTypeOf, Types, type QType, type TypeContext } from './query/types'

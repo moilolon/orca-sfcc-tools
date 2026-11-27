@@ -127,6 +127,12 @@ export type ResourceResolution = {
 
 export type RouteStep = RouteOperation & { path: string; cartridge: string }
 
+/** A template file: its name (`product/productDetails`), its locale folder and cartridge. */
+export type TemplateEntry = { name: string; locale: string; cartridge: string; path: string }
+
+/** A server script: its name inside a cartridge (`cartridge/scripts/helpers/priceHelper`), its cartridge and file. */
+export type ScriptEntry = { module: string; cartridge: string; kind: CartridgeKind; path: string }
+
 export type RouteProblemCode =
   /**
    * `append`, `prepend` or `replace` on a route the chain does not have. SFRA throws `Route with
@@ -399,6 +405,8 @@ export class CheckoutIndex {
   // What queries read: the last complete index (see `Published`), and what is computed from it.
   private published: Published = emptyPublished()
   private routeTables = new Map<string, Map<string, Map<string, RouteChain>>>()
+  /** Lists the queries read often, computed once per published state. */
+  private lists: { templates?: TemplateEntry[]; scripts?: ScriptEntry[]; bundles?: string[] } = {}
   private countsCache: IndexCounts | null = null
   private builtAt: number | null = null
   private buildMs: number | null = null
@@ -647,6 +655,7 @@ export class CheckoutIndex {
     // The swap: one assignment, with what is computed from the published state cleared with it.
     this.published = next
     this.routeTables = new Map()
+    this.lists = {}
     this.countsCache = null
   }
 
@@ -755,8 +764,12 @@ export class CheckoutIndex {
       this.gitError = null
       return this.gitCache
     } catch (error) {
-      this.gitCache = null
       this.gitError = error instanceof GitError ? error.code : 'git_failed'
+      // Only a successful read replaces what the ref gave: one failed check (git busy, a timeout,
+      // a fetch rewriting the refs) keeps the last good paths and metadata of the same ref, and
+      // says why in `gitError`. Another ref, or none read yet, gives nothing.
+      if (this.gitCache && this.gitCache.ref === ref) return this.gitCache
+      this.gitCache = null
       return null
     }
   }
@@ -966,7 +979,50 @@ export class CheckoutIndex {
     return { name: plain, locale: fallbacks[0], copies, candidates }
   }
 
+  /** Every template of every cartridge, by name, locale folder and cartridge. Sorted by name, then cartridge. */
+  templateList(): readonly TemplateEntry[] {
+    if (this.lists.templates) return this.lists.templates
+    const out: TemplateEntry[] = []
+    for (const entry of this.cartridgeList) {
+      if (entry.kind !== 'cartridge') continue
+      for (const rel of entry.paths) {
+        const match = /^cartridge\/templates\/([^/]+)\/(.+)\.isml$/i.exec(rel)
+        if (!match || match[1] === 'resources') continue
+        out.push({ name: match[2], locale: match[1], cartridge: entry.name, path: joinPath(entry.root, rel) })
+      }
+    }
+    out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.cartridge < b.cartridge ? -1 : a.cartridge > b.cartridge ? 1 : a.locale < b.locale ? -1 : 1))
+    return (this.lists.templates = out)
+  }
+
+  /** Every server script of every cartridge, as `*\/` names it (`cartridge/scripts/x`, no extension). Sorted. */
+  scriptList(): readonly ScriptEntry[] {
+    if (this.lists.scripts) return this.lists.scripts
+    const out: ScriptEntry[] = []
+    for (const [path, record] of this.records) {
+      if (record.kind !== 'script' && record.kind !== 'controller') continue
+      const cartridge = this.rootOf(path)
+      if (!cartridge || this.byName.get(cartridge.name) !== cartridge) continue
+      out.push({ module: path.slice(cartridge.root.length + 1).replace(/\.(js|ds)$/i, ''), cartridge: cartridge.name, kind: cartridge.kind, path })
+    }
+    out.sort((a, b) => (a.module < b.module ? -1 : a.module > b.module ? 1 : a.cartridge < b.cartridge ? -1 : 1))
+    return (this.lists.scripts = out)
+  }
+
   // ---- resource bundles
+
+  /** The name of every bundle, without its locale (`product` for `product_fr`), sorted. */
+  bundleNames(): readonly string[] {
+    if (this.lists.bundles) return this.lists.bundles
+    const names = new Set<string>()
+    for (const ofCartridge of this.bundles.values()) for (const file of ofCartridge.keys()) names.add(file.replace(/_[a-z]{2}(_[A-Z]{2})?$/, ''))
+    return (this.lists.bundles = [...names].sort())
+  }
+
+  /** Every key defined in any bundle, each with its definitions (every cartridge and locale). */
+  keyNames(): ReadonlyMap<string, readonly ResourceKey[]> {
+    return this.keyIndex
+  }
 
   /** `Resource.msg(key, bundle)` along each storefront's path; a null bundle is the default one, `locale`. */
   resolveResource(key: string, bundle: string | null, locale = 'default'): ResourceResolution {
