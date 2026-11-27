@@ -163,6 +163,17 @@ async function until(done: () => boolean, what: string): Promise<void> {
   await settle()
 }
 
+/**
+ * Waits until `done` holds, for up to `ms` of real time: what goes through the data folder waits on
+ * the disk and its lock, not only on the event loop.
+ */
+async function waitFor(done: () => boolean, what: string, ms = 10_000): Promise<void> {
+  const end = Date.now() + ms
+  while (!done() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.ok(done(), what)
+  await settle()
+}
+
 function newCount(list: RoleErrors): number {
   return list.rows.filter((row) => row.markedAt === null).length
 }
@@ -550,13 +561,13 @@ test('the status bar counts the sandbox’s new errors, hidden at zero', async (
     assert.deepEqual(updates().at(-1), { id: STATUS_ITEM, text: '0', tooltip: 'New errors on the sandbox: 0', visible: false })
     const list = await readNow(worker, { role: 'sandbox' })
     // The count is read from the data folder once the read ended: it follows a moment after.
-    await until(() => updates().at(-1)?.text === '5', 'the count follows the read')
+    await waitFor(() => updates().at(-1)?.text === '5', 'the count follows the read')
     assert.deepEqual(updates().at(-1), { id: STATUS_ITEM, text: '5', tooltip: 'New errors on the sandbox: 5', visible: true })
     const before = updates().length
     await readNow(worker, { role: 'development' })
     assert.equal(updates().length, before, 'another environment leaves it alone')
     await worker.request('errors.mark', { role: 'sandbox', signatures: list.rows.map((row) => row.signature) })
-    await until(() => updates().at(-1)?.visible === false, 'hidden once every error is marked')
+    await waitFor(() => updates().at(-1)?.visible === false, 'hidden once every error is marked')
     assert.deepEqual(worker.refusals, [])
     await worker.deactivate()
   } finally {
@@ -913,13 +924,13 @@ test('the seen lists an older version kept in storage are copied to seen.json on
     const storage = { 'errors.seen.sandbox': { aaaa: marked, bbbb: fresh }, 'errors.seen.staging': { cccc: fresh }, 'errors.cursor.sandbox': { at: 6, files: {}, sizes: {} } }
     const host = hostFor(root, {}, storage as unknown as Record<string, never>)
     const { worker } = await mountPiece(host, b2cAnswering())
-    await until(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
     assert.deepEqual(seenFileOf(host), { version: 1, roles: { sandbox: { aaaa: marked, bbbb: fresh }, staging: { cccc: fresh } } })
     // Storage is left alone: an older copy of the plugin still reads it.
     assert.deepEqual(worker.host.data().storage['errors.seen.sandbox'], storage['errors.seen.sandbox'])
     const list = await worker.request('errors.list', { role: 'sandbox' })
     assert.deepEqual(list.rows.map((row) => [row.signature, row.markedAt]), [['bbbb', null], ['aaaa', 2]])
-    await until(() => (paramsOf(worker.host, 'statusBar.update').at(-1) as { text?: string } | undefined)?.text === '1', 'the counter shows what was copied')
+    await waitFor(() => (paramsOf(worker.host, 'statusBar.update').at(-1) as { text?: string } | undefined)?.text === '1', 'the counter shows what was copied')
     await worker.request('errors.mark', { role: 'sandbox', signatures: ['bbbb'] })
     await worker.deactivate()
 
@@ -948,7 +959,7 @@ test('a seen.json another copy of the plugin already wrote is never overwritten 
     const written = { version: 1, roles: { sandbox: { zzzz: { ...record, markedAt: 2 } } } }
     writeFileSync(join(dataFolderOf(host), SEEN_FILE), JSON.stringify(written))
     const { worker } = await mountPiece(host, b2cAnswering())
-    await until(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
     assert.deepEqual(seenFileOf(host), written)
     await worker.deactivate()
   } finally {
@@ -961,7 +972,7 @@ test('with nothing in storage to copy, starting writes nothing to the data folde
   try {
     const host = hostFor(root)
     const { worker } = await mountPiece(host, b2cAnswering())
-    await until(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
+    await waitFor(() => worker.host.data().storage['errors.seenMoved'] === true, 'the move is marked')
     assert.deepEqual(readdirSync(dataFolderOf(host)), [])
     await worker.deactivate()
   } finally {
