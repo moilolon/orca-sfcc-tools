@@ -12,9 +12,10 @@
 // one reads only the files whose time changed. The two settings, `cartridgePath` and
 // `metadataRef`, rebuild the paths when changed.
 //
-// The queries, `engine.complete` and `engine.hover`, read the editor's text with the index of the
-// workspace named when it is the one indexed; for another, only what needs no checkout answers.
-// The last few texts read are kept, so the queries on one text parse it once. A hover of a
+// The queries (`engine.complete`, `engine.hover`, `engine.definition`, `engine.references`,
+// `engine.signature`) read the editor's text with the index of the workspace named when it is
+// the one indexed; for another, only what needs no checkout answers. The last few texts read are
+// kept, so the queries on one text parse it once. A hover of a
 // `dw.*` class or member waits up to `DESCRIBE_WAIT_MS` for its description, read through
 // `b2c docs read` (masked, kept in memory only); a page that comes late is there for the next.
 //
@@ -43,16 +44,19 @@ import { createOpenFile, type OpenFile, type OpenFileFailure } from '../../core/
 import type {
   EngineAnswerState,
   EngineCompletion,
+  EngineDefinition,
   EngineHover,
   EngineIndexState,
   EngineIndexStatus,
   EngineProblems,
   EngineQuery,
   EngineQueryError,
+  EngineReferences,
+  EngineSignature,
   OpenProblemResult,
   ProblemsList,
   ProblemsOfFile,
-  ProblemsState,
+  ProblemsState
 } from './protocol'
 import { messages } from './i18n'
 import { CheckoutProblems, emptyCounts } from './problems/checkout'
@@ -60,8 +64,11 @@ import { listPage, listQuery, matchProblems } from './problems/list'
 import { newProblems, type Problem, type ProblemArgs } from './problems/problem'
 import { analyse, type Analysis } from './query/analysis'
 import { complete } from './query/complete'
+import { definition } from './query/definition'
 import { hover, hoverItem } from './query/hover'
 import type { QueryContext } from './query/modules'
+import { references } from './query/references'
+import { signatureHelp } from './query/signature'
 
 /** The piece's settings, declared in its manifest. */
 export const SETTING_CARTRIDGE_PATH = 'cartridgePath'
@@ -679,6 +686,14 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           .catch(() => undefined)
       }
 
+      /** A query answered from the index and the text alone: definition, references, signature help. */
+      async function onQuery<T>(input: unknown, run: (query: QueryContext, analysis: Analysis, offset: number) => T | null): Promise<EngineAnswerState & { result: T | null }> {
+        const checked = checkQuery(input)
+        if ('error' in checked) return { index: 'none', error: checked.error, result: null }
+        const { query, state } = await queryContext(checked.query.workspaceId)
+        return { index: state, error: null, result: run(query, analysisOf(checked.query), checked.query.offset) }
+      }
+
       const startTimer = setTimer(() => void retargetOnce().catch(() => undefined), START_DELAY_MS)
       scheduleRefCheck()
       const disposables: Disposable[] = [
@@ -713,6 +728,18 @@ export function createEnginePiece(deps: EngineDeps = {}): WorkerPiece {
           } catch {
             // Whatever happens here, the save goes on.
           }
+        }),
+        ctx.orca.panels.handle('engine.definition', async (input): Promise<EngineDefinition> => {
+          const { result, ...answer } = await onQuery(input, definition)
+          return { ...answer, definition: result }
+        }),
+        ctx.orca.panels.handle('engine.references', async (input): Promise<EngineReferences> => {
+          const { result, ...answer } = await onQuery(input, references)
+          return { ...answer, references: result }
+        }),
+        ctx.orca.panels.handle('engine.signature', async (input): Promise<EngineSignature> => {
+          const { result, ...answer } = await onQuery(input, signatureHelp)
+          return { ...answer, signature: result }
         }),
         ctx.settings.onDidChange((key) => {
           if (key !== SETTING_CARTRIDGE_PATH && key !== SETTING_METADATA_REF) return

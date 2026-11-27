@@ -129,6 +129,7 @@ export {
   type ControllerFacts,
   type ExportedMember,
   type ExportedValue,
+  type MemberUse,
   type ModuleExports,
   type Place,
   type RequireUse,
@@ -139,7 +140,8 @@ export {
   type TemplateFileFacts,
   type TemplateModule,
   type TemplateUse,
-  type TemplateVia
+  type TemplateVia,
+  SUPER_MODULE
 } from './checkout/scan'
 
 // The `dw.*` index (phase 6.1): the committed data/dw-api.json, checked and queried. Pure; the
@@ -164,6 +166,9 @@ export {
   type RouteEntry,
   type RouteStepEntry
 } from './query/hover'
+export { definition, MAX_TARGETS, type Definition, type DefinitionKind, type Target } from './query/definition'
+export { MAX_REFERENCES, references, type ReferenceEntry, type References } from './query/references'
+export { MAX_SIGNATURES, signatureHelp, type Signature, type SignatureHelp, type SignatureParameter } from './query/signature'
 export { ISML_TAG_ATTRIBUTES } from './query/isml-tags'
 export { cartridgeRoutes, type CartridgeRoute } from './query/routes'
 export { moduleCopies, moduleMember, moduleMembers, type MemberPlace, type ModuleCopy, type QueryContext } from './query/modules'
