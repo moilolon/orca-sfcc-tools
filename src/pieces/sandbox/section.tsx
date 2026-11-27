@@ -8,7 +8,7 @@ import { atom, Button, Code, Collapsible, IconButton, plugin, read, RelativeTime
 import { t } from '../../core/i18n'
 import type { PanelSection } from '../../core/piece'
 import { openSetup } from '../../panel/navigation'
-import { Actions, Empty, ErrorState, Group, ListRow, Notice, NoticeLine, PAGE_SIZE, ShowMore, StateMark, type NoticeAction, type StateTone } from '../../panel/ui'
+import { Actions, Empty, ErrorState, Group, ListRow, MAX_ROWS, Notice, NoticeLine, PAGE_SIZE, ShowMore, StateMark, type NoticeAction, type StateTone } from '../../panel/ui'
 import { messages, wordSandboxError, type SandboxMessageKey } from './i18n'
 import type { SandboxAction, SandboxStatus, SandboxWorkspace, UploadState } from './protocol'
 
@@ -301,7 +301,7 @@ function LeftoversGroup({ current, locale, ready, busy }: { current: SandboxStat
   const picked = read(chosenLeftover)
   return (
     <Group title={w('groupLeftovers')}>
-      {current.leftovers.map((leftover) => {
+      {current.leftovers.slice(0, MAX_ROWS).map((leftover) => {
         if (!leftover.checkable) return <ListRow key={leftover.workspaceId} tone="off" title={leftover.codeVersion} note={w('noteHiddenProject')} />
         const confirming = picked === leftover.workspaceId
         const actions = confirming ? (
@@ -316,6 +316,11 @@ function LeftoversGroup({ current, locale, ready, busy }: { current: SandboxStat
         )
         return <ListRow key={leftover.workspaceId} tone={confirming ? 'attention' : 'off'} title={leftover.codeVersion} note={w('noteNotListed')} current={confirming} actions={actions} />
       })}
+      {current.leftovers.length > MAX_ROWS ? (
+        <Text size="sm" muted>
+          {t(messages, locale, 'notShown', { count: current.leftovers.length - MAX_ROWS })}
+        </Text>
+      ) : null}
     </Group>
   )
 }
@@ -366,5 +371,14 @@ export const section: PanelSection = {
     ctx.subscriptions.push(plugin.on('sandbox.changed', (next) => keepStatus(next)))
     void load()
   },
-  render: renderSandbox
+  render: renderSandbox,
+  reset: resetSandboxView
+}
+
+/** Closes what is open in the view: the pages of workspaces drawn and any choice waiting to be confirmed. */
+export function resetSandboxView(): void {
+  set(shownInProject, PAGE_SIZE)
+  set(shownElsewhere, PAGE_SIZE)
+  set(chosen, null)
+  set(chosenLeftover, null)
 }

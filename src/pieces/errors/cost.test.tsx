@@ -2,7 +2,8 @@
 // answer that changes nothing draws nothing, and the worker's event draws the view once.
 import { afterEach, assert, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import type { Role } from '../../core/instances'
-import { PAGE_SIZE } from '../../panel/ui'
+import { MAX_ROWS, PAGE_SIZE } from '../../panel/ui'
+import { treeCost, VIEW_BUDGET } from '../../panel/panel'
 import type { ErrorRow, RoleErrors } from './protocol'
 import { section } from './section'
 
@@ -66,4 +67,33 @@ test('500 errors: a page of each list drawn, few nodes, one draw per change and 
   assert.equal(unchanged, 0)
   assert.equal(changed, 1)
   assert.ok(nodes < 1500, `${nodes} nodes`)
+})
+
+test('500 errors with both lists shown to their cap: an ordinary view, drawn, under the budget by Orca’s measure', async () => {
+  const long = (role: Role): RoleErrors => ({
+    role,
+    state: 'ready',
+    reading: false,
+    lastRead: NOW,
+    error: null,
+    missedSince: null,
+    intervalMinutes: 5,
+    rows: rows().map((row) => ({ ...row, message: `${row.message} ${'word '.repeat(52)}`.slice(0, 290) }))
+  })
+  panel = await mount({ setup: section.setup, default: () => section.render('en') }, { host: mockHost({ capabilities: CAPABILITIES, requests: { 'errors.list': ({ role }: { role: Role }) => long(role) } }) })
+  for (;;) {
+    const more = panel.findAll({ type: 'Button' }).find((button) => /^Show \d+ more$/.test(button.text))
+    if (!more) break
+    await panel.press(more)
+  }
+  await panel.toggle({ type: 'Collapsible', label: 'Seen (200)' })
+  for (;;) {
+    const more = panel.findAll({ type: 'Button' }).find((button) => /^Show \d+ more$/.test(button.text))
+    if (!more) break
+    await panel.press(more)
+  }
+  assert.equal(panel.findAll({ type: 'Link' }).length, 2 * MAX_ROWS)
+  const cost = treeCost(panel.tree())
+  console.log(`errors at the cap: ${2 * MAX_ROWS} rows, ${Math.round(cost.bytes / 1024)} KiB and ${cost.nodes} nodes by Orca's measure`)
+  assert.ok(cost.bytes < VIEW_BUDGET.bytes && cost.nodes < VIEW_BUDGET.nodes)
 })

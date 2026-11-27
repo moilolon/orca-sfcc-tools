@@ -448,5 +448,15 @@ export const section: PanelSection = {
     const failure = read(failures)[role]
     if (!answer && !failure) return null
     return <ErrorsView answer={answer} failure={failure} locale={locale ?? env.locale} busy={read(pending)} />
-  }
+  },
+  reset: resetErrorsView
+}
+
+/** Closes what is open in the view: an error's detail, the pages of rows drawn, its notes. */
+export function resetErrorsView(): void {
+  update(openError, () => null)
+  update(shownNew, () => PAGE_SIZE)
+  update(shownSeen, () => PAGE_SIZE)
+  update(openProblem, () => null)
+  update(breakpointNote, () => null)
 }

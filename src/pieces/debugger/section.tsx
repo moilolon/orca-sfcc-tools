@@ -31,7 +31,7 @@ import {
 import { languageOf, t, wordError } from '../../core/i18n'
 import type { PanelSection } from '../../core/piece'
 import { openSetup } from '../../panel/navigation'
-import { Empty, ErrorState, Group, ListRow, Notice, NoticeLine, StateMark, type StateTone } from '../../panel/ui'
+import { Empty, ErrorState, Group, ListRow, Notice, NoticeLine, PAGE_SIZE, ShowMore, StateMark, type StateTone } from '../../panel/ui'
 import { messages, type MessageKey } from './i18n'
 import type { BreakpointView, DebuggerScripts, DebuggerSource, DebuggerState, Frame, SessionStatus, StepKind, Thread } from './protocol'
 
@@ -73,6 +73,21 @@ const sourceError = atom<string | null>(null)
 const lineFilter = atom('')
 /** How many lines are drawn while nothing filters them; scrolling to the end draws more. */
 const windowStart = atom(1)
+/**
+ * How many entries each open folder of the list of scripts draws, by its key, past `FOLDER_ENTRIES`
+ * once its *more* item was pressed. Not kept: reopening the panel draws each folder's first ones.
+ */
+const folderShown = atom<Record<string, number>>({})
+/** How many breakpoints are drawn: a long list is paged. */
+const shownBreakpoints = atom(PAGE_SIZE)
+
+/** How many entries an open folder (or the list of cartridges) draws at first, and adds per press. */
+export const FOLDER_ENTRIES = 50
+/**
+ * The most items the list of scripts holds in all, however many folders are open: well under the
+ * 2,000 Orca draws in one Tree and far under a view's budget. Past it, a folder says to search.
+ */
+export const TREE_ITEMS = 600
 /** Which halt the variables belong to: thread and top frame. */
 let haltKey = ''
 let locale = 'en'
@@ -307,12 +322,14 @@ async function evaluate(): Promise<void> {
 }
 
 /** The tree items under `keys`, as far as they were read. */
-function treeItems(keys: readonly string[], all: Record<string, VariableNode>, depth = 0): TreeItem[] {
+function treeItems(keys: readonly string[], all: Record<string, VariableNode>, open: ReadonlySet<string>, depth = 0): TreeItem[] {
   return keys.flatMap((key): TreeItem[] => {
     const node = all[key]
     if (!node) return []
     const item: TreeItem = { key, label: node.label, description: node.description }
-    if (node.children && depth < 48) return [{ ...item, children: treeItems(node.children, all, depth + 1) }]
+    // Only an open item carries its children: what was read and folded again sends nothing. Orca
+    // nests a Tree 16 deep at most.
+    if (node.children && open.has(key) && depth < 15) return [{ ...item, children: treeItems(node.children, all, open, depth + 1) }]
     return [{ ...item, hasChildren: node.reference > 0 }]
   })
 }
@@ -539,7 +556,32 @@ function counts(encoded: string): Map<string, number> {
 }
 
 /** A cartridge's files as a tree of folders, opened folders with their children. */
-function folderItems(prefix: string, files: readonly string[], open: readonly string[], marks: Map<string, number>, at: string): TreeItem[] {
+/** What the list of scripts draws from: the folders open, how many entries each shows, what is left. */
+type TreeDraw = { open: readonly string[]; shown: Readonly<Record<string, number>>; marks: Map<string, number>; at: string; left: number }
+
+/**
+ * A level of the list of scripts, at most its share: the first `FOLDER_ENTRIES` of a folder (more
+ * once its *more* item is pressed), then one item saying how many more; and nothing past
+ * `TREE_ITEMS` in all, where one item says to search instead. `entries` are the level's items, built
+ * only when drawn.
+ */
+function capped(key: string, entries: readonly (() => TreeItem)[], draw: TreeDraw): TreeItem[] {
+  const wanted = Math.min(entries.length, draw.shown[key] ?? FOLDER_ENTRIES)
+  const items: TreeItem[] = []
+  for (let i = 0; i < wanted; i++) {
+    if (draw.left <= 0) {
+      items.push({ key: `s:${key}`, label: t(messages, draw.at, 'searchForMore', { count: entries.length - i }), icon: 'search', disabled: true })
+      return items
+    }
+    draw.left -= 1
+    items.push(entries[i]())
+  }
+  if (wanted < entries.length) items.push({ key: `m:${key}`, label: t(messages, draw.at, 'moreEntries', { count: entries.length - wanted }), icon: 'more' })
+  return items
+}
+
+function folderItems(prefix: string, files: readonly string[], draw: TreeDraw): TreeItem[] {
+  const { open, marks, at } = draw
   const folders = new Map<string, string[]>()
   const leaves: string[] = []
   for (const file of files) {
@@ -551,17 +593,19 @@ function folderItems(prefix: string, files: readonly string[], open: readonly st
       folders.set(folder, [...(folders.get(folder) ?? []), file])
     }
   }
-  const items: TreeItem[] = [...folders.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([folder, inside]) => {
+  const entries: (() => TreeItem)[] = [...folders.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([folder, inside]) => () => {
     const key = `d:${folder}`
     return open.includes(key)
-      ? { key, label: baseName(folder), icon: 'folder', children: folderItems(folder, inside, open, marks, at) }
+      ? { key, label: baseName(folder), icon: 'folder', children: folderItems(folder, inside, draw) }
       : { key, label: baseName(folder), icon: 'folder', hasChildren: true }
   })
   for (const file of leaves.sort((a, b) => a.localeCompare(b))) {
-    const count = marks.get(file) ?? 0
-    items.push({ key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? t(messages, at, 'bpCount', { count }) : undefined })
+    entries.push(() => {
+      const count = marks.get(file) ?? 0
+      return { key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? t(messages, at, 'bpCount', { count }) : undefined }
+    })
   }
-  return items
+  return capped(`d:${prefix}`, entries, draw)
 }
 
 /** The scripts whose path holds every word of `query`, the file's own name matching first. */
@@ -610,12 +654,17 @@ function scriptItemsIn(at: string): { items: TreeItem[]; more: boolean } {
       return { key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? t(messages, at, 'bpCount', { count }) : baseName(folder) }
     })
   } else {
-    items = list.cartridges.map((cartridge) => {
-      const key = `c:${cartridge.path}`
-      return open.includes(key)
-        ? { key, label: cartridge.name, icon: 'package', children: folderItems(cartridge.path, cartridge.files, open, marks, at) }
-        : { key, label: cartridge.name, icon: 'package', hasChildren: cartridge.files.length > 0 }
-    })
+    const draw: TreeDraw = { open, shown: read(folderShown), marks, at, left: TREE_ITEMS }
+    items = capped(
+      'root',
+      list.cartridges.map((cartridge) => () => {
+        const key = `c:${cartridge.path}`
+        return open.includes(key)
+          ? { key, label: cartridge.name, icon: 'package', children: folderItems(cartridge.path, cartridge.files, draw) }
+          : { key, label: cartridge.name, icon: 'package', hasChildren: cartridge.files.length > 0 }
+      }),
+      draw
+    )
   }
   return { items, more }
 }
@@ -632,6 +681,12 @@ function ScriptBrowser() {
   const { items, more } = read(scriptItems(locale))
   const pick = (key: string) => {
     if (key.startsWith('f:')) showScript(key.slice(2))
+    // A folder's *more* item draws a page more of it.
+    if (key.startsWith('m:')) {
+      const folder = key.slice(2)
+      const shown = read(folderShown)
+      set(folderShown, { ...shown, [folder]: (shown[folder] ?? FOLDER_ENTRIES) + FOLDER_ENTRIES })
+    }
   }
   return (
     <Stack gap="xs">
@@ -803,7 +858,7 @@ function Variables() {
           {text('noScopes')}
         </Text>
       ) : (
-        <Tree label={text('variables')} items={treeItems(keys, all)} expanded={read(expanded)} maxHeight="md" onToggle={(item) => void toggle(item.key, item.expanded)} />
+        <Tree label={text('variables')} items={treeItems(keys, all, new Set(read(expanded)))} expanded={read(expanded)} maxHeight="md" onToggle={(item) => void toggle(item.key, item.expanded)} />
       )}
     </Group>
   )
@@ -863,6 +918,8 @@ function BreakpointRow({ file, line, verified, name }: { file: BreakpointView; l
 function Breakpoints({ current }: { current: DebuggerState }) {
   const files = current.breakpoints
   const names = shortNames(files.map((file) => file.path))
+  const rows = files.flatMap((file) => file.lines.map((each) => ({ file, line: each.line, verified: each.verified })))
+  const shown = read(shownBreakpoints)
   return (
     <Group
       title={text('breakpoints')}
@@ -877,8 +934,15 @@ function Breakpoints({ current }: { current: DebuggerState }) {
       {files.length === 0 ? (
         <Empty title={text('noBreakpointsTitle')} guidance={text('noBreakpointsBody')} icon="flag" />
       ) : (
-        files.flatMap((file) => file.lines.map((each) => <BreakpointRow key={`bp-${file.path}:${each.line}`} file={file} line={each.line} verified={each.verified} name={names[file.path] ?? file.path} />))
+        rows.slice(0, shown).map(({ file, line, verified }) => <BreakpointRow key={`bp-${file.path}:${line}`} file={file} line={line} verified={verified} name={names[file.path] ?? file.path} />)
       )}
+      <ShowMore
+        shown={shown}
+        total={rows.length}
+        label={(left) => text('showMore', { count: left })}
+        capped={(left) => text('notShown', { count: left })}
+        onPress={() => set(shownBreakpoints, shown + PAGE_SIZE)}
+      />
     </Group>
   )
 }
@@ -923,5 +987,24 @@ export const section: PanelSection = {
     locale = at
     const current = read(state)
     return current ? <View current={current} /> : null
-  }
+  },
+  reset: resetView
+}
+
+/**
+ * Closes whatever is open in the view, kept or not: the folders of the list of scripts and how much
+ * of each is drawn, the open script with its window and search, the search of scripts, the open
+ * variables (read again folded, from the frame shown), and the pages of breakpoints drawn. The
+ * breakpoints themselves stay.
+ */
+export function resetView(): void {
+  set(scriptsOpen, [])
+  set(folderShown, {})
+  set(scriptQuery, '')
+  closeScript()
+  set(windowStart, 1)
+  set(shownBreakpoints, PAGE_SIZE)
+  const frame = read(frameId)
+  resetVariables()
+  if (frame !== null) void loadScopes(frame)
 }

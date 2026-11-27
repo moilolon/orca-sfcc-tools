@@ -8,7 +8,9 @@ import * as panelModule from '../../panel/panel'
 import { READY_STATUS } from '../../panel/scenarios'
 import type { DebuggerState, Variable } from './protocol'
 import { scenarios } from './scenarios'
-import { findScripts, MAX_CHILDREN, shortNames, toggledLine, visibleLines, WINDOW_LINES, wordReason } from './section'
+import { FOLDER_ENTRIES, findScripts, MAX_CHILDREN, resetView, shortNames, toggledLine, TREE_ITEMS, visibleLines, WINDOW_LINES, wordReason } from './section'
+import { ORCA_LIMITS, treeCost, VIEW_BUDGET } from '../../panel/panel'
+import { PAGE_SIZE } from '../../panel/ui'
 
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
@@ -372,4 +374,59 @@ test('every text the view draws fits two lines of a 300 px sidebar, in both lang
       if (!notDrawn.test(key)) assert.ok(value.length <= NOTICE_MAX_CHARS, `${language} ${key}: ${value.length} characters`)
     }
   }
+})
+
+/** A cartridge of 4 folders of 500 scripts each, and 300 breakpoints over 30 of its files. */
+function crowded() {
+  const folders = ['controllers', 'models', 'scripts', 'services']
+  const files = folders.flatMap((folder) => Array.from({ length: 500 }, (_, i) => `cartridges/app_big/cartridge/${folder}/file${String(i).padStart(3, '0')}.js`))
+  const breakpoints = Array.from({ length: 30 }, (_, f) => ({ path: files[f], lines: Array.from({ length: 10 }, (_, l) => ({ line: l * 10 + 1, verified: true })) }))
+  const open = ['c:cartridges/app_big', 'd:cartridges/app_big/cartridge', ...folders.map((folder) => `d:cartridges/app_big/cartridge/${folder}`)]
+  const state: DebuggerState = { ...stateOf('debuggerAttached'), breakpoints }
+  return { files, open, state, requests: { ...scenarios.debuggerAttached.requests, 'debugger.state': () => state, 'debugger.scripts': () => ({ cartridges: [{ name: 'app_big', path: 'cartridges/app_big', files }], truncated: false }) } }
+}
+
+test('4 folders of 500 scripts open and 300 breakpoints: the view draws, each list capped, and a reset closes the folders', async () => {
+  const { open: folders, requests } = crowded()
+  const target = await open(requests, 'en', { debuggerScriptsOpen: folders })
+  assert.deepEqual(target.errors, [])
+  assert.equal(target.find({ text: /too large/ }), null, 'the view draws')
+  const cost = treeCost(target.tree())
+  assert.ok(cost.bytes < VIEW_BUDGET.bytes / 2, `${cost.bytes} bytes`)
+  // Each open folder draws its first entries, then one item for the rest.
+  const tree = target.find({ type: 'Tree', label: 'Scripts' })?.props.items as { key: string; children?: unknown[] }[]
+  const count = (items: { children?: unknown[] }[]): number => items.reduce((sum, item) => sum + 1 + count((item.children ?? []) as { children?: unknown[] }[]), 0)
+  assert.ok(count(tree) <= TREE_ITEMS + 10, `${count(tree)} items`)
+  const text = JSON.stringify(tree)
+  assert.ok(text.includes(`"m:d:cartridges/app_big/cartridge/controllers"`))
+  assert.ok(text.includes(`Show ${500 - FOLDER_ENTRIES} more`))
+  // The breakpoints are paged: 25 drawn, then Show more.
+  assert.equal(target.findAll({ type: 'IconButton' }).filter((item) => String(item.props.label).startsWith('Remove ')).length, PAGE_SIZE)
+  assert.ok(target.find({ type: 'Button', text: `Show ${300 - PAGE_SIZE} more` }))
+  // A folder's more item draws a page more of it.
+  await target.selectItem({ type: 'Tree', label: 'Scripts' }, 'm:d:cartridges/app_big/cartridge/controllers')
+  assert.ok(JSON.stringify(target.find({ type: 'Tree', label: 'Scripts' })?.props.items).includes(`Show ${500 - 2 * FOLDER_ENTRIES} more`))
+  // The reset closes what is open, kept or not; the breakpoints stay.
+  resetView()
+  await target.settled()
+  assert.deepEqual(target.persisted.plugin.debuggerScriptsOpen, [])
+  assert.match(target.summary().join('\n'), /Tree "Scripts": 1 top-level item/)
+  assert.ok(target.find({ type: 'Button', text: `Show ${300 - PAGE_SIZE} more` }))
+  assert.equal(target.find({ text: /too large/ }), null)
+})
+
+test('variables whose values are control characters: the guard stops the view before Orca would, and the reset folds them', async () => {
+  // 300 variables, each 400 characters that JSON writes as 6 each: one scope open is past the budget.
+  const values: Variable[] = Array.from({ length: 300 }, (_, i) => ({ name: `v${i}`, value: '\u0001'.repeat(400), reference: 100 + i, expensive: false }))
+  const target = await open({
+    ...scenarios.debuggerHalted.requests,
+    'debugger.variables': (input: { frameId?: number; reference?: number }) => (typeof input.frameId === 'number' ? (scenarios.debuggerHalted.requests?.['debugger.variables'] as () => Variable[])() : values)
+  })
+  await target.expand({ type: 'Tree', label: 'Variables' }, 'f70000/0')
+  assert.deepEqual(target.errors, [], 'Orca refused nothing')
+  assert.match(target.summary().join('\n'), /Debugger is too large to draw/)
+  assert.ok(treeCost(target.tree()).bytes < ORCA_LIMITS.bytes)
+  await target.press({ role: 'button', text: 'Reset view' })
+  assert.equal(target.find({ text: /too large/ }), null)
+  assert.ok(target.find({ type: 'Tree', label: 'Variables' }), 'the scopes are read again, folded')
 })

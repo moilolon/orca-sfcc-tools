@@ -4,7 +4,7 @@
 import { afterEach, assert, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import type { DebuggerScripts, DebuggerSource, DebuggerState } from './protocol'
 import { section, WINDOW_LINES } from './section'
-import { VIEW_BUDGET } from '../../panel/panel'
+import { treeCost, VIEW_BUDGET } from '../../panel/panel'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const PATH = 'cartridges/app_example/cartridge/scripts/long.js'
@@ -97,9 +97,10 @@ test('a 10,000-line script of the longest lines, paged from the first line to th
   let largest = 0
   let pages = 0
   for (;;) {
-    const size = JSON.stringify(panel.tree()).length
+    // Measured the way Orca measures what it receives.
+    const size = treeCost(panel.tree()).bytes
     largest = Math.max(largest, size)
-    assert.ok(size < VIEW_BUDGET, `page ${pages}: ${size} bytes`)
+    assert.ok(size < VIEW_BUDGET.bytes, `page ${pages}: ${size} bytes`)
     assert.ok(panel.rowsOf(table).length <= WINDOW_LINES)
     const next = panel.find({ role: 'button', label: 'Next lines' })
     if (!next || next.disabled) break
@@ -107,5 +108,5 @@ test('a 10,000-line script of the longest lines, paged from the first line to th
     pages++
   }
   assert.equal(panel.rowsOf(table).at(-1), '10000', 'it reached the last line')
-  console.log(`debugger window: 10,000 lines of 240 characters in ${pages + 1} windows, the largest tree ${Math.round(largest / 1024)} KiB of a ${VIEW_BUDGET / 1024} KiB budget`)
+  console.log(`debugger window: 10,000 lines of 240 characters in ${pages + 1} windows, the largest tree ${Math.round(largest / 1024)} KiB of a ${VIEW_BUDGET.bytes / 1024} KiB budget, by Orca's measure`)
 })
