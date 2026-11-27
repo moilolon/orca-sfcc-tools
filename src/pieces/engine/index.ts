@@ -154,6 +154,7 @@ export {
   hover,
   hoverItem,
   MAX_HOVER_ENTRIES,
+  type CartridgeRouteEntry,
   type Describe,
   type DwMemberEntry,
   type Hover,
@@ -164,5 +165,6 @@ export {
   type RouteStepEntry
 } from './query/hover'
 export { ISML_TAG_ATTRIBUTES } from './query/isml-tags'
+export { cartridgeRoutes, type CartridgeRoute } from './query/routes'
 export { moduleCopies, moduleMember, moduleMembers, type MemberPlace, type ModuleCopy, type QueryContext } from './query/modules'
 export { GUESSED_NAMES, guessedClass, metadataTypeOf, Types, type QType, type TypeContext } from './query/types'

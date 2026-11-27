@@ -261,8 +261,11 @@ Changing it needs the owner's yes.
       then `@type`/`@param`, the globals (`request`, `session`, `customer`, `response`, global
       functions; `pdict` unknown; `Resource`, `URLUtils`, `StringUtils` in a template only), and
       the previous call in a chain; a module function's `@returns` when every copy agrees. One
-      variable, one type: two types, an unknown value, a JSDoc tag that disagrees, any write but
-      a plain `=`, or a name inside a pattern, make it unknown. The committed index marks no
+      variable, one type, over the whole binding (every declaration of a name in one function,
+      its parameter included: `analysis.bindings`): two types, an unknown value, a JSDoc tag that
+      disagrees, any write but a plain `=`, or a name inside a pattern, make it unknown. A
+      parameter is typed by its `@param` only (the caller passes anything); a name inside `with`
+      is unknown. The committed index marks no
       property static, so a property is static when its getter is (`Site.current`). Statics are
       read off the class (`Object`'s own aside), the rest off an instance. `modules.ts`: the
       copies a `require` reaches and the members each exports, its re-exports and
@@ -272,7 +275,10 @@ Changing it needs the owner's yes.
       (`isml-tags.ts`), template paths, `dw.*` members, custom attributes and site preferences,
       a module's members, resource keys and bundles, `require` paths, route ids; each item has a
       kind, a detail and an id `hoverItem` expands. A type is guessed from a name only for
-      `name.custom.` with nothing else known, from `GUESSED_NAMES` (said `guessed`). `hover.ts`
+      `name.custom.` with nothing else known, from `GUESSED_NAMES` (said `guessed`), and only
+      for a name whose values are all read from elsewhere (`guessable`). With no storefront path,
+      routes are those every cartridge's controllers declare, labelled with their cartridge
+      (`routes.ts`). `hover.ts`
       answers data, not words (the editor words it from `i18n.ts`): a `dw.*` member or class with
       `describe`, a module and its copy per storefront, a member and where each copy defines it,
       `module.superModule`, a route (its steps in the order they run and the one that serves),

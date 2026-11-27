@@ -9,7 +9,7 @@ import type { Hover } from './query/hover'
 
 export type { IndexStatus }
 export type { Completion, CompletionContext, CompletionItem, CompletionKind } from './query/complete'
-export type { Describe, DwMemberEntry, Hover, HoverContent, MemberDefinitionEntry, ResourceEntry, RouteEntry, RouteStepEntry } from './query/hover'
+export type { CartridgeRouteEntry, Describe, DwMemberEntry, Hover, HoverContent, MemberDefinitionEntry, ResourceEntry, RouteEntry, RouteStepEntry } from './query/hover'
 
 /**
  * `none`: no workspace to index (none uploads, none is focused, or it is on another host);

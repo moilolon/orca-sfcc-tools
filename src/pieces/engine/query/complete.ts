@@ -7,12 +7,14 @@
 import type * as AST from '../js/ast'
 import type { Range } from '../js/ast'
 import { SITE_PREFERENCES } from '../checkout/metadata'
+import { DEFINING_METHODS } from '../checkout/scan'
 import type { DwClass, DwIndex, DwMember } from '../dw/index'
 import { signature } from '../dw/index'
 import { walkTemplate, type Element } from '../isml/parser'
 import { pathAt, rootAt, stringContent, wordAround, type Analysis, type Root } from './analysis'
 import { ISML_TAG_ATTRIBUTES, ismlTags, TEMPLATE_ATTRIBUTE_TAGS } from './isml-tags'
 import { moduleMembers, type QueryContext } from './modules'
+import { cartridgeRoutes } from './routes'
 import { guessedClass, membersFor, memberName, metadataTypeOf, subPackages, Types, type QType } from './types'
 
 export const MAX_COMPLETION_ITEMS = 200
@@ -213,10 +215,11 @@ export function callRole(types: Types, call: AST.CallExpression | AST.NewExpress
   const object = callee.object
   const objectName = object.type === 'Identifier' ? object.name : null
   if (name === 'msg' || name === 'msgf') {
-    if (objectName === 'Resource') return 'resource'
-    // `dw.web.Resource.msg`, or the class bound to another name.
+    // `dw.web.Resource.msg`, the class bound to any name, or a `Resource` nothing types (a
+    // template's, a global); never a `Resource` bound to something else.
     const type = object.type === 'Super' ? null : types.of(object)
-    return type?.kind === 'class' && type.id === 'dw.web.Resource' ? 'resource' : null
+    if (type?.kind === 'class' && type.id === 'dw.web.Resource') return 'resource'
+    return objectName === 'Resource' && type === null ? 'resource' : null
   }
   if (name === 'render' && objectName === 'res') return 'template'
   if (name === 'renderTemplate' && objectName === 'ISML') return 'template'
@@ -273,7 +276,7 @@ function completeMember(ctx: QueryContext, analysis: Analysis, root: Root, types
   if (object) return membersOf(ctx, object, range, word.prefix)
   // `name.custom.` of a name nothing types: the short list of names, and nothing else.
   const holder = member.object
-  if (holder.type === 'MemberExpression' && memberName(holder) === 'custom' && holder.object.type === 'Identifier' && types.of(holder.object) === null) {
+  if (holder.type === 'MemberExpression' && memberName(holder) === 'custom' && holder.object.type === 'Identifier' && types.of(holder.object) === null && types.guessable(holder.object)) {
     const cls = guessedClass(holder.object.name)
     const typeId = cls ? metadataTypeOf(ctx.dw, cls) : null
     if (typeId) return attributes(ctx, typeId, range, word.prefix, true)
@@ -434,6 +437,13 @@ function modules(ctx: QueryContext, analysis: Analysis, range: Range, typed: str
 
 function routes(ctx: QueryContext, range: Range, typed: string): Completion {
   const ids = new Map<string, string[]>()
+  // No storefront path: every route a cartridge's controller declares, labelled with its cartridges.
+  if (ctx.index.storefronts().length === 0) {
+    for (const [id, list] of cartridgeRoutes(ctx)) {
+      const declaring = [...new Set(list.filter((route) => DEFINING_METHODS.has(route.operation.method)).map((route) => route.cartridge))]
+      if (declaring.length > 0) ids.set(id, declaring)
+    }
+  }
   for (const storefront of ctx.index.storefronts()) {
     for (const id of ctx.index.routeIds(storefront.id)) {
       const list = ids.get(id)

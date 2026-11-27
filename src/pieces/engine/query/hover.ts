@@ -16,7 +16,8 @@ import { pathAt, rootAt, type Analysis, type Root } from './analysis'
 import { callRole, customTags, elementAt, stringArgumentAt } from './complete'
 import { ISML_TAG_ATTRIBUTES, TEMPLATE_ATTRIBUTE_TAGS } from './isml-tags'
 import { moduleMember, SUPER_MODULE, type QueryContext } from './modules'
-import { guessedClass, memberName, membersFor, metadataTypeOf, subPackages, Types } from './types'
+import { cartridgeRoutes } from './routes'
+import { guessedClass, isListedConstant, isStaticMember, memberName, membersFor, metadataTypeOf, subPackages, Types } from './types'
 
 /** The longest list a hover answers (storefronts, copies, candidates, definitions, steps). */
 export const MAX_HOVER_ENTRIES = 50
@@ -37,7 +38,8 @@ export type HoverContent =
   | { kind: 'module'; module: string; form: ModuleResolution['form']; copies: { storefront: string | null; path: string | null }[]; candidates: string[] }
   | { kind: 'module-member'; module: string; name: string; definitions: MemberDefinitionEntry[] }
   | { kind: 'super-module'; module: string | null; copies: SuperModuleCopy[] }
-  | { kind: 'route'; id: string; storefronts: RouteEntry[] }
+  /** With no storefront path, `storefronts` is empty and `cartridges` says what each cartridge's controller declares. */
+  | { kind: 'route'; id: string; storefronts: RouteEntry[]; cartridges: CartridgeRouteEntry[] }
   | { kind: 'template'; name: string; copies: TemplateCopy[]; candidates: string[] }
   | { kind: 'resource'; key: string; bundle: string; copies: ResourceEntry[]; candidates: number }
   | { kind: 'attribute'; typeId: string; id: string; type: string | null; objectKind: ObjectTypeKind | null; path: string | null; line: number | null; source: string | null; guessed: boolean }
@@ -65,6 +67,9 @@ export type RouteEntry = {
   serves: RouteStepEntry | null
   problems: { code: RouteProblemCode; path: string; start: number }[]
 }
+
+/** The operations of a route one cartridge's controller declares, in source order. */
+export type CartridgeRouteEntry = { cartridge: string; path: string; steps: RouteStepEntry[] }
 
 export type ResourceEntry = { storefront: string; path: string | null; cartridge: string | null; line: number | null; value: string | null }
 
@@ -144,7 +149,7 @@ function literal(call: AST.CallExpression | AST.NewExpression, index: number): s
 
 /** `object.name`: what `name` is, read off what `object` is. */
 function memberHover(ctx: QueryContext, types: Types, node: AST.MemberExpression, name: string): HoverContent | null {
-  if (isSuperModule(node)) {
+  if (isSuperModule(node) && node.object.type === 'Identifier' && types.isGlobal(node.object)) {
     const resolved = ctx.index.superModule(types.path())
     return { kind: 'super-module', module: resolved.module, copies: cap(resolved.copies) }
   }
@@ -153,7 +158,7 @@ function memberHover(ctx: QueryContext, types: Types, node: AST.MemberExpression
   if (!object) {
     // `name.custom.attribute` of a name nothing types: the short list of names.
     const holder = node.object
-    if (holder.type === 'MemberExpression' && memberName(holder) === 'custom' && holder.object.type === 'Identifier' && types.of(holder.object) === null) {
+    if (holder.type === 'MemberExpression' && memberName(holder) === 'custom' && holder.object.type === 'Identifier' && types.of(holder.object) === null && types.guessable(holder.object)) {
       const cls = guessedClass(holder.object.name)
       const typeId = cls ? metadataTypeOf(ctx.dw, cls) : null
       if (typeId) return attributeHover(ctx, typeId, name, true)
@@ -281,9 +286,22 @@ function routeHover(ctx: QueryContext, id: string): HoverContent | null {
   const resolved = ctx.index.route(id)
   if (!resolved) return null
   const step = (each: { method: RouteMethod; name: string; path: string; cartridge: string; line: number }): RouteStepEntry => ({ method: each.method, name: each.name, path: each.path, cartridge: each.cartridge, line: each.line })
+  if (resolved.storefronts.length === 0) {
+    // No storefront path: what each cartridge's controller declares, the chain unknown.
+    const declared = cartridgeRoutes(ctx).get(`${resolved.controller}-${resolved.name}`) ?? []
+    if (declared.length === 0) return null
+    const byCartridge = new Map<string, CartridgeRouteEntry>()
+    for (const route of declared) {
+      let entry = byCartridge.get(route.path)
+      if (!entry) byCartridge.set(route.path, (entry = { cartridge: route.cartridge, path: route.path, steps: [] }))
+      entry.steps.push(step({ ...route.operation, path: route.path, cartridge: route.cartridge }))
+    }
+    return { kind: 'route', id: `${resolved.controller}-${resolved.name}`, storefronts: [], cartridges: cap([...byCartridge.values()]) }
+  }
   return {
     kind: 'route',
     id: `${resolved.controller}-${resolved.name}`,
+    cartridges: [],
     storefronts: cap(resolved.storefronts).map((chain): RouteEntry => {
       const steps = cap(chain.steps).map(step)
       const serves = [...chain.steps].reverse().find((each) => DEFINING_METHODS.has(each.method) || each.method === 'replace')
@@ -326,7 +344,8 @@ export function hoverItem(ctx: QueryContext, analysis: Analysis | null, id: stri
       const dw = ctx.dw
       const cls = dw?.findClass(head)
       const member = cls && dw ? dw.members(cls).find((each) => each.key === tail) : undefined
-      content = member && cls ? dwMemberHover(ctx, cls.id, member.name, member.static || member.kind === 'constant') : null
+      // Read off the class when the completion offered it there: a static member, a static property, a constant.
+      content = member && cls && dw ? dwMemberHover(ctx, cls.id, member.name, isStaticMember(dw.members(cls), member) || isListedConstant(dw.members(cls), member)) : null
       break
     }
     case 'dwclass':

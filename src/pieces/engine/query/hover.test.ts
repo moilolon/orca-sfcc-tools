@@ -7,7 +7,9 @@ import { assert, test } from 'orca/testing'
 import { analyse } from './analysis'
 import { complete } from './complete'
 import { hover, hoverItem, type Hover } from './hover'
-import { at, BASE, CORE, fixtureContext, fixtureText, OUTLET } from './testing'
+import { CheckoutIndex } from '../checkout/checkout'
+import { fixtureFiles } from '../checkout/testing'
+import { at, BASE, committedDw, CORE, dwLookup, fixtureContext, fixtureText, OUTLET } from './testing'
 
 const SCRIPT = `${BASE}/cartridge/scripts/helpers/garden.js`
 const TEMPLATE = `${BASE}/cartridge/templates/default/garden/page.isml`
@@ -209,6 +211,41 @@ test('hover 6. a completion item’s id expands as the thing it names', async ()
   assert.equal(hoverItem(ctx, analyse(TEMPLATE, '<isinclude template="components/modules" />'), 'tag:isbadge')?.kind, 'tag')
   assert.equal(hoverItem(ctx, analysis, 'tag:isif')?.kind, 'tag')
   for (const id of ['', 'nothing', 'dw:dw.garden.None#x()', 'member:none.js#x', 'tag:isnothing', 'route:NoDash']) assert.equal(hoverItem(ctx, analysis, id), null, id)
+  // Every item a dw class offers expands: static properties (`Site.current`) and listed constants too.
+  for (const marked of ["var Site = require('dw/system/Site');\nSite.‸", 'dw.system.Site.‸', "var Status = require('dw/system/Status');\nStatus.‸"]) {
+    const asked = at(SCRIPT, marked)
+    const items = complete(ctx, asked.analysis, asked.offset).items
+    assert.ok(items.length > 0, marked)
+    for (const item of items) assert.equal(hoverItem(ctx, asked.analysis, item.id)?.kind, 'dw-member', `${marked}: ${item.id}`)
+  }
+  // The hover of a static property at its place, too.
+  assert.equal(as((await hoverAt("var Site = require('dw/system/Site');\nSite.curr‸ent.ID;")).hover, 'dw-member').members[0].owner, 'dw.system.Site')
+})
+
+test('hover 4. with no storefront path, a route says what each cartridge’s controller declares', async () => {
+  const files = fixtureFiles()
+  files.delete('sites')
+  const index = new CheckoutIndex(files, { dw: dwLookup })
+  await index.build()
+  const ctx = { index, dw: committedDw() }
+  const { analysis, offset } = at(SCRIPT, "URLUtils.url('Product-Sh‸ow');")
+  const route = as(hover(ctx, analysis, offset), 'route')
+  assert.deepEqual(route.storefronts, [])
+  assert.deepEqual(
+    route.cartridges.map((each) => [each.cartridge, each.steps.map((step) => [step.method, step.line])]),
+    [
+      ['app_garden_base', [['get', 10]]],
+      ['app_garden_core', [['prepend', 11], ['append', 15]]],
+      ['app_garden_outlet', [['append', 10]]]
+    ]
+  )
+  const none = at(SCRIPT, "URLUtils.url('Product-No‸ne');")
+  assert.equal(hover(ctx, none.analysis, none.offset), null)
+})
+
+test('hover 7. module.superModule of a shadowed module, and a Resource bound to a module, are not the platform’s', async () => {
+  assert.equal((await hoverAt('function f(module) { return module.super‸Module; }', `${CORE}/cartridge/models/product.js`)).hover, null)
+  assert.equal((await hoverAt("var Resource = require('*/cartridge/scripts/helpers/priceHelper');\nResource.msg('label.pr‸ice');")).hover, null)
 })
 
 test('hover 7. when in doubt, nothing: unknown values, a guessed name off the list, plain text', async () => {

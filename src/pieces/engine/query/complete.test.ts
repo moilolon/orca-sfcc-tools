@@ -3,8 +3,10 @@
 // of a cartridge module, resource keys and bundles; the range each answer replaces; the bound;
 // and, when in doubt, nothing.
 import { assert, test } from 'orca/testing'
+import { CheckoutIndex } from '../checkout/checkout'
+import { fixtureFiles } from '../checkout/testing'
 import { complete, MAX_COMPLETION_ITEMS, type Completion } from './complete'
-import { at, BASE, fixtureContext } from './testing'
+import { at, BASE, committedDw, dwLookup, fixtureContext } from './testing'
 
 const SCRIPT = `${BASE}/cartridge/scripts/helpers/garden.js`
 const TEMPLATE = `${BASE}/cartridge/templates/default/garden/page.isml`
@@ -138,6 +140,11 @@ test('complete 4. a name guessed for name.custom only from the short list, said 
   assert.deepEqual(labels(await completeAt('function f(customer) {\n    return customer.custom.‸;\n}')), [])
   // A known type that has no custom attributes: nothing, even with a listed name.
   assert.deepEqual(labels(await completeAt("var order = 'text';\norder.custom.‸")), [])
+  // A value known not to be the platform's: an object, a literal, a function.
+  assert.deepEqual(labels(await completeAt('var product = { custom: {} };\nproduct.custom.‸')), [])
+  assert.deepEqual(labels(await completeAt("var order = helpers.find();\norder = 'none';\norder.custom.‸")), [])
+  // A value read from elsewhere still may be guessed.
+  assert.deepEqual(labels(await completeAt('var product = helpers.find();\nproduct.custom.garden‸')), ['gardenBadge', 'gardenColour'])
   // A template's pdict is unknown: no guess through a property.
   assert.deepEqual(labels(await completeAt('<div>${pdict.product.custom.‸}</div>', TEMPLATE)), [])
   // The customer's profile is typed through the global: its attributes (none in the metadata).
@@ -198,6 +205,8 @@ test('complete 6. resource keys and bundles inside Resource.msg and msgf, in scr
   // The class written in full, or bound to another name.
   assert.deepEqual(labels(await completeAt("dw.web.Resource.msg('label.v‸', 'product', null);")), ['label.vat'])
   assert.deepEqual(labels(await completeAt("var R = require('dw/web/Resource');\nR.msg('title‸');")), ['title.home'])
+  // A `Resource` bound to something else is not the platform's.
+  assert.deepEqual(labels(await completeAt("var Resource = require('*/cartridge/scripts/helpers/priceHelper');\nResource.msg('label.‸');")), [])
   // Another call's string is not a key.
   assert.deepEqual(labels(await completeAt("Logger.info('label.‸');")), [])
 })
@@ -221,6 +230,26 @@ test('complete 7. module paths in require(), and route ids in URLUtils.url()', a
   assert.deepEqual(labels(routes), ['Product-Compare', 'Product-QuickView', 'Product-Show', 'Product-Tile'])
   assert.equal(routes.items[0].detail, 'GardenOutlet, GardenShop')
   assert.deepEqual(labels(await completeAt("URLUtils.url('Cart-‸')")), ['Cart-Show'])
+})
+
+test('complete 7. with no storefront path, the routes every cartridge’s controllers declare, each with its cartridges', async () => {
+  const files = fixtureFiles()
+  files.delete('sites')
+  const index = new CheckoutIndex(files, { dw: dwLookup })
+  await index.build()
+  const { analysis, offset } = at(SCRIPT, "URLUtils.url('‸')")
+  const routes = complete({ index, dw: committedDw() }, analysis, offset)
+  assert.deepEqual(
+    routes.items.map((item) => [item.label, item.detail]),
+    [
+      ['Cart-Show', 'app_garden_outlet'],
+      ['Home-Show', 'app_garden_base'],
+      ['Product-Compare', 'app_garden_core'],
+      ['Product-QuickView', 'app_garden_base'],
+      ['Product-Show', 'app_garden_base'],
+      ['Product-Tile', 'app_garden_base']
+    ]
+  )
 })
 
 test('complete 8. at most 200 items, said truncated; when in doubt, nothing', async () => {
