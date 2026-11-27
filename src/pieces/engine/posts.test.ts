@@ -35,7 +35,8 @@ test('a full index and analysis of 10,000 files posts a handful of times, and no
     git: () => new FakeRef({}, {}),
     api: async () => committedDw(),
     setTimer: () => ({}),
-    clearTimer: () => undefined
+    clearTimer: () => undefined,
+    exists: async () => true
   })
   const kept: { dispose(): void | Promise<void> }[] = []
   const worker = await mountWorker(
