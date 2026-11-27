@@ -8,10 +8,14 @@
 //     marked there is not reported. Recording occurrences there would count the panel's entries
 //     twice, so nothing is.
 //   - `report.json`, this command's own cursor: `{ version: 1, roles: { <role>: { lastReportAt,
-//     reported } } }`. A report reads each log since its role's `lastReportAt` (one day back the
-//     first time, or `--since`), and lists a signature as new when no earlier report listed it,
-//     as still unmarked when one did. The cursor of a role moves only once a report was printed
-//     whole and only for a role that was read.
+//     reported, counted } } }`. `lastReportAt` is the time of the newest entry read, as the
+//     instance stamped it (GMT), never this machine's clock. A report reads each log from
+//     `REPORT_OVERLAP_MS` before it (one day back the first time, or `--since`), since another
+//     app server may flush an entry stamped earlier after the last report; an entry the last
+//     report already counted (`counted`: its signature and time, for the entries of that overlap)
+//     is not counted again. A signature is listed as new when no earlier report listed it, as
+//     still unmarked when one did. The cursor of a role moves only once a report was printed whole
+//     and only for a role that was read.
 //
 // What is printed: per signature its short form, its count and first and last time in the
 // window, its normalised first line, its logger and its top frame's file and function (or its
@@ -30,6 +34,8 @@ import { ERROR_LEVELS, filtersOf, parseLogEntries } from './reader.ts'
 import type { SeenRecord } from './seen.ts'
 
 export const REPORT_VERSION = 1
+/** How far before the newest entry last read a report reads again: an entry flushed late is still read. */
+export const REPORT_OVERLAP_MS = 5 * 60 * 1000
 /** How far back the first report of an environment reads. */
 export const FIRST_REPORT_MS = 24 * 60 * 60 * 1000
 /** Rows listed per group of an environment; the rest are counted. */
@@ -84,7 +90,13 @@ export type Report = {
 }
 
 /** One role's cursor in `report.json`. */
-export type ReportCursor = { lastReportAt: number; reported: string[] }
+export type ReportCursor = {
+  /** The newest entry read, in milliseconds since the epoch, as the instance stamped it. */
+  lastReportAt: number
+  reported: string[]
+  /** `<signature>@<time>` of each entry counted within `REPORT_OVERLAP_MS` of `lastReportAt`. */
+  counted: string[]
+}
 
 export type ReportDeps = {
   b2c: Pick<B2c, 'run' | 'instances' | 'mask'>
@@ -100,9 +112,10 @@ type SeenTable = Record<string, SeenRecord>
 
 function cursorOf(value: unknown): ReportCursor | null {
   if (!value || typeof value !== 'object') return null
-  const { lastReportAt, reported } = value as { lastReportAt?: unknown; reported?: unknown }
+  const { lastReportAt, reported, counted } = value as { lastReportAt?: unknown; reported?: unknown; counted?: unknown }
   if (typeof lastReportAt !== 'number' || !Number.isFinite(lastReportAt)) return null
-  return { lastReportAt, reported: Array.isArray(reported) ? reported.filter((item): item is string => typeof item === 'string') : [] }
+  const strings = (list: unknown) => (Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : [])
+  return { lastReportAt, reported: strings(reported), counted: strings(counted) }
 }
 
 async function readOrState<T>(path: string): Promise<{ state: 'ok' | 'missing' | 'invalid'; file: DataFile<T> | null }> {
@@ -147,7 +160,7 @@ export async function buildReport(deps: ReportDeps): Promise<{ report: Report; c
       continue
     }
     const cursor = cursorOf(last.file?.roles[role])
-    const since = deps.since ?? cursor?.lastReportAt ?? now - FIRST_REPORT_MS
+    const since = deps.since ?? (cursor ? cursor.lastReportAt - REPORT_OVERLAP_MS : now - FIRST_REPORT_MS)
     let json: unknown
     try {
       json = (await deps.b2c.run(readArguments(filtersOf(undefined), since), { role, timeoutMs: READ_TIMEOUT_MS })).json
@@ -156,8 +169,11 @@ export async function buildReport(deps: ReportDeps): Promise<{ report: Report; c
       continue
     }
     const all = parseLogEntries(json, { levels: ERROR_LEVELS })
-    const entries = all.filter((entry) => entry.timestamp >= since)
-    const { occurrences, newest } = occurrencesOf(entries)
+    const inWindow = all.filter((entry) => entry.timestamp >= since)
+    // Each entry's key; one the last report counted, in the overlap, is not counted again.
+    const keys = occurrencesOf(inWindow).occurrences.map(({ signature, at }) => `${signature}@${at}`)
+    const counted = new Set(cursor?.counted ?? [])
+    const { occurrences, newest } = occurrencesOf(inWindow.filter((_, index) => !counted.has(keys[index])))
     const samples = await maskedSamples(newest, (text) => deps.b2c.mask(text))
     const table: SeenTable = seen.file?.roles[role] ?? {}
     const reported = new Set(cursor?.reported ?? [])
@@ -199,7 +215,12 @@ export async function buildReport(deps: ReportDeps): Promise<{ report: Report; c
     // Listed now first, then what earlier reports listed and nobody marked since; bounded.
     const listed = [...fresh, ...unmarked].map((row) => row.signature)
     const kept = (cursor?.reported ?? []).filter((signature) => !listed.includes(signature) && table[signature]?.markedAt === undefined)
-    cursors[role] = { lastReportAt: now, reported: [...listed, ...kept].slice(0, MAX_REPORTED) }
+    // The entries' own times, never this machine's clock: a clock ahead of the instance's loses nothing.
+    const newestAt = Math.max(cursor?.lastReportAt ?? -Infinity, ...inWindow.map((entry) => entry.timestamp))
+    if (Number.isFinite(newestAt)) {
+      const recent = inWindow.map((entry, index) => ({ at: entry.timestamp, key: keys[index] })).filter(({ at }) => at > newestAt - REPORT_OVERLAP_MS)
+      cursors[role] = { lastReportAt: newestAt, reported: [...listed, ...kept].slice(0, MAX_REPORTED), counted: [...new Set(recent.map(({ key }) => key))] }
+    }
   }
   return {
     report: { version: REPORT_VERSION, generatedAt: iso(now), config, seenList: seen.state, lastReport: last.state, roles },

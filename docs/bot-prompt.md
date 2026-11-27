@@ -23,7 +23,8 @@ node <checkout>/bin/errors.ts --config-file <dw.json> --role sandbox --role deve
   one could not be read; the JSON still says which and holds the others. Exit 2: the command is
   wrong; say so in one line, with its stderr, and stop.
 - Run nothing else: no other command, no `b2c`, no reading of `dw.json` or of any log. Do not
-  run it twice: each run moves its cursor, so a second run would report nothing new.
+  run it twice: each run moves its cursor, so a second run would only list what happened in
+  between.
 - If it prints nothing that parses as JSON, say the report could not be made, with the exit code
   and at most three lines of stderr, and stop.
 
@@ -42,8 +43,8 @@ row: { signature, count, firstSeen, lastSeen, message, logger, frame: { file, fu
   (`marked` counts them).
 - `count`, `firstSeen` and `lastSeen` are for the window since `since` only.
 - `message` is normalised and masked: `#` for a number, `<q>` for a quoted value, `<code>`,
-  `<host>`, `<email>`, `***` for a masked value. Keep these as they are; never guess what they
-  hide.
+  `<host>`, `<email>`, `<secret>` for a key, a password, a token or a cookie, `***` for a masked
+  value. Keep these as they are; never guess what they hide.
 - `config` other than `ok`, `seenList` or `lastReport` `invalid`, or an `error` on a role, is a
   problem to report, in its own words (`credentials_missing`, `role_not_configured`,
   `config_missing`, `b2c_failed`, `b2c_timeout`, …).
@@ -55,8 +56,10 @@ One short section per environment, in this order: Sandbox, Development, Staging,
 - **Title line:** the environment and its state in a few words: `3 new, 2 still unmarked`,
   `nothing new`, or `not read: <error>`.
 - **New errors first,** most frequent first, at most five: the short signature (its first eight
-  characters), the count, the message cut to about 100 characters, and where (`frame.file`
-  `frame.function`, else `pipeline`). Then `and N more` when there are more, `omitted` included.
+  characters), the count, the message, and where (`frame.file` `frame.function`, else
+  `pipeline`). **Never quote a message beyond its first 80 characters**: cut it there and add
+  `…`; say what kind of error it is in your own words if the 80 are not enough. Then
+  `and N more` when there are more, `omitted` included.
 - **Still unmarked:** one line with how many, and the two most frequent by short signature and
   count only.
 - **`mayHaveMissed`:** one line saying entries may have been missed since `since`.

@@ -11,8 +11,9 @@ import { fileURLToPath } from 'node:url'
 import { assertNoSecrets, fakeSpawner, INVENTED_DW, makeWorkspace, type SpawnCall } from '../../core/test-support'
 import { main, parseArguments, parseSince } from './cli'
 import { dataFiles } from './data-folder'
-import { cartError, LOGS_GET, paymentError } from './fixtures/logs'
-import { FIRST_REPORT_MS, type Report } from './report'
+import { cartError, jobError, LOGS_GET, paymentError } from './fixtures/logs'
+import { parseTimestamp } from './reader'
+import { FIRST_REPORT_MS, REPORT_OVERLAP_MS, type Report } from './report'
 import { signatureOf } from './signature'
 
 const NOW = Date.UTC(2026, 10, 26, 12, 0, 0)
@@ -29,11 +30,15 @@ const MACHINE = {
 /** What each instance's `logs get` answers, by its host; a host missing here fails. */
 type Answers = Record<string, () => unknown>
 
+/** As b2c: only the entries stamped at or after `--since`. */
 function b2cFor(answers: Answers) {
   return (call: SpawnCall) => {
     const answer = answers[call.options.env.SFCC_SERVER ?? '']
-    if (call.args[0] === 'logs' && call.args[1] === 'get' && answer) call.child.finish(0, JSON.stringify(answer()))
-    else call.child.finish(1, '', 'ERROR: unreachable\n')
+    if (call.args[0] !== 'logs' || call.args[1] !== 'get' || !answer) return call.child.finish(1, '', 'ERROR: unreachable\n')
+    const since = Date.parse(call.args.find((arg) => arg.startsWith('--since='))?.slice('--since='.length) ?? '')
+    const all = answer() as { entries: { timestamp: string }[] }
+    const entries = all.entries.filter((entry) => Number.isNaN(since) || (parseTimestamp(entry.timestamp) ?? 0) >= since)
+    call.child.finish(0, JSON.stringify({ count: entries.length, entries }))
   }
 }
 
@@ -82,7 +87,7 @@ function writeSeen(s: Setup, roles: Record<string, Record<string, unknown>>) {
   writeFileSync(dataFiles(s.data).seen, JSON.stringify({ version: 1, roles }))
 }
 
-function reportFile(s: Setup): { version: number; roles: Record<string, { lastReportAt: number; reported: string[] }> } | null {
+function reportFile(s: Setup): { version: number; roles: Record<string, { lastReportAt: number; reported: string[]; counted: string[] }> } | null {
   const path = dataFiles(s.data).report
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null
 }
@@ -129,8 +134,10 @@ test('the report in JSON: new errors per environment, one marked in seen.json le
     for (const call of calls) assertNoSecrets(call.args.join(' '), 'the arguments')
     // The cursor moved for the environments read, and only for them.
     const cursor = reportFile(s)
-    assert.deepEqual(Object.keys(cursor?.roles ?? {}).sort(), ['development', 'sandbox'])
-    assert.equal(cursor?.roles.sandbox.lastReportAt, NOW)
+    // Development read nothing: with no entry and no earlier report there is nothing to keep yet.
+    assert.deepEqual(Object.keys(cursor?.roles ?? {}).sort(), ['sandbox'])
+    // The newest entry's own time, not the clock of the machine.
+    assert.equal(cursor?.roles.sandbox.lastReportAt, Date.UTC(2026, 10, 26, 11, 40, 19, 877))
     assert.deepEqual(cursor?.roles.sandbox.reported.sort(), sandbox.new.map((row) => row.signature).sort())
     // seen.json is read, never written.
     assert.deepEqual(JSON.parse(readFileSync(dataFiles(s.data).seen, 'utf8')).roles.sandbox.other, record)
@@ -153,17 +160,50 @@ test('the next report reads since the last one: what it listed and nobody marked
     const at = '2026-11-26 12:30:00.000 GMT'
     const second = await run(s, ['--role', 'sandbox', '--json'], { [SANDBOX]: () => ({ entries: [cartError({ at }), paymentError(at, '00099999', 'alex.doe@example.com', '10.00'), cartError({ at, errorClass: 'RangeError' })] }) }, { now: later })
     assert.equal(second.code, 0)
-    assert.ok(second.calls[0].args.includes(`--since=${new Date(NOW).toISOString()}`), 'since the last report')
+    const newest = Date.UTC(2026, 10, 26, 11, 40, 19, 877)
+    assert.ok(second.calls[0].args.includes(`--since=${new Date(newest - REPORT_OVERLAP_MS).toISOString()}`), 'a few minutes before the newest entry of the last report')
     const role = json(second.out).roles[0]
     if (!role.read) throw new Error('not read')
-    assert.equal(role.since, new Date(NOW).toISOString())
+    assert.equal(role.since, new Date(newest - REPORT_OVERLAP_MS).toISOString())
     assert.deepEqual(role.unmarked.map((row) => row.message.slice(0, 20)).sort(), ['ISH-CORE-2368 Error ', 'Payment authorizatio'])
     assert.equal(role.new.length, 1, 'the cart error with another class')
     assert.match(role.new[0].message, /RangeError/)
     const cursor = reportFile(s)?.roles.sandbox
-    assert.equal(cursor?.lastReportAt, later)
+    assert.equal(cursor?.lastReportAt, Date.UTC(2026, 10, 26, 12, 30))
     assert.ok(!cursor?.reported.includes(job.signature), 'a marked signature is dropped from the cursor')
     assert.ok(cursor?.reported.includes(role.new[0].signature))
+  } finally {
+    s.done()
+  }
+})
+
+test('an entry another server flushed after the last report, stamped before it, is reported once; nothing is counted twice', async () => {
+  const s = setup()
+  try {
+    // The bot's machine runs hours ahead of the instance: its clock plays no part in the cursor.
+    const clock = Date.UTC(2026, 10, 26, 20, 0)
+    const atA = '2026-11-26 09:00:00.000 GMT'
+    const entryA = cartError({ at: atA })
+    const first = await run(s, ['--json', '--role', 'sandbox'], { [SANDBOX]: () => ({ entries: [entryA] }) }, { now: clock })
+    assert.equal(first.code, 0)
+    assert.equal(reportFile(s)?.roles.sandbox.lastReportAt, Date.UTC(2026, 10, 26, 9))
+    // After that report, another blade flushes two entries stamped ten seconds before it: the same
+    // cart error, and a job error never seen.
+    const late = '2026-11-26 08:59:50.000 GMT'
+    const log = { entries: [entryA, cartError({ at: late, pid: '777' }), jobError(late)] }
+    const second = await run(s, ['--json', '--role', 'sandbox'], { [SANDBOX]: () => log }, { now: clock + 60_000 })
+    const role = json(second.out).roles[0]
+    if (!role.read) throw new Error('not read')
+    assert.equal(role.since, '2026-11-26T08:55:00.000Z')
+    assert.deepEqual(role.new.map((row) => row.message.slice(0, 15)), ['Job step failed'])
+    assert.equal(role.unmarked.length, 1)
+    assert.equal(role.unmarked[0].count, 1, 'the cart error of the report before is not counted again')
+    assert.equal(role.unmarked[0].lastSeen, '2026-11-26T08:59:50.000Z')
+    // A third report over the same log finds nothing more.
+    const third = await run(s, ['--json', '--role', 'sandbox'], { [SANDBOX]: () => log }, { now: clock + 120_000 })
+    const again = json(third.out).roles[0]
+    if (!again.read) throw new Error('not read')
+    assert.deepEqual([again.new.length, again.unmarked.length], [0, 0])
   } finally {
     s.done()
   }
