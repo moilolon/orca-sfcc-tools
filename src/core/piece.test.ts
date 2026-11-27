@@ -108,16 +108,17 @@ test('the tests of the panel and of the worker borrow no request or event name o
   }
 })
 
-test('only src/core/b2c.ts reads dw.json through dw-config; only it and src/core/open-file.ts start a process', () => {
-  // open-file.ts starts Orca's own command line, never b2c. It imports nothing of b2c.ts or
-  // dw-config.ts, so no value read from dw.json can reach it.
-  const starters = ['core/b2c.ts', 'core/open-file.ts']
+test('only src/core/b2c.ts reads dw.json through dw-config; only it, src/core/open-file.ts and the engine’s git.ts start a process', () => {
+  // open-file.ts starts Orca's own command line, never b2c; the engine's checkout/git.ts starts
+  // git, read-only. Neither imports anything of b2c.ts or dw-config.ts, so no value read from
+  // dw.json can reach them.
+  const starters = ['core/b2c.ts', 'core/open-file.ts', 'pieces/engine/checkout/git.ts']
   for (const file of sourceFiles(SRC)) {
     const name = relative(SRC, file).replace(/\\/g, '/')
     const imports = importsOf(file)
     if (imports.some((spec) => /(^|\/)dw-config$/.test(spec))) assert.equal(name, 'core/b2c.ts', `${name} imports dw-config`)
     if (imports.some((spec) => /child_process$/.test(spec))) assert.ok(starters.includes(name), `${name} imports child_process`)
-    if (name === 'core/open-file.ts') assert.deepEqual(imports.filter((spec) => /(^|\/)(b2c|dw-config)$/.test(spec)), [], 'open-file.ts imports b2c.ts or dw-config.ts')
+    if (name === 'core/open-file.ts' || name === 'pieces/engine/checkout/git.ts') assert.deepEqual(imports.filter((spec) => /(^|\/)(b2c|dw-config)$/.test(spec)), [], `${name} imports b2c.ts or dw-config.ts`)
     if (name !== 'core/dw-config.ts') assert.ok(!namesConfigFile(readFileSync(file, 'utf8')), `${name} names dw.json as a path`)
   }
 })

@@ -1,0 +1,1 @@
+<div class="home accueil">${Resource.msg('title.home', 'common', null)}</div>
