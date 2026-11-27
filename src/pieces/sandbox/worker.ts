@@ -175,6 +175,17 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     return has
   }
 
+  /** `work`'s answer, or `fallback` once HOST_TIMEOUT_MS passed without one. */
+  function bounded<T>(work: Promise<T>, fallback: T): Promise<T> {
+    return new Promise<T>((resolve) => {
+      const timer = timers.setTimeout(() => resolve(fallback), HOST_TIMEOUT_MS)
+      work.then(
+        (value) => (timers.clearTimeout(timer), resolve(value)),
+        () => (timers.clearTimeout(timer), resolve(fallback))
+      )
+    })
+  }
+
   /**
    * The projects the view lists first, only to choose what is shown, never what uploads: the
    * uploading workspace's; else the focused workspace's when it has a configuration file; else
@@ -193,12 +204,11 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
       )
     })
     const focused = byId(focusedId)
-    if (focused && (await hasConfig(focused))) return new Set([projectKey(focused)])
-    const projects = new Set<string>()
-    for (const workspace of listed.workspaces) {
-      const key = projectKey(workspace)
-      if (!projects.has(key) && (await hasConfig(workspace))) projects.add(key)
-    }
+    if (focused && (await bounded(hasConfig(focused), false))) return new Set([projectKey(focused)])
+    // Asked side by side, each within HOST_TIMEOUT_MS: a folder that does not answer (a network
+    // drive gone) counts as having none, and never holds the status.
+    const answers = await Promise.all(listed.workspaces.map(async (workspace) => ((await bounded(hasConfig(workspace), false)) ? projectKey(workspace) : null)))
+    const projects = new Set(answers.filter((key): key is string => key !== null))
     return projects.size > 0 ? projects : null
   }
 
