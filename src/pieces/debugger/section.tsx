@@ -8,7 +8,6 @@
 import {
   atom,
   Box,
-  derived,
   Button,
   Code,
   Collapsible,
@@ -24,14 +23,13 @@ import {
   Tree,
   type OrcaNode,
   type PanelContext,
-  type ReadonlyAtom,
   type TableRow,
   type TreeItem
 } from 'orca'
 import { languageOf, t, wordError } from '../../core/i18n'
 import type { PanelSection } from '../../core/piece'
 import { openSetup } from '../../panel/navigation'
-import { Empty, ErrorState, Group, ListRow, Notice, NoticeLine, PAGE_SIZE, ShowMore, StateMark, type StateTone } from '../../panel/ui'
+import { Empty, ErrorState, Group, ListRow, memo, Notice, NoticeLine, PAGE_SIZE, ShowMore, StateMark, type StateTone } from '../../panel/ui'
 import { messages, type MessageKey } from './i18n'
 import type { BreakpointView, DebuggerScripts, DebuggerSource, DebuggerState, Frame, SessionStatus, StepKind, Thread } from './protocol'
 
@@ -435,7 +433,7 @@ function SourceView({ path }: { path: string }) {
   const lines = read(source)
   const failure = read(sourceError)
   const filter = read(lineFilter)
-  const drawn = read(sourceRows)
+  const drawn = sourceRows()
   const header = (
     <Row align="center" justify="between" gap="xs">
       <Row align="center" gap="xs">
@@ -508,41 +506,51 @@ function SourceView({ path }: { path: string }) {
   )
 }
 
+/** How many times the open script's rows and the list of scripts were built, for the tests. */
+export const builds = { rows: 0, scripts: 0 }
+
 /**
- * The open script's lines as table rows, computed once per change of the script, the filter or how
- * many are drawn, never on each draw. Their marks come apart, from `markedLines`.
+ * The open script's lines as table rows, built once per change of the script, the filter or the
+ * window, never on each draw (`memo`: Orca's `derived` would build them on every draw). Their marks
+ * come apart, from `markedLines`.
  */
-const codeRows = derived(() => {
-  const lines = read(source)
-  const path = read(openScript)
-  if (!lines || lines.path !== path) return null
-  const { numbers, matches } = visibleLines(lines.lines, read(lineFilter), read(windowStart))
-  return { numbers, matches, total: lines.lines.length, code: numbers.map((line) => codeCell(lines.lines[line - 1] ?? '')) }
-})
+const codeRows = memo(
+  () => [read(source), read(openScript), read(lineFilter), read(windowStart)],
+  () => {
+    const lines = read(source)
+    if (!lines || lines.path !== read(openScript)) return null
+    const { numbers, matches } = visibleLines(lines.lines, read(lineFilter), read(windowStart))
+    return { numbers, matches, total: lines.lines.length, code: numbers.map((line) => codeCell(lines.lines[line - 1] ?? '')) }
+  }
+)
 
 /** The lines of the open script that hold a breakpoint, as one text, so an unchanged set changes nothing. */
-const markedLines = derived(() => {
+function markedLines(): string {
   const current = read(state)
   const path = read(openScript)
   return current && path ? breakpointLines(current, path).join(',') : ''
-})
+}
 
-/** The table's rows: the code rows with their marks. */
-const sourceRows = derived(() => {
-  const code = read(codeRows)
-  if (!code) return null
-  const marked = read(markedLines)
-  const keys = marked ? marked.split(',') : []
-  const set = new Set(keys)
-  const rows: TableRow[] = code.numbers.map((line, i) => ({ key: String(line), cells: { mark: set.has(String(line)), line, code: code.code[i] } }))
-  return { rows, markedKeys: keys, matches: code.matches, total: code.total, first: code.numbers[0] ?? 0, last: code.numbers.at(-1) ?? 0 }
-})
+/** The table's rows: the code rows with their marks, built again only when either changed. */
+const sourceRows = memo(
+  () => [codeRows(), markedLines()],
+  () => {
+    const code = codeRows()
+    const marked = markedLines()
+    if (!code) return null
+    builds.rows += 1
+    const keys = marked ? marked.split(',') : []
+    const set = new Set(keys)
+    const rows: TableRow[] = code.numbers.map((line, i) => ({ key: String(line), cells: { mark: set.has(String(line)), line, code: code.code[i] } }))
+    return { rows, markedKeys: keys, matches: code.matches, total: code.total, first: code.numbers[0] ?? 0, last: code.numbers.at(-1) ?? 0 }
+  }
+)
 
 /** How many breakpoints each file holds, as one text, so an unchanged set changes nothing. */
-const breakpointCounts = derived(() => {
+function breakpointCounts(): string {
   const current = read(state)
   return current ? current.breakpoints.map((file) => `${file.path}\u0000${file.lines.length}`).join('\u0001') : ''
-})
+}
 
 /** Which files hold breakpoints, and how many: the list says so beside each file. */
 function counts(encoded: string): Map<string, number> {
@@ -590,7 +598,10 @@ function folderItems(prefix: string, files: readonly string[], draw: TreeDraw): 
     if (slash < 0) leaves.push(file)
     else {
       const folder = prefix ? `${prefix}/${rest.slice(0, slash)}` : rest.slice(0, slash)
-      folders.set(folder, [...(folders.get(folder) ?? []), file])
+      // Pushed in place: copying the folder's list for each file made a folder of n files cost n².
+      const inside = folders.get(folder)
+      if (inside) inside.push(file)
+      else folders.set(folder, [file])
     }
   }
   const entries: (() => TreeItem)[] = [...folders.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([folder, inside]) => () => {
@@ -619,27 +630,31 @@ export function findScripts(all: readonly string[], query: string): { files: str
 }
 
 /**
- * The list of scripts as tree items in a language, computed once per change of the scripts, the
- * search, the open folders or the breakpoints' counts, never on each draw. One derived atom per
- * language, so a change of Orca's language words the notes again at once.
+ * The list of scripts as tree items in a language, built once per change of the scripts, the
+ * search, the open folders, how much of each is drawn or the breakpoints' counts, never on each
+ * draw (`memo`: Orca's `derived` would build it on every draw, and a cartridge of 10,000 scripts
+ * took a tenth of a second each time). One per language, so a change of Orca's language words the
+ * notes again at once.
  */
-const scriptItemsByLanguage = new Map<string, ReadonlyAtom<{ items: TreeItem[]; more: boolean }>>()
-function scriptItems(at: string): ReadonlyAtom<{ items: TreeItem[]; more: boolean }> {
+type ScriptItems = { items: TreeItem[]; more: boolean }
+const scriptItemsByLanguage = new Map<string, () => ScriptItems>()
+function scriptItems(at: string): ScriptItems {
   const language = languageOf(at)
   let items = scriptItemsByLanguage.get(language)
   if (!items) {
-    items = derived(() => scriptItemsIn(language))
+    items = memo(
+      () => [read(scripts), read(scriptQuery), breakpointCounts(), read(scriptsOpen), read(folderShown)],
+      () => scriptItemsIn(language, read(scripts), read(scriptQuery), breakpointCounts(), read(scriptsOpen), read(folderShown))
+    )
     scriptItemsByLanguage.set(language, items)
   }
-  return items
+  return items()
 }
 
-function scriptItemsIn(at: string): { items: TreeItem[]; more: boolean } {
-  const list = read(scripts)
+function scriptItemsIn(at: string, list: DebuggerScripts | null, query: string, marked: string, open: readonly string[], shown: Readonly<Record<string, number>>): ScriptItems {
   if (!list) return { items: [], more: false }
-  const query = read(scriptQuery)
-  const marks = counts(read(breakpointCounts))
-  const open = read(scriptsOpen)
+  builds.scripts += 1
+  const marks = counts(marked)
   let items: TreeItem[]
   let more = false
   if (query.trim()) {
@@ -654,7 +669,7 @@ function scriptItemsIn(at: string): { items: TreeItem[]; more: boolean } {
       return { key: `f:${file}`, label: baseName(file), icon: 'file', description: count > 0 ? t(messages, at, 'bpCount', { count }) : baseName(folder) }
     })
   } else {
-    const draw: TreeDraw = { open, shown: read(folderShown), marks, at, left: TREE_ITEMS }
+    const draw: TreeDraw = { open, shown, marks, at, left: TREE_ITEMS }
     items = capped(
       'root',
       list.cartridges.map((cartridge) => () => {
@@ -678,7 +693,7 @@ function ScriptBrowser() {
   if (!list) return <NoticeLine tone="busy" text={text('scripts')} />
   if (list.cartridges.length === 0) return <Empty title={text('noScriptsTitle')} guidance={text('noScriptsBody')} icon="file" />
   const open = read(scriptsOpen)
-  const { items, more } = read(scriptItems(locale))
+  const { items, more } = scriptItems(locale)
   const pick = (key: string) => {
     if (key.startsWith('f:')) showScript(key.slice(2))
     // A folder's *more* item draws a page more of it.

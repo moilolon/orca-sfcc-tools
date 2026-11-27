@@ -12,6 +12,7 @@ import { messages, problemMessage } from './i18n'
 import { PROBLEM_CODES } from './problems/problem'
 import { XML_FAULTS } from './problems/xml'
 import { JSON_FAULTS } from './problems/json'
+import type { ProblemsList } from './protocol'
 import { scenarios } from './scenarios'
 
 let panel: TestPanel | undefined
@@ -143,4 +144,51 @@ test('1,000 problems: a page drawn, then pages up to the cap, under the size bud
   const cost = treeCost(panel.tree())
   console.log(`problems at the cap: ${MAX_ROWS} problems, ${Math.round(cost.bytes / 1024)} KiB and ${cost.nodes} nodes by Orca's measure`)
   assert.ok(cost.bytes < VIEW_BUDGET.bytes && cost.nodes < VIEW_BUDGET.nodes)
+})
+
+test('a flood of worker posts: at most one list asked at a time, one more after it, and a draw only when the answer changed', async () => {
+  // While the engine indexes and analyses, each pass posts once; however fast posts come, the view
+  // keeps one request in flight and asks once more after it, never one per post.
+  const scenario = scenarios.engine
+  const answerOf = scenario.requests?.['engine.problems.list'] as (input: unknown) => unknown
+  let asked = 0
+  let gate: (() => void) | null = null
+  let held = false
+  let version = 1
+  const host = mockHost({
+    capabilities: CAPABILITIES,
+    requests: {
+      'core.status': () => READY_STATUS,
+      'engine.problems.list': async (input: unknown) => {
+        asked++
+        if (held) await new Promise<void>((resolve) => (gate = resolve))
+        return { ...(answerOf(input) as ProblemsList), analysedAt: 1_000_000, version }
+      }
+    }
+  })
+  let draws = 0
+  panel = await mount({ setup: panelModule.setup, default: () => (draws++, panelModule.default()) }, { host, locale: 'en', persisted: { plugin: { view: 'engine' } } })
+  assert.ok(panel.find({ type: 'Badge', text: '5 errors' }))
+
+  // A post whose answer is the same draws nothing.
+  let before = draws
+  await panel.post('engine.problems.changed', { workspaceId: 'w-garden', counts: { error: 5, warning: 8, info: 2 }, files: 6, version })
+  assert.equal(draws, before)
+
+  // Fifty posts while the first answer is held: one request now, one more once it came.
+  held = true
+  const askedBefore = asked
+  for (let i = 0; i < 50; i++) void panel.post('engine.problems.changed', { workspaceId: 'w-garden', counts: { error: 5, warning: 8, info: 2 }, files: 6, version })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(asked - askedBefore, 1)
+  held = false
+  version++
+  before = draws
+  ;(gate as (() => void) | null)?.()
+  await panel.settled()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await panel.settled()
+  assert.equal(asked - askedBefore, 2)
+  // The new answer drew once; the one asked after it, the same, drew nothing.
+  assert.equal(draws - before, 1)
 })
