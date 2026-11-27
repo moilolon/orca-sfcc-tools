@@ -14,13 +14,11 @@
 // - Missing on every storefront that counts: `missing` (a warning). Missing on some and found or in
 //   doubt on the others: `partial`, naming the storefronts it is missing on (the weaker warning).
 import type { Cartridge, CheckoutIndex, IndexedAttribute, Storefront } from '../checkout/checkout'
+import { bundleBase } from '../checkout/locales'
 
 export type Presence = { kind: 'found' } | { kind: 'doubt' } | { kind: 'missing' } | { kind: 'partial'; storefronts: string[] }
 
-/** A bundle's name without its locale: `product` for `product_fr` and `product_fr_FR`. */
-export function bundleBase(file: string): string {
-  return file.replace(/_[a-z]{2}(_[A-Z]{2})?$/, '')
-}
+export { bundleBase }
 
 function add<K, V>(map: Map<K, Set<V>>, key: K, value: V): void {
   const set = map.get(key)
@@ -38,9 +36,9 @@ export class Lookup {
   private readonly templates = new Map<string, Set<string>>()
   /** Form definition names, per cartridge name, any locale folder. */
   private readonly forms = new Map<string, Set<string>>()
-  /** Keys per cartridge name and bundle (its base name, every locale merged). */
+  /** Keys per cartridge name and bundle: its base name (every locale merged) and its file's own name. */
   private readonly keys = new Map<string, Map<string, Set<string>>>()
-  /** Every bundle's base name, in any cartridge. */
+  /** Every bundle's base name, and every bundle file's own name, in any cartridge. */
   readonly bundles: Set<string>
   /** Custom attribute ids per object type the metadata defines or extends. */
   private readonly objectTypes = new Map<string, Set<string>>()
@@ -60,14 +58,17 @@ export class Lookup {
       const cartridge = this.cartridgeOf(path)
       if (cartridge && cartridge.kind === 'cartridge' && path.startsWith(`${cartridge.root}/cartridge/forms/`)) add(this.forms, cartridge.name, match[1])
     }
+    const exact = new Set<string>()
     for (const [key, definitions] of index.keyNames()) {
       for (const definition of definitions) {
         let ofCartridge = this.keys.get(definition.cartridge)
         if (!ofCartridge) this.keys.set(definition.cartridge, (ofCartridge = new Map()))
         add(ofCartridge, bundleBase(definition.bundle), key)
+        add(ofCartridge, definition.bundle, key)
+        exact.add(definition.bundle)
       }
     }
-    this.bundles = new Set(index.bundleNames())
+    this.bundles = new Set([...index.bundleNames(), ...exact])
     // The folders that hold a `sites/` folder: a site import, whose `meta/` is the project's.
     const imports = new Set<string>()
     for (const path of index.filePaths()) {

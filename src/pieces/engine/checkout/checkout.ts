@@ -9,6 +9,7 @@
 // only the files named (a folder named is walked again). Everything derived from the files (the
 // cartridges, the paths, the bundles, the routes) is recomputed in memory after each change.
 import { basename, dirname, eachLimited, extname, isUnder, joinPath, normalizePath, skippedPath, walkFiles, type CheckoutFiles } from './files'
+import { bundleBase, isBundleOf } from './locales'
 import { isMetadataPath, parseMetadata, SITE_PREFERENCES, type AttributeDefinition, type ObjectTypeDefinition, type ObjectTypeKind } from './metadata'
 import { parseProperties, type PropertyKey } from './properties'
 import { DEFINING_METHODS, scanScript, scanTemplate, type ControllerFacts, type RouteOperation, type ScriptFileFacts, type TemplateFileFacts } from './scan'
@@ -277,6 +278,9 @@ type CartridgeEntry = Cartridge & {
 }
 
 const MODULE_EXTENSIONS = ['.js', '.ds', '.json']
+
+/** The bundle `Resource.msg` reads when none is named (`msg(key)`, `msg(key, default)`, a null bundle). */
+export const DEFAULT_BUNDLE = 'message'
 const MAX_CHAIN_DEPTH = 64
 
 /** The locale fallbacks of a template or bundle: `fr_FR`, then `fr`, then `default`. */
@@ -307,10 +311,6 @@ type GitCache = { ref: string; commit: string; archives: SiteArchive[]; metadata
 /** A cartridge folder as the files show it now: where it is, its name and kind. */
 type RootInfo = { name: string; root: string; kind: CartridgeKind }
 
-/** A bundle file's name is `name`, or `name` and a locale: `_xx` or `_xx_XX`. `name_tile` is another bundle. */
-function isBundleOf(file: string, name: string): boolean {
-  return file === name || (file.startsWith(name + '_') && /^[a-z]{2}(_[A-Z]{2})?$/.test(file.slice(name.length + 1)))
-}
 
 /** The cartridge folders of a set of paths: a folder with `.project` and a `cartridge/` folder, or `modules` with `.project`. */
 function findRoots(paths: Iterable<string>): Map<string, RootInfo> {
@@ -1033,7 +1033,7 @@ export class CheckoutIndex {
   bundleNames(): readonly string[] {
     if (this.lists.bundles) return this.lists.bundles
     const names = new Set<string>()
-    for (const ofCartridge of this.bundles.values()) for (const file of ofCartridge.keys()) names.add(file.replace(/_[a-z]{2}(_[A-Z]{2})?$/, ''))
+    for (const ofCartridge of this.bundles.values()) for (const file of ofCartridge.keys()) names.add(bundleBase(file))
     return (this.lists.bundles = [...names].sort())
   }
 
@@ -1042,9 +1042,9 @@ export class CheckoutIndex {
     return this.keyIndex
   }
 
-  /** `Resource.msg(key, bundle)` along each storefront's path; a null bundle is the default one, `locale`. */
+  /** `Resource.msg(key, bundle, default)` along each storefront's path; a null bundle is the default one, `message`. */
   resolveResource(key: string, bundle: string | null, locale = 'default'): ResourceResolution {
-    const name = bundle ?? 'locale'
+    const name = bundle ?? DEFAULT_BUNDLE
     const fallbacks = localeFallbacks(locale).map((folder) => (folder === 'default' ? name : `${name}_${folder}`))
     const copies: ResourceCopy[] = this.storefrontList.map((storefront) => {
       for (const file of fallbacks) {
@@ -1101,11 +1101,14 @@ export class CheckoutIndex {
     seen.add(path)
     const problems: RouteProblem[] = []
     let base: string | null = null
-    if (facts.extends?.kind === 'superModule') {
+    // A controller that reads `module.superModule` at its top without `server.extend` loads its base
+    // first, and the base declares its routes on the one server of the request: as if extended,
+    // but a base that is not there is no problem (`module.superModule` is then null).
+    if (facts.extends?.kind === 'superModule' || facts.readsSuperModule === 'top') {
       const at = storefront.cartridges.indexOf(cartridge.name)
       const rel = path.slice(cartridge.root.length + 1)
       base = at === -1 ? null : this.firstOnPath(storefront.cartridges, rel.replace(/\.(js|ds)$/i, ''), at + 1)
-      if (!base) problems.push({ code: 'base_missing', path, start: 0, end: 0 })
+      if (!base && facts.extends) problems.push({ code: 'base_missing', path, start: 0, end: 0 })
     } else if (facts.extends?.kind === 'require') {
       const resolved = this.resolveModule(path, facts.extends.module)
       base = resolved.kind === 'file' ? resolved.path : resolved.kind === 'path' ? (resolved.copies.find((copy) => copy.storefront === storefront.id)?.path ?? null) : null

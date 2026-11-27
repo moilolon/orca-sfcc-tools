@@ -176,7 +176,8 @@ export { GUESSED_NAMES, guessedClass, metadataTypeOf, Types, type QType, type Ty
 export { checkUses, MAX_FILE_PROBLEMS, problemFileKind, readUses, type FileUses, type ProblemFileKind } from './problems/analyse'
 export { CheckoutProblems, SLICE_MS, type ProblemsOptions } from './problems/checkout'
 export { DEFAULT_LISTED_PROBLEMS, FILE_PROBLEMS_SHOWN, listPage, listQuery, matchProblems, MAX_LISTED_PROBLEMS, type ListedFile, type ListPage, type ListQuery, type SeverityFilter } from './problems/list'
-export { bundleBase, Lookup, type Presence } from './problems/lookup'
+export { Lookup, type Presence } from './problems/lookup'
+export { bundleBase, isBundleOf, isLocaleSuffix, LANGUAGE_CODES } from './checkout/locales'
 export {
   countProblems,
   emptyCounts,
@@ -194,6 +195,6 @@ export {
   type Severity,
   type Spot
 } from './problems/problem'
-export { FORM_ELEMENTS } from './problems/forms'
+export { ACCEPTED_OUTSIDE_SCHEMA, FORM_SCHEMA, type FormElement } from './problems/forms'
 export { readJson, type JsonFault, type JsonRead, type JsonValue } from './problems/json'
 export { readXml, type XmlElement, type XmlFault, type XmlRead } from './problems/xml'

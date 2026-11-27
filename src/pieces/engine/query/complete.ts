@@ -6,6 +6,8 @@
 // hover can expand. At most `MAX_COMPLETION_ITEMS`, filtered by what is typed. Pure.
 import type * as AST from '../js/ast'
 import type { Range } from '../js/ast'
+import { DEFAULT_BUNDLE } from '../checkout/checkout'
+import { bundleBase } from '../checkout/locales'
 import { SITE_PREFERENCES } from '../checkout/metadata'
 import { DEFINING_METHODS } from '../checkout/scan'
 import type { DwClass, DwIndex, DwMember } from '../dw/index'
@@ -381,8 +383,8 @@ function resourceKeys(ctx: QueryContext, call: AST.CallExpression | AST.NewExpre
   } else {
     // No bundle written yet: every key, with the bundles that define it.
     for (const [key, definitions] of [...ctx.index.keyNames()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-      const names = [...new Set(definitions.map((definition) => definition.bundle.replace(/_[a-z]{2}(_[A-Z]{2})?$/, '')))]
-      items.push({ label: key, kind: 'resource-key', detail: names.join(', '), id: `key:${names[0] ?? 'locale'}#${key}` })
+      const names = [...new Set(definitions.map((definition) => bundleBase(definition.bundle)))]
+      items.push({ label: key, kind: 'resource-key', detail: names.join(', '), id: `key:${names[0] ?? DEFAULT_BUNDLE}#${key}` })
     }
   }
   return answer('resource-key', range, typed, items)
@@ -390,7 +392,7 @@ function resourceKeys(ctx: QueryContext, call: AST.CallExpression | AST.NewExpre
 
 function bundles(ctx: QueryContext, call: AST.CallExpression | AST.NewExpression, range: Range, typed: string): Completion {
   const key = literalArgument(call, 0)
-  const holding = new Set((key === null ? [] : (ctx.index.keyNames().get(key) ?? [])).map((definition) => definition.bundle.replace(/_[a-z]{2}(_[A-Z]{2})?$/, '')))
+  const holding = new Set((key === null ? [] : (ctx.index.keyNames().get(key) ?? [])).map((definition) => bundleBase(definition.bundle)))
   const names = [...ctx.index.bundleNames()]
   // The bundles that define the key written first.
   names.sort((a, b) => Number(!holding.has(a)) - Number(!holding.has(b)) || (a < b ? -1 : 1))

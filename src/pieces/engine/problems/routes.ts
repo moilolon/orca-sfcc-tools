@@ -8,10 +8,16 @@
 // - `base_missing`: `server.extend(…)` of a controller no cartridge after it has.
 // - `not_exported`: a controller with routes that does not export `server.exports()`.
 //
+// SFRA's `require('server')` gives one server per request: a controller that reads
+// `module.superModule` at its top without `server.extend` has its base declare its routes on that
+// server first, so the index applies that base as if extended (with no `base_missing`).
+//
 // In doubt, nothing: on a storefront whose path names a cartridge the checkout does not hold after
 // the controller's own, the base it extends may be that cartridge's, so none of that chain's
 // problems count there; neither do they when it extends a module of a cartridge the checkout does
-// not hold. A controller that extends nothing is read whole, whatever the path. A problem that
+// not hold, when it reads `module.superModule` only inside a function, or when it requires another
+// controller without extending it. A controller that extends nothing is read whole, whatever the
+// path. A problem that
 // happens on some of the storefronts its file runs on names them.
 import type { RouteProblemEntry } from '../checkout/checkout'
 import type { Lookup } from './lookup'
@@ -25,7 +31,11 @@ const byLookup = new WeakMap<Lookup, Map<string, Found[]>>()
 function inDoubt(lookup: Lookup, entry: RouteProblemEntry): boolean {
   const storefront = lookup.storefronts.find((each) => each.id === entry.storefront)
   const facts = lookup.index.fileFacts(entry.controller)
-  const base = facts && facts.kind === 'script' ? (facts.controller?.extends ?? null) : null
+  const controller = facts && facts.kind === 'script' ? facts.controller : null
+  // A base read only inside a function, or another controller required, may add routes to the
+  // request's server at a time the index cannot tell.
+  if (controller && !controller.extends && (controller.readsSuperModule === 'nested' || controller.requiresController)) return true
+  const base = controller?.extends ?? (controller?.readsSuperModule === 'top' ? ({ kind: 'superModule' } as const) : null)
   if (!storefront || !base) return false
   const cartridge = lookup.cartridgeOf(entry.controller)
   if (!cartridge) return true

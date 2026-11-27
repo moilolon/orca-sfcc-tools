@@ -224,10 +224,16 @@ Changing it needs the owner's yes.
       a cartridge's name to the `main` of its `package.json`; `dw/…` a class or a package of the
       `dw.*` index; `module.superModule` the next cartridge after the file's own on each path.
       Templates and bundles go locale (`fr_FR`, `fr`, `default`) first, then cartridge; a bundle
-      `x_fr` or `x_fr_FR` is a locale of `x`, `x_tile` is a bundle of its own. A route chain
+      `x_fr` or `x_fr_FR` is a locale of `x` only when `fr` is an ISO 639-1 language
+      (`checkout/locales.ts`): `x_tile` and `x_ui` are bundles of their own. `Resource.msg` reads
+      the bundle `dw.web.Resource` documents (`resourceBundle` of `scan.ts`): `message`
+      (`DEFAULT_BUNDLE`) for `msg(key)`, `msg(key, defaultMessage)` and a `null` bundle, else the
+      literal of `msg(key, bundle, default)` and `msgf(key, bundle, …)`. A route chain
       applies the deepest base first (`extend(module.superModule)` or a required controller): a
       `get`/`post`/`use` declares, `prepend` runs before and `append` after in the order applied,
-      `replace` drops the chain. What SFRA refuses when the controller loads is a problem and not
+      `replace` drops the chain. A controller that reads `module.superModule` at its top without
+      `server.extend` gets that base applied too (SFRA's `require('server')` is one server per
+      request, on which the base declares its routes first), with no `base_missing`. What SFRA refuses when the controller loads is a problem and not
       applied: `route_redefined` (a declaration of a name that exists) and `route_missing` (an
       `append`, `prepend` or `replace` of one that does not); `base_missing` and `not_exported`
       too, all for 6.5. `git.ts` runs only `rev-parse --verify --quiet <ref>^{commit}`, `ls-tree
@@ -295,14 +301,20 @@ Changing it needs the owner's yes.
       (`problemMessage`). Each rule is written beside its code: `code.ts` (unknown custom
       attribute and site preference, template, resource key and bundle), `routes.ts` (the
       checkout index's route problems, on the route's name in the controller where they happen),
-      `forms.ts` (over the strict `xml.ts`) and `steptypes.ts` (over `json.ts`, which keeps
+      `forms.ts` (over the strict `xml.ts`; its elements, children and attributes are those of
+      the official `form.xsd`, `b2c docs schema form`, names and structure only, plus `checked`
+      on a `field`, which SFRA's forms carry) and `steptypes.ts` (over `json.ts`, which keeps
       positions). **No false warnings:** a type is only one the types of 6.4 know, never a
       guess; metadata counts for a type only when a site import defines some of its attributes
       (a `meta/` beside a `sites/` folder) or the `metadataRef` ref does, never a cartridge's own
       metadata or loose files; a name is looked for only along the storefronts whose path holds
       the file's cartridge (`lookup.ts`, `presence`), a storefront whose path names a cartridge
       the checkout lacks counts neither way, a file of a cartridge on no path gets no warning,
-      and a route chain that extends past such a cartridge is not read on that storefront.
+      and a route chain that extends past such a cartridge is not read on that storefront, nor
+      one whose base is read inside a function or that requires another controller; an
+      attribute or preference the file tests for (`in`, `hasOwnProperty`, a condition, the left
+      of `&&`, a comparison with `undefined`, `null` or a `typeof`) is not warned from that test
+      on; a fallback (`x.custom.y || ''`) is no test.
       `analyse.ts` splits a file in two steps: `readUses` (what the text names, parsed once per
       change) and `checkUses` (against `Lookup`, read once per state of the index, its
       `generation`). `checkout.ts` (`CheckoutProblems`) keeps them per file: a pass reads every
