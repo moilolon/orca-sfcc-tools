@@ -2,7 +2,7 @@
 // and the members each copy exports, its `module.superModule` and the modules it re-exports
 // followed. Pure: no Node, no Orca.
 import type { CheckoutIndex } from '../checkout/checkout'
-import type { ExportedMember, ModuleExports } from '../checkout/scan'
+import { SUPER_MODULE, type ExportedMember, type ModuleExports } from '../checkout/scan'
 import type { DwIndex } from '../dw/index'
 
 /** What every query is given besides the file: the checkout index and the `dw.*` index. */
@@ -15,7 +15,7 @@ export const MAX_MODULE_DEPTH = 8
 export type ModuleCopy = { storefront: string | null; path: string }
 
 /** The module name `module.superModule` is given: the next copy of the file itself, per storefront. */
-export const SUPER_MODULE = 'module.superModule'
+export { SUPER_MODULE }
 
 /**
  * The files `require(module)` from `from` reaches. A `*\/…` module gives the copy of each

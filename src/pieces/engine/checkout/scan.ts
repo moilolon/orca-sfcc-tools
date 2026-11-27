@@ -79,6 +79,9 @@ export type ControllerFacts = {
   exported: boolean
 }
 
+/** A member of a module a file reads: the module as written (or `SUPER_MODULE`), the member, the range of its name. */
+export type MemberUse = { module: string; member: string; start: number; end: number; line: number }
+
 /** Where something is written in a file: the range of its name, and its 1-based line. */
 export type Place = { start: number; end: number; line: number }
 
@@ -118,6 +121,8 @@ export type ScriptFileFacts = {
   requires: RequireUse[]
   templates: TemplateUse[]
   resources: ResourceUse[]
+  /** The members of modules it reads (`helper.price`), for references. */
+  members: MemberUse[]
   /** Every `module.superModule` in the file. */
   superModule: { start: number; end: number }[]
   /** Set for a script read as a controller (under `cartridge/controllers/`). */
@@ -145,6 +150,7 @@ export type TemplateFileFacts = {
   requires: RequireUse[]
   templates: TemplateUse[]
   resources: ResourceUse[]
+  members: MemberUse[]
   /** The custom tags its `<ismodule>` tags declare. */
   modules: TemplateModule[]
   problems: number
@@ -194,6 +200,54 @@ function collectCalls(root: Node, templates: TemplateUse[], resources: ResourceU
   })
 }
 
+/** The module name a `module.superModule` read is kept under. */
+export const SUPER_MODULE = 'module.superModule'
+
+/** At most this many member reads are kept per file. */
+export const MAX_MEMBER_USES = 5_000
+
+/**
+ * The members of modules a file reads, each with the range of the member's name: `helper.price`
+ * with `helper` bound to `require('x')`, `require('x').price`, a name of `var { price } =
+ * require('x')` wherever it is used, and `base.price` with `base` bound to `module.superModule`
+ * (kept under `SUPER_MODULE`). The references of 6.4 are found through these.
+ */
+export function memberUsesOf(text: string, facts: ScriptFacts, reads: readonly AST.MemberExpression[]): MemberUse[] {
+  const starts = lineStarts(text)
+  const bound = new Map<number, string>()
+  const patterns = new Map<number, { module: string; key: string }>()
+  for (const call of facts.requires) {
+    if (call.module === null || call.member !== null || !call.binding) continue
+    if (call.binding.kind === 'name' && call.binding.declaration !== null) bound.set(call.binding.declaration, call.module)
+    if (call.binding.kind === 'pattern') for (const name of call.binding.names) if (name.key !== null && name.declaration !== null) patterns.set(name.declaration, { module: call.module, key: name.key })
+  }
+  for (const id of facts.exports.superModule.bindings) bound.set(id, SUPER_MODULE)
+  const references = new Map<number, Reference>()
+  for (const reference of facts.references) references.set(reference.start, reference)
+  const uses: MemberUse[] = []
+  for (const reference of facts.references) {
+    const pattern = reference.declaration === null ? undefined : patterns.get(reference.declaration)
+    if (pattern && !reference.write) uses.push({ module: pattern.module, member: pattern.key, start: reference.start, end: reference.end, line: lineAt(starts, reference.start) })
+  }
+  for (const read of reads) {
+    const member = memberOf(read)
+    if (!member || read.property.type !== 'Identifier') continue
+    const object = read.object
+    let module: string | null = null
+    if (isIdentifier(object)) {
+      const declaration = references.get(object.start)?.declaration
+      module = declaration === null || declaration === undefined ? null : (bound.get(declaration) ?? null)
+    } else if (object.type === 'CallExpression' && isIdentifier(object.callee, 'require')) {
+      module = (stringLiteral(object.arguments[0])?.value as string | undefined) ?? null
+    } else if (object.type === 'MemberExpression' && isIdentifier(object.object, 'module') && memberOf(object)?.name === 'superModule') {
+      module = SUPER_MODULE
+    }
+    if (module !== null) uses.push({ module, member: member.name, start: read.property.start, end: read.property.end, line: lineAt(starts, read.property.start) })
+  }
+  uses.sort((a, b) => a.start - b.start)
+  return uses.slice(0, MAX_MEMBER_USES)
+}
+
 function requiresOf(facts: ScriptFacts): RequireUse[] {
   const uses: RequireUse[] = []
   for (const call of facts.requires) if (call.module !== null && call.argument) uses.push({ module: call.module, start: call.argument.start, end: call.argument.end })
@@ -202,22 +256,25 @@ function requiresOf(facts: ScriptFacts): RequireUse[] {
 
 /** The facts of a script; `controller` reads its SFRA routes too. */
 export function scanScript(text: string, options: { controller?: boolean } = {}): ScriptFileFacts {
-  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'script', requires: [], templates: [], resources: [], superModule: [], controller: null, exports: noExports(), problems: 0, skipped: true }
+  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'script', requires: [], templates: [], resources: [], members: [], superModule: [], controller: null, exports: noExports(), problems: 0, skipped: true }
   const parsed = parseScript(text)
   const facts = scriptFacts(parsed.program)
   const templates: TemplateUse[] = []
   const resources: ResourceUse[] = []
   const calls: AST.CallExpression[] = []
   const functions = new Map<number, FunctionNode>()
+  const reads: AST.MemberExpression[] = []
   collectCalls(parsed.program, templates, resources, (node) => {
     if (options.controller && node.type === 'CallExpression') calls.push(node)
     if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression' || node.type === 'FunctionDeclaration') functions.set(node.start, node)
+    if (node.type === 'MemberExpression') reads.push(node)
   })
   return {
     kind: 'script',
     requires: requiresOf(facts),
     templates,
     resources,
+    members: memberUsesOf(text, facts, reads),
     superModule: facts.exports.superModule.uses.map(({ start, end }) => ({ start, end })),
     controller: options.controller ? controllerFacts(text, facts, calls) : null,
     exports: exportsOf(text, facts, functions),
@@ -300,7 +357,7 @@ const TEMPLATE_TAGS: ReadonlySet<string> = new Set(['isinclude', 'isdecorate', '
 
 /** The facts of a template: the templates its tags name, and its JavaScript's requires and resource keys. */
 export function scanTemplate(text: string): TemplateFileFacts {
-  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'template', requires: [], templates: [], resources: [], modules: [], problems: 0, skipped: true }
+  if (text.length > MAX_PARSED_CHARACTERS) return { kind: 'template', requires: [], templates: [], resources: [], members: [], modules: [], problems: 0, skipped: true }
   const parsed = parseTemplate(text)
   const templates: TemplateUse[] = []
   const resources: ResourceUse[] = []
@@ -312,7 +369,8 @@ export function scanTemplate(text: string): TemplateFileFacts {
     if (name.trim()) templates.push({ name, via: node.name as TemplateVia, start: found.value.contentStart, end: found.value.contentEnd })
   })
   const script = templateScript(text, parsed.document)
-  for (const fragment of script.fragments) collectCalls(fragment.node, templates, resources)
+  const reads: AST.MemberExpression[] = []
+  for (const fragment of script.fragments) collectCalls(fragment.node, templates, resources, (node) => void (node.type === 'MemberExpression' && reads.push(node)))
   templates.sort((a, b) => a.start - b.start)
   resources.sort((a, b) => a.start - b.start)
   const starts = lineStarts(text)
@@ -324,7 +382,7 @@ export function scanTemplate(text: string): TemplateFileFacts {
     end: module.end,
     line: lineAt(starts, module.start)
   }))
-  return { kind: 'template', requires: requiresOf(script.facts), templates, resources, modules, problems: parsed.problems.length + script.problems.length, skipped: false }
+  return { kind: 'template', requires: requiresOf(script.facts), templates, resources, members: memberUsesOf(text, script.facts, reads), modules, problems: parsed.problems.length + script.problems.length, skipped: false }
 }
 
 // ---------------------------------------------------------------------------------------------

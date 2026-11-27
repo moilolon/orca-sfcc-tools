@@ -224,3 +224,32 @@ test('scan: the custom tags a template’s <ismodule> declares, with their attri
   assert.deepEqual(facts.modules.map(({ name, template, attributes, line }) => ({ name, template, attributes, line })), [{ name: 'badge', template: 'components/badge', attributes: ['label', 'tone'], line: 2 }])
   assert.deepEqual(scanTemplate('<div></div>').modules, [])
 })
+
+test('scan: the members of modules a file reads, through a name, a require, a pattern and module.superModule', () => {
+  const text = [
+    "var helper = require('*/cartridge/scripts/helper');",
+    "var { price, label: name } = require('*/cartridge/scripts/prices');",
+    'var base = module.superModule;',
+    'helper.total(price(1), name);',
+    "require('~/cartridge/scripts/x').run();",
+    'base.extra = module.superModule.first;',
+    'var other = {};',
+    'other.total();',
+    "helper['computed']();"
+  ].join('\n')
+  const uses = scanScript(text).members
+  assert.deepEqual(
+    uses.map((use) => [use.module, use.member, text.slice(use.start, use.end), use.line]),
+    [
+      ['*/cartridge/scripts/helper', 'total', 'total', 4],
+      ['*/cartridge/scripts/prices', 'price', 'price', 4],
+      ['*/cartridge/scripts/prices', 'label', 'name', 4],
+      ['~/cartridge/scripts/x', 'run', 'run', 5],
+      ['module.superModule', 'extra', 'extra', 6],
+      ['module.superModule', 'first', 'first', 6]
+    ]
+  )
+  // In a template's JavaScript too.
+  const template = "<isscript>var helper = require('*/cartridge/scripts/helper');</isscript>\n<span>${helper.total()}</span>"
+  assert.deepEqual(scanTemplate(template).members.map((use) => [use.member, use.line]), [['total', 2]])
+})

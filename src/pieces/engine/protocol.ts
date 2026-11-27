@@ -1,14 +1,20 @@
 // The engine piece's requests (named `engine.*`) and panel events; src/protocol.ts imports this
 // file. The state of the checkout index (phase 6.3), and the queries (phase 6.4) the editor of
-// phase 7 asks: completion and hover, each on a file's text and an offset. Nothing here carries a
-// host or a value of dw.json; paths are relative to the workspace, positions are offsets of the
-// text given.
+// phase 7 asks: completion, hover, definition, references and signature help, each on a file's
+// text and an offset. Nothing here carries a host or a value of dw.json; paths are relative to
+// the workspace, positions are offsets of the text given.
 import type { IndexStatus } from './checkout/checkout'
 import type { Completion } from './query/complete'
+import type { Definition } from './query/definition'
 import type { Hover } from './query/hover'
+import type { References } from './query/references'
+import type { SignatureHelp } from './query/signature'
 
 export type { IndexStatus }
 export type { Completion, CompletionContext, CompletionItem, CompletionKind } from './query/complete'
+export type { Definition, DefinitionKind, Target } from './query/definition'
+export type { ReferenceEntry, References } from './query/references'
+export type { Signature, SignatureHelp, SignatureParameter } from './query/signature'
 export type { CartridgeRouteEntry, Describe, DwMemberEntry, Hover, HoverContent, MemberDefinitionEntry, ResourceEntry, RouteEntry, RouteStepEntry } from './query/hover'
 
 /**
@@ -57,6 +63,10 @@ export type EngineHoverResult = Hover & {
 
 export type EngineHover = EngineAnswerState & { hover: EngineHoverResult | null }
 
+export type EngineDefinition = EngineAnswerState & { definition: Definition | null }
+export type EngineReferences = EngineAnswerState & { references: References | null }
+export type EngineSignature = EngineAnswerState & { signature: SignatureHelp | null }
+
 declare module 'orca' {
   interface PluginRequests {
     /**
@@ -73,6 +83,12 @@ declare module 'orca' {
      * for a short while, and kept in memory only.
      */
     'engine.hover': { input: EngineQuery & { id?: string }; output: EngineHover }
+    /** Where the thing at the offset is defined: one place per copy, each with the storefronts it serves. */
+    'engine.definition': { input: EngineQuery; output: EngineDefinition }
+    /** The references of the exported function at the offset, across every storefront's path (at most 500). */
+    'engine.references': { input: EngineQuery; output: EngineReferences }
+    /** The signatures of the call around the offset, and the parameter the offset is at. */
+    'engine.signature': { input: EngineQuery; output: EngineSignature }
   }
   interface PluginPanelEvents {}
 }

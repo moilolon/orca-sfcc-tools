@@ -283,11 +283,28 @@ Changing it needs the owner's yes.
       `describe`, a module and its copy per storefront, a member and where each copy defines it,
       `module.superModule`, a route (its steps in the order they run and the one that serves),
       a template, a resource key, a custom attribute, a tag; lists cut at `MAX_HOVER_ENTRIES`.
-      The worker answers `engine.complete` and `engine.hover` (`{ workspaceId, path, text,
-      offset }`, the path checked by `checkQuery`) with the index of the workspace indexed, else
-      an empty one (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to
-      `DESCRIBE_WAIT_MS` for a description read through `dw/describe.ts`.
-      `query/performance.test.ts` times both on a 5,000-line script and template.
+      `definition.ts`: where the thing at the offset is defined, one `Target` per place with the
+      storefronts it serves (`null` when it does not depend on one): a template's copy per
+      storefront, a `require`'s file, a key's line in the bundle each storefront reads, a module
+      member's declaration in each copy (along `module.superModule` too), the declaration that
+      serves a route, a custom attribute's metadata (only from the checkout, not the ref), a
+      custom tag's template, a name's declaration in the file; with no storefront path, every
+      copy (for a route, every cartridge's declaration of it). `references.ts`: the references
+      of a function a script exports, asked on the export, on the function it names, or on a
+      read of it: every member read the index keeps per file
+      (`MemberUse` of `scan.ts`: through a name bound to a `require`, `require(…).x`, a pattern's
+      names, `module.superModule`) whose `require` reaches a file that defines it, labelled with
+      the storefronts that reach it, the file asked on read from its text; at most
+      `MAX_REFERENCES`. `signature.ts`: inside a call's parentheses (not inside a function written
+      as an argument), the `dw.*` method's overloads (the one that fits the arguments chosen), a
+      `dw.*` constructor, a module function per copy, a model's constructor, or a function of the
+      file, with the active parameter.
+      The worker answers `engine.complete`, `engine.hover`, `engine.definition`,
+      `engine.references` and `engine.signature` (`{ workspaceId, path, text, offset }`, the path
+      checked by `checkQuery`) with the index of the workspace indexed, else an empty one
+      (`index: 'none'`), keeps `KEPT_ANALYSES` texts read, and waits up to `DESCRIBE_WAIT_MS` for
+      a description read through `dw/describe.ts`. `query/performance.test.ts` times each on a
+      5,000-line script and template.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
