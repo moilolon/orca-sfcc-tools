@@ -23,15 +23,17 @@
 //   - UUIDs                                                          -> `<uuid>`
 //   - e-mail addresses                                               -> `<email>`
 //   - a host written without a scheme (`shop.example.com`, `cdn-03.example.net:443`): a whole
-//     lower-case token of two or more labels ending in a top-level domain of `TOP_LEVEL_DOMAINS`
-//     or a two-letter country code (three labels or more on a two-letter or word-like ending,
-//     `WORD_LIKE_DOMAINS`), never a file name (`Cart.js`, `dw.json`, an extension of
-//     `FILE_EXTENSIONS`), a `dw.*` name, a Java package or a script expression (`request.site`,
-//     `this.store`, `logger.info`: `PACKAGE_ROOTS`)                    -> `<host>`. Where the
-//     text around says it is a host, fewer labels do: inside `[]`, `()`, `<>` or quotes, two
-//     labels on a two-letter ending (`domain [brand.eu]`); right after `domain`, `host`,
-//     `hostname`, `server`, `url`, `@` or `//`, two labels on any known ending, in any letter
-//     case. A file name, a `dw.*` name, a Java package or a script expression stays even there
+//     token of two or more labels, in any letter case, ending in a top-level domain of
+//     `TOP_LEVEL_DOMAINS` or a two-letter country code (three labels or more on a two-letter or
+//     word-like ending, `WORD_LIKE_DOMAINS`), never a file name (`Cart.js`, `dw.json`, an
+//     extension of `FILE_EXTENSIONS`), a `dw.*` name, a Java package or a script expression
+//     (`request.site`, `this.store`, `logger.info`: `PACKAGE_ROOTS`)   -> `<host>`. Where the
+//     text around says it is a host, two labels do: inside `[]`, `()` or `<>` (in a list there
+//     too, `[a.it, b.de]`), or quotes, on any known ending but one that reads as a property
+//     (`item.id`, `value.is`: `PROPERTY_ENDINGS`); right after `domain`, `host`, `hostname`,
+//     `server`, `url`, `@` or `//`, on any known ending. A port or a path may follow
+//     (`[brand.eu/de]`, `server brand.eu:8443`). A file name, a `dw.*` name, a Java package or a
+//     script expression stays even there
 //   - IP addresses, version 4 and 6                                  -> `<ip>`
 //   - quoted values (`"…"`, `'…'`)                                   -> `<q>`, except a quoted script
 //     path (`'app_x/cartridge/controllers/Cart.js'`), kept: it says which script failed
@@ -87,7 +89,10 @@ function pathWithoutLocale(path: string): string {
 }
 
 /** Generic top-level domains a host in free text may end in; any two-letter one is a country's. */
-export const TOP_LEVEL_DOMAINS: readonly string[] = ['com', 'net', 'org', 'info', 'biz', 'io', 'app', 'dev', 'cloud', 'shop', 'store', 'online', 'site', 'tech', 'xyz', 'edu', 'gov', 'int', 'mil', 'eu', 'asia', 'global', 'local', 'internal']
+export const TOP_LEVEL_DOMAINS: readonly string[] = [
+  'com', 'net', 'org', 'info', 'biz', 'io', 'app', 'dev', 'cloud', 'shop', 'store', 'online', 'site', 'tech', 'xyz', 'edu', 'gov', 'int', 'mil', 'eu',
+  'asia', 'global', 'local', 'internal', 'club', 'fashion', 'boutique', 'clothing', 'luxury', 'agency', 'website', 'mobi', 'travel', 'ltd'
+]
 
 /** Extensions of files: a token ending in one is a file name, never a host. */
 export const FILE_EXTENSIONS: readonly string[] = [
@@ -102,19 +107,29 @@ export const FILE_EXTENSIONS: readonly string[] = [
  */
 const NOT_HOST_ENDINGS = new Set(['id', 'in', 'is', 'it', 'to', 'do', 'be', 'me', 'no', 'or', 'as', 'at', 'us', 'on', 'my', 'so', 'an', 'am', 'by', 'of', 'up', 'if', 'go'])
 
+/**
+ * Of those, the endings a script expression in brackets ends in far more often than a brand's
+ * domain (`(item.id)`, `[value.is]`): even inside brackets a two-label token on one stays. A
+ * country's ending that is rarely a property (`.it`, `.at`, `.be`, `.no`, `.us`, `.me`) is a host
+ * there.
+ */
+const PROPERTY_ENDINGS = new Set(['id', 'in', 'is', 'on', 'of', 'if', 'or', 'as', 'to', 'do', 'by', 'up', 'so', 'an', 'am', 'go'])
+
 /** First labels that name a package, not a host: `dw.order.Basket`, `java.io.File`. */
 const PACKAGE_ROOTS = new Set([
   'dw', 'java', 'javax', 'jdk', 'sun', 'org', 'com', 'net', 'io', 'jakarta', 'custom', 'system',
   // The usual roots of a script expression: `request.site`, `this.store`, `logger.info`.
   'this', 'self', 'request', 'response', 'session', 'customer', 'basket', 'cart', 'order', 'product', 'payment', 'site',
   'pdict', 'res', 'req', 'module', 'exports', 'window', 'document', 'global', 'process', 'console', 'logger', 'log',
-  'config', 'options', 'params', 'args', 'result', 'event', 'error', 'err', 'utils', 'helpers'
+  'config', 'options', 'params', 'args', 'result', 'event', 'error', 'err', 'utils', 'helpers',
+  'obj', 'item', 'items', 'data', 'value', 'values', 'props', 'model', 'state', 'context', 'ctx', 'i18n', 'messages',
+  'resource', 'resources', 'math', 'json', 'object', 'array', 'string', 'number', 'date', 'promise', 'reflect'
 ])
 
 /** Top-level domains that are also ordinary words (`logger.info`, `this.store`): a host on one needs three labels. */
 const WORD_LIKE_DOMAINS = new Set(['app', 'info', 'site', 'store', 'shop', 'local', 'online', 'cloud', 'dev', 'global', 'internal', 'tech'])
 
-const HOST = /(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24})(?::\d{1,5})?(?![\w.@-]*[\w@])/g
+const HOST = /(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24})(?::\d{1,5})?(?![\w.@-]*[\w@])/gi
 
 /**
  * A dotted token right after a word that names a host (`domain`, `host`, `hostname`, `server`,
@@ -124,8 +139,10 @@ const HOST = /(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24})(?
 const NAMED_HOST =
   /(\b(?:domain|host|hostname|server|url)\b\s*[:=]?\s*[[(<'"]?|(?<![\w.+-])@|(?<![\w:/])\/\/)((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+([a-z]{2,24}))(?::\d{1,5})?(?![\w.@-]*[\w@])/gi
 
-/** The closing character of each opening bracket or quote a host may stand in. */
-const CLOSERS: Readonly<Record<string, string>> = { '[': ']', '(': ')', '<': '>', "'": "'", '"': '"' }
+/** How far, each way, the brackets a token stands in are looked for. */
+const ENCLOSURE_REACH = 200
+const OPENERS = '[(<'
+const CLOSERS = '])>'
 
 /**
  * How sure the text around a token is that it is a host: `plain` in free text; `enclosed` inside
@@ -133,32 +150,52 @@ const CLOSERS: Readonly<Record<string, string>> = { '[': ']', '(': ')', '<': '>'
  */
 type HostContext = 'plain' | 'enclosed' | 'named'
 
-/** Whether a dotted lower-case token is a host: see the rules above. */
-function hostOrNot(token: string, tld: string, context: HostContext = 'plain'): string {
+/** Whether a dotted token is a host, in any letter case: see the rules above. */
+function hostOrNot(original: string, ending: string, context: HostContext = 'plain'): string {
+  const token = original.toLowerCase()
+  const tld = ending.toLowerCase()
   const labels = token.replace(/:\d+$/, '').split('.')
-  if (labels.length < 2) return token
-  if (FILE_EXTENSIONS.includes(tld) || PACKAGE_ROOTS.has(labels[0])) return token
-  // After a word that names a host, an ending that is also a word (`brand.it`) is a country's.
-  if (NOT_HOST_ENDINGS.has(tld) && context !== 'named') return token
-  if (!(TOP_LEVEL_DOMAINS.includes(tld) || tld.length === 2)) return token
-  // On a word-like or a two-letter ending, two labels read as a property (`config.local`): a host
-  // needs three (`shop.example.de`), unless the text around says it is one: inside brackets or
-  // quotes a two-letter ending is a country's (`[brand.eu]`), and after a word that names a host
-  // any ending is. A two-letter first label with a two-letter or word-like ending is a package
-  // written backwards (`de.example.ui`).
+  if (labels.length < 2) return original
+  if (FILE_EXTENSIONS.includes(tld) || PACKAGE_ROOTS.has(labels[0])) return original
+  if (!(TOP_LEVEL_DOMAINS.includes(tld) || tld.length === 2)) return original
+  // After a word that names a host, any known ending is a host's.
+  if (context === 'named') return '<host>'
   const soft = WORD_LIKE_DOMAINS.has(tld) || tld.length === 2
-  const needsThree = context === 'plain' ? soft : context === 'enclosed' && WORD_LIKE_DOMAINS.has(tld)
-  if (needsThree && labels.length < 3) return token
-  if (soft && context !== 'named' && labels[0].length === 2) return token
+  // A two-letter first label with a two-letter or word-like ending is a package written
+  // backwards (`de.example.ui`, `(de.ui)`).
+  if (soft && labels[0].length === 2) return original
+  // Inside brackets or quotes, two labels do, but on an ending that reads as a property.
+  if (context === 'enclosed') return PROPERTY_ENDINGS.has(tld) ? original : '<host>'
+  // In free text, an ending that is also a word (`basket.id`) stays, and on a word-like or a
+  // two-letter ending two labels read as a property (`config.local`): a host needs three.
+  if (NOT_HOST_ENDINGS.has(tld)) return original
+  if (soft && labels.length < 3) return original
   return '<host>'
+}
+
+/**
+ * Whether the token at `start`..`end` of `text` stands inside brackets (`[x]`, `(x)`, `<x>`, also
+ * among other items, `[a.it, b.de]`, and with a path after it, `[brand.eu/de]`) or right inside
+ * quotes, on its own line.
+ */
+function isEnclosed(text: string, start: number, end: number): boolean {
+  const before = text[start - 1] ?? ''
+  if ((before === "'" || before === '"') && new RegExp(`^(?::\\d{1,5})?(?:/[^\\s${before}]*)?${before}`).test(text.slice(end))) return true
+  const left = text.slice(Math.max(0, start - ENCLOSURE_REACH), start)
+  const right = text.slice(end, end + ENCLOSURE_REACH)
+  const lineLeft = left.slice(left.lastIndexOf('\n') + 1)
+  const lineRight = right.split('\n')[0]
+  const lastOpen = Math.max(...[...OPENERS].map((c) => lineLeft.lastIndexOf(c)))
+  const lastClose = Math.max(...[...CLOSERS].map((c) => lineLeft.lastIndexOf(c)))
+  if (lastOpen === -1 || lastOpen < lastClose) return false
+  const firstClose = Math.min(...[...CLOSERS].map((c) => lineRight.indexOf(c)).filter((i) => i !== -1), Infinity)
+  const firstOpen = Math.min(...[...OPENERS].map((c) => lineRight.indexOf(c)).filter((i) => i !== -1), Infinity)
+  return firstClose !== Infinity && firstClose < firstOpen
 }
 
 /** A token the `HOST` rule found, seen with the text around it. */
 function hostInText(token: string, tld: string, offset: number, text: string): string {
-  const opener = text[offset - 1] ?? ''
-  const closer = CLOSERS[opener]
-  const enclosed = closer !== undefined && text[offset + token.length] === closer
-  return hostOrNot(token, tld, enclosed ? 'enclosed' : 'plain')
+  return hostOrNot(token, tld, isEnclosed(text, offset, offset + token.length) ? 'enclosed' : 'plain')
 }
 
 /** Whether a quoted value is a script path, which says which script failed. */
@@ -213,7 +250,7 @@ const RULES: readonly Rule[] = [
   [/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<uuid>'],
   [/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '<email>'],
   [NAMED_HOST, (whole, before: string, token: string, tld: string) => {
-    const kept = hostOrNot(token.toLowerCase(), tld.toLowerCase(), 'named')
+    const kept = hostOrNot(token, tld, 'named')
     return kept === '<host>' ? `${before}<host>` : whole
   }],
   // A replacer is handed the offset of the match (a number) and the whole text after its groups.
