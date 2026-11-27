@@ -1,0 +1,2 @@
+<iscomment>The garden's custom tags, included by the templates that use them.</iscomment>
+<ismodule template="components/badge" name="badge" attribute="label" attribute="tone" />

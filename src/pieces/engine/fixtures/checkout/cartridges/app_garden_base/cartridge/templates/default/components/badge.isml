@@ -1,0 +1,1 @@
+<span class="badge badge-${pdict.tone}">${pdict.label}</span>
