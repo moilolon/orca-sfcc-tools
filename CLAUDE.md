@@ -162,34 +162,47 @@ Changing it needs the owner's yes.
       literal `require`s, template and `Resource.msg`/`msgf` uses with their ranges,
       `module.superModule`, a controller's route operations, `extend` and export) with the
       file's time: a build reads again only a file whose time changed, `update(paths)` only the
-      paths named (a folder is walked again), and everything derived (cartridges, paths,
-      bundles, metadata, route tables, counts) is recomputed in memory. A `.project`, a site
-      archive or a setting changed rebuilds the paths. The cartridge path, per storefront: the
-      `cartridgePath` setting (one path, storefront `setting`); else each `sites/<site>/site.xml`
+      paths named (a folder is walked again). A change works on its own copies of the files and
+      records; at its end it builds a whole new published state (cartridges, paths, bundles,
+      metadata) and swaps it in synchronously, so a query during a build or an update answers
+      from the last complete index, never a half-built one. After every update the cartridges
+      are decided again from the files as they are then, whatever batch each event came in; when
+      they changed, every file is classified again. A cartridge's change, a site archive or a
+      setting rebuilds the paths. The cartridge path, per storefront: the `cartridgePath`
+      setting (one path, storefront `setting`); else each `sites/<site>/site.xml`
       `<custom-cartridges>` of the checkout; else the same at the `metadataRef` ref; each
       storefront says its `source`. Metadata (custom attributes per object type, site
-      preferences as `SitePreferences`', custom object types) comes from `meta/*.xml` of the
-      checkout, else of the ref. Resolution: `*/` the first cartridge of each storefront's path
-      that has it (with every copy as a candidate), `~/` the file's cartridge, relative,
-      `<cartridge>/…` (and `/<cartridge>/…`), a bare name in `modules`, else a cartridge's name
-      to the `main` of its `package.json`; `dw/…` a class or a package of the `dw.*` index;
-      `module.superModule` the next cartridge after the file's own on each path. Templates and
-      bundles go locale (`fr_FR`, `fr`, `default`) first, then cartridge. A route chain applies
-      the deepest base first (`extend(module.superModule)` or a required controller): a
-      `get`/`post`/`use` declares, `prepend` runs before and `append` after in the order
-      applied, `replace` drops the chain; `route_missing`, `route_redefined`, `base_missing`
-      and `not_exported` are kept for 6.5. `git.ts` runs only `rev-parse --verify --quiet
-      <ref>^{commit}`, `ls-tree -r --name-only <ref> -- <path>` and `show <ref>:<path>`, at the
-      commit (never the moving ref), each refused before git starts unless the ref matches
-      `REF_PATTERN` (no leading `-`, `..` or `@{`) and the path is relative with no leading `-`
-      or `..`; `git.exe` only, no shell, in the workspace, with `GIT_OPTIONAL_LOCKS=0`, a
+      preferences as `SitePreferences`', custom object types) is merged from `meta/*.xml` of the
+      checkout and of the ref, per type and attribute: the checkout's definition wins where both
+      have one, and each attribute says its `source`. Resolution: `*/` the first cartridge of
+      each storefront's path that has it (with every copy as a candidate), `~/` the file's
+      cartridge, relative, `<cartridge>/…` (and `/<cartridge>/…`), a bare name in `modules`, else
+      a cartridge's name to the `main` of its `package.json`; `dw/…` a class or a package of the
+      `dw.*` index; `module.superModule` the next cartridge after the file's own on each path.
+      Templates and bundles go locale (`fr_FR`, `fr`, `default`) first, then cartridge; a bundle
+      `x_fr` or `x_fr_FR` is a locale of `x`, `x_tile` is a bundle of its own. A route chain
+      applies the deepest base first (`extend(module.superModule)` or a required controller): a
+      `get`/`post`/`use` declares, `prepend` runs before and `append` after in the order applied,
+      `replace` drops the chain. What SFRA refuses when the controller loads is a problem and not
+      applied: `route_redefined` (a declaration of a name that exists) and `route_missing` (an
+      `append`, `prepend` or `replace` of one that does not); `base_missing` and `not_exported`
+      too, all for 6.5. `git.ts` runs only `rev-parse --verify --quiet <ref>^{commit}`, `ls-tree
+      --full-tree -r --name-only <ref> -- <path>` (from the repository's root, as `show` takes
+      paths, whatever folder of it the workspace is) and `show <ref>:<path>` (null for a file the
+      commit lacks, told from a failure by `ls-tree` of that path), at the commit (never the
+      moving ref), each refused before git starts unless the ref matches `REF_PATTERN` (no
+      leading `-`, `..` or `@{`) and the path is relative with no leading `-` or `..`; `git.exe`
+      only, no shell, in the workspace, with `GIT_OPTIONAL_LOCKS=0` and `GIT_NO_LAZY_FETCH=1`, a
       timeout and an output cap; stderr is never kept, a failure is a code (`GitFailure`). It
       writes nothing. The worker (`worker.ts`) indexes the uploading workspace, else the
       focused one, when local; `engine.index.status` answers at once and starts a build on its
-      own when the target changed; a watcher feeds changed paths after `DEBOUNCE_MS`, and a
-      change of `.git/HEAD`, `packed-refs` or `refs/` reads the ref again. `checkout/testing.ts`
-      reads the invented checkout of `fixtures/checkout/` (two storefronts, three cartridges and
-      `modules`) and generates large ones.
+      own when the target changed. A watcher's changes are debounced: taken in once no change
+      came for `DEBOUNCE_MS`, at the latest `MAX_WAIT_MS` after the first. A change of
+      `.git/HEAD`, `packed-refs` or `refs/`, and a timer every `REF_CHECK_MS` (a worktree's refs
+      are outside the folder watched), ask whether the ref moved (`refreshRef`: one `rev-parse`,
+      read again only when it did). `checkout/testing.ts` reads the invented checkout of
+      `fixtures/checkout/` (two storefronts, three cartridges and `modules`) and generates large
+      ones.
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`
