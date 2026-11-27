@@ -338,35 +338,83 @@ function drawNow(node: OrcaNode, depth = 0): OrcaNode {
 }
 
 /**
- * The most a view's tree may hold, well under the 512 KiB Orca allows the whole panel: the bar, the
- * status line and Orca's own wrapping take the rest.
+ * Orca's own limits on one panel's tree, and how it counts toward them (`plugin-declarative-tree`
+ * and `plugin-declarative-limits` of Orca's shared code): each node costs
+ * `NODE_BYTES` and the length of `JSON.stringify` of its props as sent (escapes included; children,
+ * key and ref left out; a handler sent as `{"$callback":"<id>"}`), each text `TEXT_BYTES` and its
+ * length, and a text counts as a node too. Past either limit Orca refuses the whole panel, and
+ * every draw after it.
  */
-export const VIEW_BUDGET = 256 * 1024
+export const ORCA_LIMITS = { bytes: 512 * 1024, nodes: 5000 } as const
+const NODE_BYTES = 32
+const TEXT_BYTES = 8
+/** A handler as Orca sends it: `{"$callback":"<id>"}`, its id a hash with, at most, a short suffix. */
+const CALLBACK_BYTES = 40
 
 /**
- * Whether a drawn tree is larger than `budget` bytes, by a cheap estimate of its JSON: each text
- * and key by its length, each number, flag or handler by a few bytes. It stops counting as soon as
- * the budget is passed, so a huge tree costs no more than a small one.
+ * What one view may take of Orca's limits: close to them, so an ordinary view is never refused,
+ * and under them by what the bar, the status line and a setup view can take.
  */
-export function treeSizeOver(node: unknown, budget: number): boolean {
-  let size = 0
+export const VIEW_BUDGET = { bytes: 448 * 1024, nodes: 4500 } as const
+
+/** A drawn element, as the shell sees it once its components were called (`drawNow`). */
+type Element = { readonly type: unknown; readonly props: Record<string, unknown>; readonly key?: unknown }
+
+function isElement(node: unknown): node is Element {
+  return typeof node === 'object' && node !== null && !Array.isArray(node) && 'type' in node && 'props' in node
+}
+
+/** The length of a node's props as Orca receives them. */
+function propsBytes(props: Record<string, unknown>): number {
+  const sent: Record<string, unknown> = {}
+  let callbacks = 0
+  for (const [name, value] of Object.entries(props)) {
+    if (name === 'children' || name === 'ref' || name === 'key' || value === undefined) continue
+    if (typeof value === 'function') callbacks += 1
+    else sent[name] = value
+  }
+  let length: number
+  try {
+    length = JSON.stringify(sent).length
+  } catch {
+    // Not JSON: Orca would refuse it anyway, so it counts as too large.
+    return Number.POSITIVE_INFINITY
+  }
+  return length + callbacks * CALLBACK_BYTES
+}
+
+/**
+ * The bytes and nodes a tree counts toward Orca's limits, by Orca's own rule. It stops once
+ * `stopAt` is passed, so a huge tree costs no more to measure than a small one.
+ */
+export function treeCost(node: unknown, stopAt: { bytes: number; nodes: number } = ORCA_LIMITS): { bytes: number; nodes: number } {
+  let bytes = 0
+  let nodes = 0
   const stack: unknown[] = [node]
   while (stack.length > 0) {
     const item = stack.pop()
-    if (typeof item === 'string') size += item.length + 2
-    else if (typeof item === 'number' || typeof item === 'boolean' || typeof item === 'function') size += 8
-    else if (Array.isArray(item)) {
-      size += 2 + item.length
-      for (const child of item) stack.push(child)
-    } else if (item && typeof item === 'object') {
-      for (const [key, value] of Object.entries(item)) {
-        size += key.length + 4
-        stack.push(value)
-      }
+    if (item === null || item === undefined || typeof item === 'boolean') continue
+    if (typeof item === 'string' || typeof item === 'number') {
+      nodes += 1
+      bytes += TEXT_BYTES + String(item).length
+    } else if (Array.isArray(item)) {
+      for (let i = item.length - 1; i >= 0; i--) stack.push(item[i])
+    } else if (isElement(item)) {
+      nodes += 1
+      bytes += NODE_BYTES + (typeof item.type === 'string' ? propsBytes(item.props) : String(item.type).length)
+      // An element holds its children in its props; a tree as sent (or as a test draws it) beside them.
+      if ('children' in item.props) stack.push(item.props.children)
+      else if ('children' in item) stack.push((item as { children?: unknown }).children)
     }
-    if (size > budget) return true
+    if (bytes > stopAt.bytes || nodes > stopAt.nodes) break
   }
-  return false
+  return { bytes, nodes }
+}
+
+/** Whether a view's tree passes its share of Orca's limits (`VIEW_BUDGET`). */
+export function overBudget(node: unknown, budget: { bytes: number; nodes: number } = VIEW_BUDGET): boolean {
+  const cost = treeCost(node, budget)
+  return cost.bytes > budget.bytes || cost.nodes > budget.nodes
 }
 
 /** Records, after this draw, which view's render threw last; atoms cannot change while drawing. */
@@ -398,16 +446,22 @@ function PieceView({ section, failed, locale }: { section: PanelSection; failed:
       />
     )
   }
-  if (treeSizeOver(body, VIEW_BUDGET)) {
-    // Orca refuses a whole panel past 512 KiB, and then every draw after it: a view that would
-    // come near it draws this instead, so the bar, the status line and the other views stay.
+  if (overBudget(body)) {
+    // Orca refuses a whole panel past its limits, and then every draw after it: a view that would
+    // come near them draws this instead, so the bar, the status line and the other views stay. What
+    // made it large is often kept (open folders, pages shown): resetting the view's own state lets
+    // it draw again.
     noteFailedRender(section.id)
+    const reset = section.reset
     return (
       <ErrorState
         title={text('viewTooLargeTitle', { piece: section.title(locale) })}
-        message={text('viewTooLargeBody')}
-        retryLabel={text('tryAgain')}
-        onRetry={() => set(attempt, read(attempt) + 1)}
+        message={text(reset ? 'viewTooLargeResetBody' : 'viewTooLargeBody')}
+        retryLabel={text(reset ? 'resetView' : 'tryAgain')}
+        onRetry={() => {
+          reset?.()
+          set(attempt, read(attempt) + 1)
+        }}
       />
     )
   }

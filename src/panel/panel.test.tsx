@@ -5,12 +5,12 @@
 // Nothing here says what the pieces of the plugin are today. The panel is tested over sections
 // written in this file, and the plugin's own panel only against what `SECTIONS` and the piece
 // ids say, so a phase that delivers a piece from its folder never has to edit this file.
-import { atom, Button, plugin, read, set, Text, type OrcaNode } from 'orca'
+import { atom, Button, plugin, read, Row, set, Stack, Text, Tree, type OrcaNode } from 'orca'
 import { afterEach, assert, hostError, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import { PIECE_IDS, type PanelSection } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import * as panelModule from './panel'
-import { createPanel, treeSizeOver, VIEW_BUDGET } from './panel'
+import { createPanel, ORCA_LIMITS, treeCost, VIEW_BUDGET } from './panel'
 import { CHECKS } from './checks'
 import { mergeScenarios, opensOwnView, READY_STATUS, viewOf as namedView } from './scenarios'
 import { SECTIONS } from './sections'
@@ -790,25 +790,72 @@ test('the panel’s checks hold core’s scenarios first, then only scenarios na
 // ---------------------------------------------------------------------------------------------
 // The size budget of a view
 
-test('the size of a tree is bounded cheaply: a small one is under, a huge one over, counting stops early', () => {
-  assert.equal(treeSizeOver(<Text>small</Text>, VIEW_BUDGET), false)
-  const huge = Array.from({ length: 4000 }, (_, i) => <Text key={i}>{'x'.repeat(100)}</Text>)
-  assert.equal(treeSizeOver(huge, VIEW_BUDGET), true)
-  // Well under the 512 KiB Orca allows the whole panel.
-  assert.ok(VIEW_BUDGET <= 256 * 1024)
+test('a tree is measured as Orca measures it: 32 bytes and the props as JSON per node, 8 and the length per text', () => {
+  // { size: 'sm' } is 13 characters as JSON; the text adds 8 and its 2.
+  assert.deepEqual(treeCost(<Text size="sm">ab</Text>), { bytes: 32 + 13 + 8 + 2, nodes: 2 })
+  // Children, key and undefined props are not sent; a handler is sent as {"$callback":"<id>"}.
+  assert.deepEqual(treeCost(<Button key="k" onPress={() => undefined} tooltip={undefined}>x</Button>), { bytes: 32 + 2 + 40 + 8 + 1, nodes: 2 })
+  // A prop's escapes count, as JSON.stringify writes them: a control character takes 6.
+  assert.equal(treeCost(<Text tone={'\u0001' as never}>x</Text>).bytes, 32 + JSON.stringify({ tone: '\u0001' }).length + 9)
+  assert.equal(JSON.stringify({ tone: '\u0001' }).length, 17)
+  // A text child counts as it is, and as a node.
+  assert.deepEqual(treeCost(['a', 'bc', null, false]), { bytes: 8 + 1 + 8 + 2, nodes: 2 })
+  // The budget is close to Orca's limits and under them.
+  assert.ok(VIEW_BUDGET.bytes < ORCA_LIMITS.bytes && VIEW_BUDGET.bytes >= 400 * 1024)
+  assert.ok(VIEW_BUDGET.nodes < ORCA_LIMITS.nodes)
 })
 
-test('a view whose tree passes the budget shows its error state; the bar, the status line and the other views still draw', async () => {
+/** A view of `rows` rows of an ordinary error: a link, a time and a count, as the errors view draws them. */
+function rowsView(rows: number, text: string) {
+  return Array.from({ length: rows }, (_, i) => (
+    <Row key={`r${i}`} justify="between" align="center" gap="sm">
+      <Text truncate>{`${i} ${text}`}</Text>
+      <Text size="sm" muted>{`${i}×`}</Text>
+    </Row>
+  ))
+}
+
+test('at the edges: an ordinary long view draws; one that would pass the budget, by escapes or by size, does not reach Orca', async () => {
+  // 700 rows of 300 ordinary characters: about 350 KiB by Orca's measure. It draws as it is.
+  const long: PanelSection = { ...viewOf('errors', 'Errors', 'Errores'), render: () => <Stack gap="xs">{rowsView(700, 'x'.repeat(300))}</Stack> }
+  panel = await mount(panelOver([long]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  const drawn = treeCost(panel.tree()).bytes
+  assert.ok(drawn > 300 * 1024 && drawn < VIEW_BUDGET.bytes, `${drawn} bytes`)
+  assert.equal(panel.find({ text: /too large/ }), null)
+  assert.deepEqual(panel.errors, [])
+  panel.unmount()
+  // A tree whose texts are short but whose props hold control characters: each takes 6 bytes as
+  // JSON. Counted by raw length it would look small; Orca would refuse it. The guard stops it.
+  const escaped: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => <Tree label="Values" items={Array.from({ length: 230 }, (_, i) => ({ key: `v${i}`, label: `v${i}`, description: '\u0001'.repeat(400) }))} />
+  }
+  assert.ok(treeCost(escaped.render('en')).bytes > ORCA_LIMITS.bytes)
+  panel = await mount(panelOver([escaped]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  assert.deepEqual(panel.errors, [], 'Orca refused nothing')
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+  assert.ok(treeCost(panel.tree()).bytes < 16 * 1024)
+  panel.unmount()
+  // Too many nodes, however small, is too large as well.
+  const many: PanelSection = { ...viewOf('errors', 'Errors', 'Errores'), render: () => <Stack gap="xs">{Array.from({ length: 5000 }, (_, i) => <Text key={i}>.</Text>)}</Stack> }
+  panel = await mount(panelOver([many]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  assert.deepEqual(panel.errors, [])
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+})
+
+test('a view too large shows its error state with the bar, the status line and the other views still drawn', async () => {
   const big = atom(true)
   const huge: PanelSection = {
     ...viewOf('errors', 'Errors', 'Errores'),
-    render: () => (read(big) ? Array.from({ length: 4000 }, (_, i) => <Text key={i}>{`row ${i} ${'x'.repeat(80)}`}</Text>) : <Text>Errors body</Text>)
+    render: () => (read(big) ? <Stack gap="xs">{rowsView(3000, 'x'.repeat(200))}</Stack> : <Text>Errors body</Text>)
   }
   panel = await mount(panelOver([viewOf('sandbox', 'Sandbox and upload', 'Sandbox y subida'), huge]), { host: hostAnswering(ALL_READY), locale: 'en', persisted: { plugin: { view: 'errors' } } })
   assert.deepEqual(panel.errors, [])
   assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+  // A view with no reset of its own can only be tried again.
   assert.ok(panel.find({ text: 'Close what is open in it, or open another view.' }))
-  assert.ok(JSON.stringify(panel.tree()).length < VIEW_BUDGET, 'what Orca is handed stays small')
+  assert.ok(panel.find({ role: 'button', text: 'Try again' }))
+  assert.ok(treeCost(panel.tree()).bytes < 32 * 1024, 'what Orca is handed stays small')
   assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'])
   assert.ok(panel.find({ role: 'button', label: 'Refresh' }), 'the status line is there')
   await pick(panel, 'sandbox')
@@ -816,11 +863,35 @@ test('a view whose tree passes the budget shows its error state; the bar, the st
   // Once the view is small again, it draws.
   set(big, false)
   await pick(panel, 'errors')
-  await panel.press({ role: 'button', text: 'Try again' }).catch(() => undefined)
   assert.ok(panel.find({ text: 'Errors body' }))
   panel.unmount()
-  panel = await mount(panelOver([huge]), { host: hostAnswering(ALL_READY), locale: 'es' })
   set(big, true)
-  await panel.settled()
+  panel = await mount(panelOver([huge]), { host: hostAnswering(ALL_READY), locale: 'es' })
   assert.match(panel.summary().join('\n'), /Errores es demasiado grande para dibujarse/)
+})
+
+test('a view too large because of what is open in it offers a reset: it closes that, and the view draws again', async () => {
+  // What makes it large is kept across opens, as open folders are.
+  const open = atom<number>('probeOpen', 3000, { persist: 'plugin' })
+  let resets = 0
+  const kept: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => <Stack gap="xs">{rowsView(read(open), 'x'.repeat(200))}</Stack>,
+    reset: () => {
+      resets++
+      set(open, 3)
+    }
+  }
+  panel = await mount(panelOver([kept]), { host: hostAnswering(ALL_READY), locale: 'en' })
+  assert.match(panel.summary().join('\n'), /Errors is too large to draw/)
+  assert.ok(panel.find({ text: 'Reset it to close what is open in it.' }))
+  // Trying again alone would draw the same: the one button resets, then draws again.
+  await panel.press({ role: 'button', text: 'Reset view' })
+  assert.equal(resets, 1)
+  assert.equal(panel.find({ text: /too large/ }), null)
+  assert.ok(panel.find({ text: /^2 x/ }))
+  assert.equal(panel.persisted.plugin.probeOpen, 3)
+  panel.unmount()
+  panel = await mount(panelOver([kept]), { host: hostAnswering(ALL_READY), locale: 'es', persisted: { plugin: { probeOpen: 3000 } } })
+  assert.ok(panel.find({ role: 'button', text: 'Restablecer vista' }))
 })
