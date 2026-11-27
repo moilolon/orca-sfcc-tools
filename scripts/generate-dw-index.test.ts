@@ -2,16 +2,18 @@
 // the expected index, built only from role-less `docs` commands the runner's guard lets through,
 // at most four at a time; the id of every answer checked; and a whole index or none.
 import { assert, test } from 'orca/testing'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { B2cError, type RunOptions, type RunResult } from '../src/core/b2c'
 import { guard, refusedFlag } from '../src/core/instances'
 import { loadDwIndex, type DwIndexData } from '../src/pieces/engine/dw/index'
-import { CONCURRENCY, DEFAULT_OUT, GenerateError, generateIndex, listEntries, readClass, serializeIndex, writeWhole } from './generate-dw-index'
+import { DOCS_FLAGS } from '../src/pieces/engine/dw/describe'
+import { CONCURRENCY, DEFAULT_OUT, GenerateError, generateIndex, listEntries, outOf, readClass, serializeIndex, writeWhole } from './generate-dw-index'
 
 const FIXTURES = new URL('../src/pieces/engine/fixtures/dw/', import.meta.url)
-const fixture = (name: string) => readFileSync(new URL(name, FIXTURES), 'utf8')
+/** A fixture with LF line ends, however the checkout wrote it. */
+const fixture = (name: string) => readFileSync(new URL(name, FIXTURES), 'utf8').replace(/\r\n?/g, '\n')
 const LIST = JSON.parse(fixture('list.json')) as { entries: Array<Record<string, string>> }
 const EXPECTED = JSON.parse(fixture('expected-index.json')) as DwIndexData
 const TODAY = '2026-01-01'
@@ -78,7 +80,7 @@ test('turns invented b2c docs output into the expected index', async () => {
   const { b2c } = fakeRunner()
   const index = await generateIndex({ b2c, today: TODAY })
   assert.deepEqual(index, EXPECTED)
-  assert.equal(serializeIndex(index), fixture('expected-index.json').replace(/\r\n/g, '\n'))
+  assert.equal(serializeIndex(index), fixture('expected-index.json'))
 })
 
 test('runs only role-less docs commands, which the runner’s guard and flag list let through', async () => {
@@ -214,8 +216,40 @@ test('writing replaces the file whole and leaves nothing beside it', () => {
   }
 })
 
+test('a rename that fails leaves no temporary file behind', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'dw-index-test-'))
+  try {
+    // Writing over a folder: the rename is refused.
+    const target = join(folder, 'taken')
+    mkdirSync(target)
+    assert.throws(() => writeWhole(target, 'text'))
+    assert.deepEqual(readdirSync(folder), ['taken'])
+  } finally {
+    rmSync(folder, { recursive: true, force: true })
+  }
+})
+
+test('--out is checked before the run: a value, naming a file in a folder that exists', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'dw-index-test-'))
+  try {
+    assert.equal(outOf([]), DEFAULT_OUT)
+    assert.equal(outOf(['--out', 'index.json'], folder), join(folder, 'index.json'))
+    assert.throws(() => outOf(['--out'], folder), /--out needs a file name/)
+    assert.throws(() => outOf(['--out', ''], folder), /--out needs a file name/)
+    assert.throws(() => outOf(['--out', '--json'], folder), /--out needs a file name/)
+    assert.throws(() => outOf(['--out', '.'], folder), /is a folder/)
+    assert.throws(() => outOf(['--out', join('missing', 'index.json')], folder), /does not exist/)
+  } finally {
+    rmSync(folder, { recursive: true, force: true })
+  }
+})
+
+test('the generator and the descriptions pass the same docs flags', () => {
+  assert.deepEqual(DOCS_FLAGS, ['--workspace', 'all'])
+})
+
 test('the committed data/dw-api.json is in the generator’s own form and loads', () => {
-  const text = readFileSync(DEFAULT_OUT, 'utf8').replace(/\r\n/g, '\n')
+  const text = readFileSync(DEFAULT_OUT, 'utf8').replace(/\r\n?/g, '\n')
   const data = JSON.parse(text) as DwIndexData
   assert.equal(serializeIndex(data), text, 'regenerate with npm run dw-index')
   loadDwIndex(data)

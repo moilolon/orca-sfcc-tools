@@ -6,7 +6,8 @@ import { guard, refusedFlag } from '../../../core/instances'
 import type { RunOptions, RunResult } from '../../../core/b2c'
 import { createDescriber, DescribeError } from './describe'
 
-const page = (id: string) => readFileSync(new URL(`../fixtures/dw/${id}.md`, import.meta.url), 'utf8')
+/** A fixture page with LF line ends, however the checkout wrote it. */
+const page = (id: string) => readFileSync(new URL(`../fixtures/dw/${id}.md`, import.meta.url), 'utf8').replace(/\r\n?/g, '\n')
 
 /** A fake runner: the fixture pages, or `answer`; `mask` hides the word `garden`. */
 function fakeB2c(answer?: (id: string) => unknown) {
@@ -60,6 +61,14 @@ test('a member’s own section, masked, read with a role-less docs command', asy
   assert.equal(refusedFlag(args), -1)
   assert.equal(options?.role, undefined)
   assert.equal(options?.cwd, 'C:\\empty')
+})
+
+test('a page with Windows line ends and a byte order mark gives the same sections', async () => {
+  const plain = createDescriber(fakeB2c().b2c)
+  const windows = createDescriber(fakeB2c((id) => ({ entry: { id }, content: `﻿${page(id).replace(/\n/g, '\r\n')}` })).b2c)
+  for (const key of [undefined, 'water(Number, Boolean)', 'COLOUR_GREEN']) {
+    assert.equal(await windows.describe('dw.garden.Plant', key), await plain.describe('dw.garden.Plant', key))
+  }
 })
 
 test('what comes back went through the mask; the class’s own description too', async () => {

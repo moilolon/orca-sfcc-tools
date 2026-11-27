@@ -63,6 +63,27 @@ test('members resolve inheritance: own first, a redeclared one hides the farther
   assert.deepEqual(index.member(tree, 'nothing'), [])
 })
 
+test('copies of one overload with the same signature are answered once, not deprecated when one copy is not', () => {
+  const data = JSON.parse(JSON.stringify(GARDEN)) as DwIndexData
+  const prune = (variant: number, extra: Record<string, unknown> = {}) => ({
+    name: 'prune',
+    key: `prune(Number) - Variant ${variant}`,
+    params: [{ name: 'centimetres', type: 'TopLevel.Number' }],
+    returns: 'void',
+    ...extra
+  })
+  data.classes['dw.garden.Plant'].methods?.push(prune(1, { deprecated: true }), prune(2), prune(3))
+  const index = loadDwIndex(data)
+  const plant = find(index, 'dw.garden.Plant')
+  const pruned = index.member(plant, 'prune')
+  assert.equal(pruned.length, 1)
+  assert.equal(pruned[0].key, 'prune(Number) - Variant 2')
+  assert.equal(pruned[0].deprecated, false)
+  assert.equal(index.member(find(index, 'dw.garden.Tree'), 'prune').length, 1)
+  // Variants that differ, if only by a parameter's name, both stay.
+  assert.equal(index.member(find(index, 'dw.garden.Tree'), 'grow').length, 2)
+})
+
 test('a member’s signature, a constant’s value and deprecation', () => {
   const index = loadDwIndex(GARDEN)
   const tree = find(index, 'dw.garden.Tree')
@@ -153,6 +174,16 @@ test('the committed index loads and answers a known class, method, inherited mem
   assert.equal(index.isDeprecated(order, 'orderNo'), false)
   assert.equal(index.isDeprecated(find(index, 'dw.campaign.CampaignMgr')), true)
   assert.equal(find(index, 'String').id, 'TopLevel.String')
+
+  // The documentation's word-for-word copies (`decrypt`, `parseInt`) come back once.
+  const cipher = find(index, 'dw.crypto.Cipher')
+  const decrypt = index.member(cipher, 'decrypt').map(signature)
+  assert.ok(decrypt.length >= 2)
+  assert.equal(new Set(decrypt).size, decrypt.length)
+  for (const cls of index.classes()) {
+    const seen = index.members(cls).map((member) => `${member.owner}|${member.kind}|${signature(member)}`)
+    assert.equal(new Set(seen).size, seen.length, cls.id)
+  }
 })
 
 test('the committed index holds no description: only names, types, keys and constant values', () => {

@@ -6,7 +6,8 @@ import { readFileSync } from 'node:fs'
 import { PageShapeError, parseClassPage, versionOf } from './dw-pages'
 
 const FIXTURES = new URL('../src/pieces/engine/fixtures/dw/', import.meta.url)
-const page = (id: string) => readFileSync(new URL(`${id}.md`, FIXTURES), 'utf8')
+/** A fixture page with LF line ends, however the checkout wrote it: tests build variants from it. */
+const page = (id: string) => readFileSync(new URL(`${id}.md`, FIXTURES), 'utf8').replace(/\r\n?/g, '\n')
 
 const S = 'TopLevel.String'
 const N = 'TopLevel.Number'
@@ -87,9 +88,15 @@ test('no text of a description reaches an entry', () => {
   }
 })
 
-test('Windows line ends read the same', () => {
+test('Windows and old Mac line ends, and a byte order mark, read the same', () => {
   const plant = page('dw.garden.Plant')
-  assert.deepEqual(parseClassPage('dw.garden.Plant', plant.replace(/\n/g, '\r\n')), parseClassPage('dw.garden.Plant', plant))
+  const expected = parseClassPage('dw.garden.Plant', plant)
+  assert.deepEqual(parseClassPage('dw.garden.Plant', plant.replace(/\n/g, '\r\n')), expected)
+  assert.deepEqual(parseClassPage('dw.garden.Plant', plant.replace(/\n/g, '\r')), expected)
+  assert.deepEqual(parseClassPage('dw.garden.Plant', `﻿${plant}`), expected)
+  // A broken page fails the same way whatever its line ends.
+  const broken = plant.replace('## Constant Summary', '## Colour Summary')
+  assert.throws(() => parseClassPage('dw.garden.Plant', broken.replace(/\n/g, '\r\n')), /: dw\.garden\.Plant, Colour Summary: unknown section$/)
 })
 
 /** The page of `id` with `from` replaced by `to`; the fixture must hold `from`. */

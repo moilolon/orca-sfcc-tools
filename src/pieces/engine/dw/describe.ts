@@ -8,8 +8,12 @@
 // like anything a piece shows of b2c's output.
 import type { B2c } from '../../../core/b2c'
 
-/** The same flags the generator passes: without them b2c walks its working folder first. */
-const DOCS_FLAGS: readonly string[] = ['--workspace', 'all']
+/**
+ * Carried by every `docs` command, here and in scripts/generate-dw-index.ts. Without it `b2c`
+ * guesses the kind of project from its working folder, walking it whole first: minutes in a
+ * home folder.
+ */
+export const DOCS_FLAGS: readonly string[] = ['--workspace', 'all']
 
 /** A class id as the index writes it: a package, a dot, a name. Nothing else reaches b2c. */
 const CLASS_ID = /^[A-Za-z][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/
@@ -83,7 +87,8 @@ export function createDescriber(b2c: Pick<B2c, 'run' | 'mask'>, options: { cwd?:
     const entry = isObject(json) && isObject(json.entry) ? json.entry : null
     if (!entry || entry.id !== classId) throw new DescribeError('wrong_page')
     if (!isObject(json) || typeof json.content !== 'string' || !json.content) throw new DescribeError('no_content')
-    return json.content.replace(/\r\n?/g, '\n').split('\n')
+    // LF only and no byte order mark, so a section is found whatever the line ends.
+    return json.content.replace(/^﻿/, '').replace(/\r\n?/g, '\n').split('\n')
   }
 
   function page(classId: string): Promise<string[]> {

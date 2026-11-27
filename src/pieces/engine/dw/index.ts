@@ -101,7 +101,8 @@ export type DwIndex = {
   /**
    * Every member of a class, inherited ones included: its own first, then each superclass's in
    * turn, without one a closer class redeclares (a property or constant by name, a method by
-   * name and parameter types). Constructors are not inherited.
+   * name and parameter types). Constructors are not inherited. Copies the documentation gives
+   * with the same signature are answered once.
    */
   members(cls: DwClass): readonly DwMember[]
   /** The members of that name, overloads included, inherited ones too. */
@@ -266,9 +267,18 @@ export function loadDwIndex(data: unknown): DwIndex {
     const visited = new Set<string>()
     for (let at: DwClass | undefined = cls; at && !visited.has(at.id); at = at.super ? byId.get(at.super) : undefined) {
       visited.add(at.id)
+      // The documentation repeats some overloads word for word as `- Variant 1`, `- Variant 2`:
+      // one of each signature is kept, a deprecated one only when every copy is.
+      const same = new Map<string, number>()
       for (const member of at.own) {
         if (member.kind === 'constructor' && at !== cls) continue
-        if (!taken.has(slotOf(member))) out.push(member)
+        if (taken.has(slotOf(member))) continue
+        const twin = `${member.kind}|${signature(member)}`
+        const kept = same.get(twin)
+        if (kept === undefined) {
+          same.set(twin, out.length)
+          out.push(member)
+        } else if (out[kept].deprecated && !member.deprecated) out[kept] = member
       }
       // Added once the class is done: two variants of one overload in a class both stay, and
       // only a closer class hides a member.

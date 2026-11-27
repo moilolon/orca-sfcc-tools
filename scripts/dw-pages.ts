@@ -58,6 +58,11 @@ function idOfUrl(url: string): string | null {
   return match ? match[1] : null
 }
 
+/** `text` with LF line ends only (CRLF and lone CR both become LF) and no byte order mark. */
+export function normalizeText(text: string): string {
+  return text.replace(/^﻿/, '').replace(/\r\n?/g, '\n')
+}
+
 /** Markdown's escapes removed: `SQRT1\_2` is `SQRT1_2`, `String\[\]` is `String[]`. */
 function unescape(text: string): string {
   return text.replace(/\\([^A-Za-z0-9\s])/g, '$1')
@@ -280,8 +285,10 @@ function compare(a: string, b: string): number {
  * One class page as its entry in the index, its members sorted by their heading. Throws a
  * PageShapeError when the page does not have the expected shape.
  */
-export function parseClassPage(page: string, markdown: string): DwClassData {
-  const lines = markdown.replace(/\r\n?/g, '\n').split('\n')
+export function parseClassPage(page: string, raw: string): DwClassData {
+  // The same page whatever its line ends or a byte order mark: the rules below see LF only.
+  const markdown = normalizeText(raw)
+  const lines = markdown.split('\n')
   const { head, sections } = sectionsOf(page, lines)
   const { chain, deprecated } = parseHead(page, head)
   const section = (title: string) => sections.find((each) => each.title === title)

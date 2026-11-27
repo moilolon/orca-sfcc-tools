@@ -12,12 +12,13 @@
 // The index holds the facts of the interface (./dw-pages.ts) and no description. It is written
 // whole or not at all: any read that fails stops the run, and every page whose shape is not the
 // expected one is named with its section before the run fails.
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { B2cError, createB2c, type B2c } from '../src/core/b2c'
 import { DEFAULT_SETTINGS, type Settings } from '../src/core/settings'
+import { DOCS_FLAGS } from '../src/pieces/engine/dw/describe'
 import { DW_INDEX_FORMAT, loadDwIndex, type DwClassData, type DwIndexData } from '../src/pieces/engine/dw/index'
 import { PageShapeError, parseClassPage, versionOf } from './dw-pages'
 
@@ -26,12 +27,6 @@ export const DEFAULT_OUT = join(ROOT, 'data', 'dw-api.json')
 
 /** Reads at the same time. Each one is a `b2c` process and one request to the documentation. */
 export const CONCURRENCY = 4
-
-/**
- * Carried by every `docs` command. Without it `b2c` guesses the kind of project from its working
- * folder, walking it whole first: minutes in a home folder.
- */
-export const DOCS_FLAGS: readonly string[] = ['--workspace', 'all']
 
 /** The id of the documentation's own index entry, whose title names its version. */
 const INDEX_ENTRY = 'index'
@@ -215,8 +210,30 @@ export function serializeIndex(index: DwIndexData): string {
 /** Writes `text` to `path` whole: to a file beside it first, then renamed over it. */
 export function writeWhole(path: string, text: string): void {
   const temporary = `${path}.${process.pid}.tmp`
-  writeFileSync(temporary, text)
-  renameSync(temporary, path)
+  try {
+    writeFileSync(temporary, text)
+    renameSync(temporary, path)
+  } catch (error) {
+    // A rename refused (the target is a folder, or held open) leaves nothing behind.
+    rmSync(temporary, { force: true })
+    throw error
+  }
+}
+
+/**
+ * Where to write, from the command line: `--out <file>`, else data/dw-api.json. Checked before
+ * the run, so a mistake is not found after a quarter of an hour: the value must be given, and
+ * name a file (not a folder) in a folder that exists.
+ */
+export function outOf(argv: readonly string[], base: string = process.cwd()): string {
+  const at = argv.indexOf('--out')
+  if (at === -1) return DEFAULT_OUT
+  const value = argv[at + 1]
+  if (!value || value.startsWith('-')) throw new Error('--out needs a file name')
+  const out = resolve(base, value)
+  if (!existsSync(dirname(out)) || !statSync(dirname(out)).isDirectory()) throw new Error(`--out: the folder ${dirname(out)} does not exist`)
+  if (existsSync(out) && statSync(out).isDirectory()) throw new Error(`--out: ${out} is a folder`)
+  return out
 }
 
 /** Settings with nothing set: `b2c` from the PATH, and no dw.json is ever looked for. */
@@ -227,8 +244,14 @@ const NO_SETTINGS: Settings = {
 }
 
 async function main(): Promise<void> {
-  const at = process.argv.indexOf('--out')
-  const out = at === -1 ? DEFAULT_OUT : resolve(process.argv[at + 1] ?? '')
+  let out: string
+  try {
+    out = outOf(process.argv.slice(2))
+  } catch (error) {
+    console.error((error as Error).message)
+    process.exitCode = 1
+    return
+  }
   // The runner logs every exit; only the ones that went wrong are worth a line here.
   const log = (message: string) => {
     if (!message.endsWith(': exit 0')) console.error(message)
