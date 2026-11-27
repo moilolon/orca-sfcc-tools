@@ -20,8 +20,8 @@
 import { spawn as nodeSpawn } from 'node:child_process'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { extname, posix } from 'node:path'
-import { DW_KEYS, loadConfig, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
+import { extname, posix, resolve as resolvePath, win32 } from 'node:path'
+import { configFolderOf, DW_KEYS, loadConfig, mainCheckoutOf, type B2cEnvironment, type FileSystem, type LoadedConfig } from './dw-config'
 import { commandOf, guard, isRole, refusedFlag, ROLES, topicOf, type ConfigState, type Role, type RoleState } from './instances'
 import type { Logger } from './piece'
 import type { Settings } from './settings'
@@ -40,6 +40,7 @@ export type B2cErrorCode =
   | 'unsafe_argument'
   | 'cwd_not_found'
   | 'config_invalid'
+  | 'config_root_refused'
 
 /**
  * Its message is its code and nothing else. `detail` is b2c's own error text when it gave one,
@@ -108,7 +109,9 @@ export type RunOptions = {
  * The folder whose dw.json one call reads, named by the caller (null: none, so no role is
  * configured). Left out, it is the one `configRoot()` names at that moment. A piece that follows
  * one operation over several calls names the folder it began with, so a focus change in between
- * does not give it another file; nothing else changes for the other calls.
+ * does not give it another file; nothing else changes for the other calls. Only the folder of a
+ * local workspace Orca lists, or the main checkout of one, may be named: any other is refused
+ * with `config_root_refused` before anything is read.
  */
 export type ConfigChoice = { configRoot?: string | null }
 
@@ -195,12 +198,23 @@ export type B2c = {
    * a list b2c returns without ever holding the host.
    */
   isHost(role: Role, value: unknown, options?: ConfigChoice): Promise<boolean>
+  /**
+   * The folder whose dw.json a call naming `root` reads: `root` itself, or its main checkout when
+   * only that one holds the file; null when neither does. A piece keeps it to name that file
+   * later, even once `root` is gone. Refused (`config_root_refused`) like a named root.
+   */
+  configFolder(root: string): Promise<string | null>
 }
 
 export type B2cDeps = {
   settings: Settings
   /** The workspace whose dw.json is read. */
   configRoot: () => Promise<string | null>
+  /**
+   * The folders of the local workspaces Orca lists: a call may name one of them, or the main
+   * checkout of one, as the folder whose dw.json it reads. None: no call may name a folder.
+   */
+  knownRoots?: () => Promise<string[]>
   log?: Logger
   spawn?: Spawner
   platform?: string
@@ -943,9 +957,29 @@ export function createB2c(deps: B2cDeps): B2c {
     )
   }
 
+  /** A folder as compared: absolute, one kind of slash, no trailing one, in one case on Windows. */
+  function folderKey(path: string): string {
+    const absolute = platform === 'win32' ? win32.resolve(path) : resolvePath(path)
+    const plain = absolute.replace(/\\/g, '/').replace(/\/+$/, '')
+    return platform === 'win32' ? plain.toLowerCase() : plain
+  }
+
+  /** Refuses a named folder that is neither a listed local workspace nor the main checkout of one. */
+  async function checkRoot(root: string): Promise<void> {
+    const known = deps.knownRoots ? await deps.knownRoots().catch(() => [] as string[]) : []
+    const wanted = folderKey(root)
+    for (const folder of known) {
+      if (folderKey(folder) === wanted) return
+      const main = await mainCheckoutOf(folder, deps.fs).catch(() => null)
+      if (main && folderKey(main) === wanted) return
+    }
+    throw new B2cError('config_root_refused')
+  }
+
   /** The file of `choice.configRoot` when the caller names one, else of the folder `configRoot()` names now. */
   async function readConfig(choice: ConfigChoice = {}): Promise<LoadedConfig> {
     const values = await deps.settings.read()
+    if (typeof choice.configRoot === 'string') await checkRoot(choice.configRoot)
     const root = choice.configRoot !== undefined ? choice.configRoot : await deps.configRoot()
     const config = await loadConfig({ root, configFile: values.configFile, suffixes: await deps.settings.suffixes() }, deps.fs)
     for (const role of ROLES) masker.remember(config.roles[role].vars)
@@ -1180,6 +1214,11 @@ export function createB2c(deps: B2cDeps): B2c {
       // file is read here only when nothing has been read yet since the worker started.
       if (!everRead) await readConfig()
       return masker.mask(text)
+    },
+
+    async configFolder(root) {
+      await checkRoot(root)
+      return configFolderOf(root, (await deps.settings.read()).configFile, deps.fs)
     },
 
     async isHost(role, value, options = {}) {

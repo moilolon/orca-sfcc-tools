@@ -115,6 +115,19 @@ export async function locateConfig(root: string, configFile: string, fs: FileSys
   return null
 }
 
+/**
+ * The folder whose dw.json `locateConfig` reads for `root`: `root` itself (always, when the
+ * `configFile` setting names a file), else its main checkout when only that one holds a
+ * `dw.json`; null when neither does.
+ */
+export async function configFolderOf(root: string, configFile: string, fs: FileSystem = nodeFiles): Promise<string | null> {
+  if (configFile.trim()) return root
+  if ((await fs.readText(join(root, 'dw.json'))) !== null) return root
+  const main = await mainCheckoutOf(root, fs)
+  if (main && (await fs.readText(join(main, 'dw.json'))) !== null) return main
+  return null
+}
+
 export type DwConfigOptions = { root: string | null; configFile: string; suffixes: Suffixes }
 
 function everyRole(map: (role: Role) => RoleConfig): Record<Role, RoleConfig> {
