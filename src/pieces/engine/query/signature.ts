@@ -27,7 +27,7 @@ export type Signature = {
   /** The documentation page of a `dw.*` member, and what the worker may describe. */
   link: string | null
   describe: Describe | null
-  /** Where a function of the checkout is declared, its JSDoc, the storefronts it runs on (null: every one). */
+  /** Where a function of the checkout is declared, its JSDoc, the storefronts it runs on (null when no storefront can be named (see `ModuleCopy`)). */
   path: string | null
   line: number | null
   doc: string | null

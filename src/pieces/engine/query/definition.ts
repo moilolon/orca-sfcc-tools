@@ -1,6 +1,6 @@
 // Go to definition: where the thing at an offset is defined, as a list of places, more than one
 // when storefronts run different copies (each place says the storefronts it serves; `null` when
-// it does not depend on one). A template name (`template="…"`, `res.render`, `ISML.renderTemplate`,
+// none can be named, see `ModuleCopy`). A template name (`template="…"`, `res.render`, `ISML.renderTemplate`,
 // `new Template`) and a `require` go to the file; a `Resource.msg` key to its line in the bundle;
 // a member of a cartridge module, along each path and `module.superModule`, to where it is
 // declared; a route name to the declaration that serves it; a custom attribute to its metadata;
@@ -20,7 +20,10 @@ import { guessedClass, memberName, metadataTypeOf, Types } from './types'
 /** At most this many places are answered. */
 export const MAX_TARGETS = 50
 
-/** A place: a file of the workspace, the range there (empty at 0 for a whole file), its 1-based line, the storefronts it serves. */
+/**
+ * A place: a file of the workspace, the range there (empty at 0 for a whole file), its 1-based
+ * line, the storefronts it serves; null when no storefront can be named (see `ModuleCopy`).
+ */
 export type Target = { path: string; start: number; end: number; line: number; storefronts: string[] | null }
 
 export type DefinitionKind = 'template' | 'module' | 'resource' | 'member' | 'super-module' | 'route' | 'attribute' | 'tag' | 'declaration'

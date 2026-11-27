@@ -11,7 +11,13 @@ export type QueryContext = { index: CheckoutIndex; dw: DwIndex | null }
 /** How many copies along `module.superModule` and re-exports are followed. */
 export const MAX_MODULE_DEPTH = 8
 
-/** A file a module reaches: on one storefront, or on every one (`storefront: null`, a file named directly). */
+/**
+ * A file a module reaches, and the storefront it is reached on. `null` means no storefront can be
+ * named, for one of two reasons: the place does not depend on one (a file named directly: `~/`,
+ * relative, a cartridge or `modules` name), or the reading file is loaded from no storefront path
+ * (its cartridge is on none, or the checkout gives no path), so it runs wherever code loads it by
+ * name. Never "every storefront".
+ */
 export type ModuleCopy = { storefront: string | null; path: string }
 
 /** The module name `module.superModule` is given: the next copy of the file itself, per storefront. */
@@ -67,15 +73,22 @@ export function fileMembers(ctx: QueryContext, path: string, storefront: string 
   if (!exports || depth > MAX_MODULE_DEPTH || seen.has(path)) return []
   seen.add(path)
   // A member that re-exports another module's (`tax: base.tax`) is that member, where it is defined.
+  // Followed only when every copy the file may load agrees on one definition: read without a
+  // storefront, a `*/` alias may reach a different copy on each, and naming one would be a guess.
+  // When they disagree, or one lacks the member, the answer is the export line itself.
   const own = (member: ExportedMember): MemberDefinition => {
-    if (!member.alias) return { storefront, path, member }
+    const written = { storefront, path, member }
+    if (!member.alias) return written
     const alias = member.alias
+    let agreed: MemberDefinition | null = null
     for (const copy of moduleCopies(ctx, path, alias.module)) {
       if (storefront !== null && copy.storefront !== null && copy.storefront !== storefront) continue
       const target = fileMembers(ctx, copy.path, storefront ?? copy.storefront, depth + 1, new Set(seen)).find((each) => each.member.name === alias.member)
-      if (target) return { ...target, member: { ...target.member, name: member.name } }
+      if (!target) return written
+      if (agreed && (agreed.path !== target.path || agreed.member.start !== target.member.start)) return written
+      agreed ??= target
     }
-    return { storefront, path, member }
+    return agreed ? { ...agreed, storefront, member: { ...agreed.member, name: member.name } } : written
   }
   const out: MemberDefinition[] = exports.members.map(own)
   const names = new Set(out.map((each) => each.member.name))
@@ -116,7 +129,7 @@ export function moduleMembers(ctx: QueryContext, from: string, module: string): 
   return out
 }
 
-/** A definition of a member, with the storefronts it runs on; `null` when the module is a file named directly. */
+/** A definition of a member, with the storefronts it runs on; `null` when no storefront can be named (see `ModuleCopy`). */
 export type MemberPlace = { storefronts: string[] | null; path: string; member: ExportedMember }
 
 /** Where one member of `require(module)` is defined, one entry per definition: empty when no copy exports it. */

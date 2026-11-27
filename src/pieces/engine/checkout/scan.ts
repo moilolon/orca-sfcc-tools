@@ -500,7 +500,11 @@ function exportsOf(text: string, facts: ScriptFacts, functions: ReadonlyMap<numb
   }
   for (const id of facts.exports.superModule.bindings) bound.set(id, SUPER_MODULE)
   const referenceAt = new Map<number, Reference>()
-  for (const reference of facts.references) referenceAt.set(reference.start, reference)
+  for (const reference of facts.references) {
+    referenceAt.set(reference.start, reference)
+    // One variable, one target: a name written again after its binding is no longer the module.
+    if (reference.write && reference.declaration !== null) bound.delete(reference.declaration)
+  }
   /** `base.tax`, `helper.price`, `module.superModule.tax`: the module and member a value reads as it is. */
   const aliasOf = (value: ValueFacts): ExportedMember['alias'] => {
     if (value.kind !== 'other') return undefined

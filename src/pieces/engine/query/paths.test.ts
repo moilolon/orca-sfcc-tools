@@ -115,3 +115,57 @@ test('paths: a member a brand re-exports from its base (tax: base.tax) is the ba
   const call = at(shared, "var helper = require('*/cartridge/scripts/helper');\nhelper.tax(‸p, 1);\n")
   assert.deepEqual(signatureHelp(ctx, call.analysis, call.offset)?.signatures.map((each) => [each.label, each.path, each.storefronts]), [['tax(p, rate)', base, ['ShopA', 'ShopB']]])
 })
+
+test('paths: an alias read without a storefront is followed only when every copy agrees, else it is the export line', async () => {
+  const project = (name: string) => `<projectDescription><name>${name}</name></projectDescription>`
+  const base = 'cartridges/app_base_garden/cartridge/scripts/price.js'
+  const brand = 'cartridges/app_a_garden/cartridge/scripts/price.js'
+  const facade = 'cartridges/app_base_garden/cartridge/scripts/facade.js'
+  const reader = 'cartridges/app_base_garden/cartridge/scripts/q.js'
+  const FACADE = "var p = require('*/cartridge/scripts/price');\nmodule.exports = { total: p.total };\n"
+  const build = async (withBrand: boolean) => {
+    const entries: Record<string, string> = {
+      'cartridges/app_base_garden/.project': project('app_base_garden'),
+      [base]: 'function total(p) {}\nmodule.exports = { total: total };\n',
+      [facade]: FACADE,
+      [reader]: "var f = require('~/cartridge/scripts/facade');\nf.total(1);\n",
+      'cartridges/app_a_garden/.project': project('app_a_garden'),
+      'cartridges/app_a_garden/cartridge/scripts/other.js': 'module.exports = {};\n',
+      'cartridges/app_b_garden/.project': project('app_b_garden'),
+      'cartridges/app_b_garden/cartridge/scripts/other.js': 'module.exports = {};\n',
+      'sites/site_template/sites/ShopA/site.xml': '<site site-id="ShopA"><custom-cartridges>app_a_garden:app_base_garden</custom-cartridges></site>',
+      'sites/site_template/sites/ShopB/site.xml': '<site site-id="ShopB"><custom-cartridges>app_b_garden:app_base_garden</custom-cartridges></site>'
+    }
+    if (withBrand) entries[brand] = 'function total(p, a) {}\nmodule.exports = { total: total };\n'
+    const index = new CheckoutIndex(new MemoryFiles(entries), { dw: dwLookup })
+    await index.build()
+    return { index, dw: committedDw() }
+  }
+  const READ = "var f = require('~/cartridge/scripts/facade');\nf.to‸tal(1);\n"
+  const CALL = "var f = require('~/cartridge/scripts/facade');\nf.total(‸1);\n"
+  const exportLine = { path: facade, start: FACADE.indexOf('total:'), end: FACADE.indexOf('total:') + 5, line: 2, storefronts: null }
+  // The copies disagree (the brand overrides `total` on ShopA): the export line, never one copy for both.
+  const disagree = await build(true)
+  const read = at(reader, READ)
+  assert.deepEqual(definition(disagree, read.analysis, read.offset)?.targets, [exportLine])
+  // The same by a relative path and by the cartridge's name.
+  for (const module of ['./facade', 'app_base_garden/cartridge/scripts/facade']) {
+    const other = at(reader, `var f = require('${module}');\nf.to‸tal(1);\n`)
+    assert.deepEqual(definition(disagree, other.analysis, other.offset)?.targets, [exportLine], module)
+  }
+  const call = at(reader, CALL)
+  assert.equal(signatureHelp(disagree, call.analysis, call.offset), null)
+  const ofBrand = at(brand, 'function to‸tal(p, a) {}\nmodule.exports = { total: total };\n')
+  // The facade's own `p.total` reads the brand's copy on ShopA; the reader through the facade is no read of it.
+  assert.deepEqual(references(disagree, ofBrand.analysis, ofBrand.offset)?.references.filter((each) => each.kind === 'use').map((each) => [each.path, each.storefronts]), [[facade, ['ShopA']]])
+  const ofBase = at(base, 'function to‸tal(p) {}\nmodule.exports = { total: total };\n')
+  assert.deepEqual(references(disagree, ofBase.analysis, ofBase.offset)?.references.filter((each) => each.kind === 'use').map((each) => [each.path, each.storefronts]), [[facade, ['ShopB']]])
+  // Every copy is the base's: followed.
+  const agree = await build(false)
+  assert.deepEqual(definition(agree, read.analysis, read.offset)?.targets.map((each) => [each.path, each.line, each.storefronts]), [[base, 1, null]])
+  assert.deepEqual(signatureHelp(agree, call.analysis, call.offset)?.signatures.map((each) => [each.label, each.path]), [['total(p)', base]])
+  assert.deepEqual(references(agree, ofBase.analysis, ofBase.offset)?.references.filter((each) => each.kind === 'use').map((each) => [each.path, each.storefronts]), [
+    [facade, ['ShopA', 'ShopB']],
+    [reader, null]
+  ])
+})

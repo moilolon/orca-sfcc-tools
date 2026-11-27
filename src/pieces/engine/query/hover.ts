@@ -46,7 +46,7 @@ export type HoverContent =
   | { kind: 'tag'; name: string; custom: boolean; attributes: string[]; template: string | null; copies: TemplateCopy[] }
 
 export type MemberDefinitionEntry = {
-  /** The storefronts the definition runs on; null when the module is a file named directly. */
+  /** The storefronts the definition runs on; null when no storefront can be named (see `ModuleCopy`). */
   storefronts: string[] | null
   path: string
   line: number

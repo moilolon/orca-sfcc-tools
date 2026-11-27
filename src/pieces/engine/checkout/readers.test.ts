@@ -253,3 +253,10 @@ test('scan: the members of modules a file reads, through a name, a require, a pa
   const template = "<isscript>var helper = require('*/cartridge/scripts/helper');</isscript>\n<span>${helper.total()}</span>"
   assert.deepEqual(scanTemplate(template).members.map((use) => [use.member, use.line]), [['total', 2]])
 })
+
+test('scan: a member exported as another module’s is an alias, but not through a name written again', () => {
+  const aliased = scanScript("var h = require('./price');\nmodule.exports = { total: h.total };").exports.members
+  assert.deepEqual(aliased.map((member) => member.alias ?? null), [{ module: './price', member: 'total' }])
+  const rewritten = scanScript("var h = require('./price');\nh = { total: function (z) {} };\nmodule.exports = { total: h.total };").exports.members
+  assert.deepEqual(rewritten.map((member) => member.alias ?? null), [null])
+})

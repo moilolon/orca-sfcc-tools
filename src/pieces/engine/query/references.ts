@@ -22,7 +22,7 @@ export type ReferenceEntry = {
   line: number
   /** `definition` for where the function is exported or declared, `use` for a read of it. */
   kind: 'definition' | 'use'
-  /** The storefronts whose path makes the read reach the function; null when it does not depend on one. */
+  /** The storefronts whose path makes the read reach the function; null when no storefront can be named (see `ModuleCopy`). */
   storefronts: string[] | null
 }
 

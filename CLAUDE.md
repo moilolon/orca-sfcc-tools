@@ -275,11 +275,12 @@ Changing it needs the owner's yes.
       read off the class (`Object`'s own aside), the rest off an instance. `modules.ts`: the
       copies a `require` reaches and the members each exports, its re-exports and
       `module.superModule` followed (`MAX_MODULE_DEPTH`), and a member exported as another
-      module's (`tax: base.tax`, `alias` in `scan.ts`) read as that one. A `*/` read resolves only
-      for the storefronts whose path holds the reading file's cartridge (`storefrontsOf`); a file
-      on no path gets every copy the paths reach, unlabelled (it may be loaded by name from any of
-      them, so a storefront would be a guess). `complete.ts` decides where the offset
-      is, then offers at most `MAX_COMPLETION_ITEMS` filtered by what is typed: ISML tags (custom
+      module's (`tax: base.tax`, `alias` in `scan.ts`; never through a name written again) read
+      as that one when every copy it may reach agrees, else as the export line. A `*/` read
+      resolves only for the storefronts whose path holds the reading file's cartridge
+      (`storefrontsOf`); a file on no path gets every copy the paths reach, unlabelled (it may be
+      loaded by name from any of them, so a storefront would be a guess). `complete.ts` decides
+      where the offset is, then offers at most `MAX_COMPLETION_ITEMS` filtered by what is typed: ISML tags (custom
       ones of the template and of what it includes, one level) and their attributes
       (`isml-tags.ts`), template paths, `dw.*` members, custom attributes and site preferences,
       a module's members, resource keys and bundles, `require` paths, route ids; each item has a
@@ -293,7 +294,8 @@ Changing it needs the owner's yes.
       `module.superModule`, a route (its steps in the order they run and the one that serves),
       a template, a resource key, a custom attribute, a tag; lists cut at `MAX_HOVER_ENTRIES`.
       `definition.ts`: where the thing at the offset is defined, one `Target` per place with the
-      storefronts it serves (`null` when it does not depend on one): a template's copy per
+      storefronts it serves (`null` when none can be named: the place does not depend on one,
+      or the reading file is on no storefront path; never "every storefront"): a template's copy per
       storefront, a `require`'s file, a key's line in the bundle each storefront reads, a module
       member's declaration in each copy (along `module.superModule` too), the declaration that
       serves a route, a custom attribute's metadata (only from the checkout, not the ref), a
