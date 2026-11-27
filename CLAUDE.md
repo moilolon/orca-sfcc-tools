@@ -546,10 +546,15 @@ control, ASCII boxes).
     kept or not (open folders, pages drawn, windows, open variables), never its data; the error
     state's one button is then *Reset view*, which resets and draws again, so a view is never
     locked by state it keeps across opens.
-- **Cost:** a render reads atoms and draws; it never awaits a request. What is computed from a
-  long list (a script's rows, the tree of scripts) is a `derived` atom, computed once per change
-  (one per language when it holds words); a worker post or answer that changes nothing sets
-  nothing.
+- **Cost:** a render reads atoms and draws; it never awaits a request. Orca suspends a panel
+  whose answer to its ping (every 10 s, while Orca's window is visible) takes over 5 s, and the
+  answer waits for whatever the panel's thread is doing, a draw included; a loaded machine makes
+  a draw 20 to 40 times slower. So what is computed from a long list (a script's rows, the tree of
+  scripts) goes through `memo` of `src/panel/ui.tsx`, built again only when an input changed (one
+  per language when it holds words). Never Orca's `derived` for that: it is no cache, each `read`
+  of it computes again. A worker post or answer that changes nothing sets nothing, and posts that
+  arrive while an answer is awaited make one more request, not one each. A view whose draw takes
+  over `SLOW_VIEW_MS` (1.5 s) shows its error state until it is reset or tried again.
 - **States of a view:** `render` returns null until the piece has its first answer, and the
   panel draws a loading placeholder; with nothing to show, the piece draws `Empty` in its own
   words. A `render` that throws, or a component in its tree that throws, is caught: the view
