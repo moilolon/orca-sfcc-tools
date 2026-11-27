@@ -142,7 +142,9 @@ Changing it needs the owner's yes.
     - A call of `run()`, `start()`, `instances()` or `isHost()` may name the folder whose
       `dw.json` it reads (`configRoot`); left out, it is the one `configRoot()` names at that
       moment. Only an operation followed over several calls names it (a sandbox start or stop,
-      a deletion), so a focus change in between does not give it another file.
+      a deletion), so a focus change in between does not give it another file. Only the folder
+      of a local workspace Orca lists (`knownRoots`), or the main checkout of one, may be named;
+      any other is refused with `config_root_refused` before anything is read.
     - `run()` is for one-shot commands and adds `--json`. `start()` is for long-lived ones: it
       hands over stderr line by line and stdout in raw chunks, takes `write()` and `end()` for
       stdin, always reads both streams, and adds `--jsonl` only with `jsonl: true`; its `exited`
@@ -194,9 +196,13 @@ Changing it needs the owner's yes.
       can answer a timeout and go on deleting, renaming the version `.deleted_<n>_<name>`, so a
       version gone or renamed counts as deleted and one still there waits for the next
       activation; a `.deleted_…` version is never shown as a workspace's or deleted again.
-      A version is deleted with the `dw.json` of its own workspace (the folder it was picked
-      from), or the one in force when it was queued when that folder no longer configures the
-      sandbox, taken when it is queued and named in every call of its deletion. A
+      A version is deleted only with the `dw.json` of its own workspace: the folder that file
+      was read from when the workspace was picked (its root, or its main checkout's,
+      `b2c.configFolder()`), kept with its version and named in every call of its deletion.
+      When there is none, or it no longer holds a ready sandbox role (a removed worktree whose
+      file went with it), nothing is deleted: the version stays queued and the view lists it as
+      not deletable, for a person to forget. Never the focused workspace's file, which may name
+      another sandbox holding a version of the same name. A
       worker restart restarts the
       watcher without a redeploy, but only for a version whose last full deploy ended; the
       others show that a deploy is needed and are never reloaded.

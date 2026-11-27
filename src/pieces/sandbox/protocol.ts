@@ -61,6 +61,12 @@ export type SandboxStatus = {
   /** Code versions of removed workspaces still to be deleted, once none of them is active. */
   pendingDeletes: number
   /**
+   * Queued versions that cannot be deleted: the dw.json of their workspace is gone (or no longer
+   * has a ready sandbox role), and no other file is used. A person may forget one
+   * (`sandbox.dropDelete`); it may stay on its sandbox.
+   */
+  stuckDeletes: string[]
+  /**
    * Stored versions of workspaces a complete list no longer holds (removed while the plugin was
    * not listening): a person may delete them. Empty when the list is not whole. `checkable` is
    * false for one whose project is hidden from the sidebar (or may be): the list may leave its
@@ -85,6 +91,8 @@ declare module 'orca' {
     'sandbox.deploy': { input: Record<string, never> | undefined; output: SandboxStatus }
     /** Deletes, by hand, the version of a workspace that is no longer listed (`leftovers`). */
     'sandbox.forget': { input: { workspaceId: string }; output: SandboxStatus }
+    /** Forgets a queued version that cannot be deleted (`stuckDeletes`), without deleting it. */
+    'sandbox.dropDelete': { input: { codeVersion: string }; output: SandboxStatus }
     /** Reloads the active code version (`code activate --reload`). */
     'sandbox.reload': { input: Record<string, never> | undefined; output: SandboxStatus }
     'sandbox.start': { input: Record<string, never> | undefined; output: SandboxStatus }

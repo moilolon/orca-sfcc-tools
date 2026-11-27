@@ -184,6 +184,25 @@ test('a version left behind is deleted only after pressing it and then the butto
   assert.deepEqual(forgets, [{ workspaceId: 'w-old' }])
 })
 
+test('a version whose dw.json is gone is listed as not deletable, and only forgotten by hand', async () => {
+  const drops: unknown[] = []
+  const { panel } = await show({ ...WATCHING, stuckDeletes: ['ws-old-checkout'] }, {
+    'sandbox.dropDelete': (input: { codeVersion: string }) => {
+      drops.push(input)
+      return WATCHING
+    }
+  })
+  assert.ok(panel.find({ text: 'Cannot delete' }))
+  assert.ok(panel.find({ text: 'config gone' }))
+  assert.equal(button(panel, 'Forget this version'), null, 'nothing on one press')
+  await panel.press({ type: 'Link', text: 'ws-old-checkout' })
+  assert.deepEqual(drops, [])
+  await panel.press({ type: 'Button', text: 'Forget this version' })
+  assert.deepEqual(drops, [{ codeVersion: 'ws-old-checkout' }])
+  assert.equal(panel.find({ text: 'Cannot delete' }), null, 'the answer is drawn')
+  assert.deepEqual(panel.errors, [])
+})
+
 test('a version left behind in a hidden project is shown, cannot be pressed, and the view says why', async () => {
   const { panel } = await show({ ...WATCHING, leftovers: [{ workspaceId: 'w-hidden', codeVersion: 'ws-archived-site', checkable: false }] })
   assert.ok(panel.find({ text: 'ws-archived-site' }))

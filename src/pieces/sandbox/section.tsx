@@ -21,6 +21,8 @@ const refused = atom<string | null>(null)
 const chosen = atom<string | null>(null)
 /** The left-behind version pressed, waiting for *Delete this version*. */
 const chosenLeftover = atom<string | null>(null)
+/** The version that cannot be deleted pressed, waiting for *Forget this version*. */
+const chosenStuck = atom<string | null>(null)
 
 type ActionRequest = 'sandbox.refresh' | 'sandbox.release' | 'sandbox.deploy' | 'sandbox.reload' | 'sandbox.start' | 'sandbox.stop'
 
@@ -37,17 +39,20 @@ async function load(): Promise<void> {
   }
 }
 
-async function act(name: ActionRequest | 'sandbox.pick' | 'sandbox.forget', workspaceId?: string): Promise<void> {
+async function act(name: ActionRequest | 'sandbox.pick' | 'sandbox.forget' | 'sandbox.dropDelete', target?: string): Promise<void> {
   set(pending, name)
   set(refused, null)
   try {
     const next =
       name === 'sandbox.pick' || name === 'sandbox.forget'
-        ? await plugin.request(name, { workspaceId: workspaceId ?? '' }, { timeoutMs: 90_000 })
-        : await plugin.request(name, {}, { timeoutMs: 90_000 })
+        ? await plugin.request(name, { workspaceId: target ?? '' }, { timeoutMs: 90_000 })
+        : name === 'sandbox.dropDelete'
+          ? await plugin.request(name, { codeVersion: target ?? '' }, { timeoutMs: 90_000 })
+          : await plugin.request(name, {}, { timeoutMs: 90_000 })
     set(status, next)
     if (name === 'sandbox.pick') set(chosen, null)
     if (name === 'sandbox.forget') set(chosenLeftover, null)
+    if (name === 'sandbox.dropDelete') set(chosenStuck, null)
   } catch (error) {
     set(refused, codeOf(error))
   } finally {
@@ -293,6 +298,43 @@ function LeftoversGroup({ current, locale, ready, busy }: { current: SandboxStat
   )
 }
 
+/**
+ * Queued versions whose workspace's dw.json is gone: never deleted with another file, so a person
+ * may only forget one, pressing it, then the button.
+ */
+function StuckGroup({ current, locale, busy }: { current: SandboxStatus; locale: string; busy: boolean }) {
+  const w = (key: SandboxMessageKey) => t(messages, locale, key)
+  const stuck = current.stuckDeletes ?? []
+  if (stuck.length === 0) return null
+  const picked = read(chosenStuck)
+  const candidate = stuck.includes(picked ?? '') ? picked : null
+  return (
+    <Group title={w('groupStuck')}>
+      {stuck.map((version) => (
+        <ListRow
+          key={version}
+          tone="attention"
+          title={version}
+          note={w('noteConfigGone')}
+          current={version === candidate}
+          onPress={() => set(chosenStuck, version === picked ? null : version)}
+        />
+      ))}
+      {candidate ? (
+        <Actions>
+          <Button size="sm" variant="outline" icon="close" disabled={busy} onPress={() => void act('sandbox.dropDelete', candidate)}>
+            {w('forgetVersion')}
+          </Button>
+        </Actions>
+      ) : (
+        <Text size="sm" muted>
+          {w('stuckGuidance')}
+        </Text>
+      )}
+    </Group>
+  )
+}
+
 /** The view, or null until the first state arrives. */
 export function renderSandbox(locale: string): OrcaNode {
   const w = (key: SandboxMessageKey) => t(messages, locale, key)
@@ -326,6 +368,7 @@ export function renderSandbox(locale: string): OrcaNode {
       <UploadGroup current={current} locale={locale} ready={ready} busy={busy} />
       <WorkspacesGroup current={current} locale={locale} ready={ready} busy={busy} />
       <LeftoversGroup current={current} locale={locale} ready={ready} busy={busy} />
+      <StuckGroup current={current} locale={locale} busy={busy} />
     </Stack>
   )
 }

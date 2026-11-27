@@ -20,10 +20,12 @@
 // A code version is deleted only when its workspace's `workspace.removed` event arrives, or when
 // a person deletes a version left behind by hand: a workspace missing from a list is never taken
 // as removed. The active version cannot be deleted, so it waits until another one is active.
-// A version is deleted with the dw.json of its own workspace (the folder it was picked from,
-// kept per workspace), taken when it is queued; when that folder no longer configures the
-// sandbox (a removed worktree), with the one in force when it was queued. Every call of its
-// deletion names that folder, so moving the focus meanwhile changes nothing.
+// A version is deleted only with the dw.json of its own workspace: the folder that file was read
+// from when the workspace was picked (its root, or its main checkout's), kept with its version.
+// Every call of its deletion names that folder. When there is none, or it no longer holds a ready
+// sandbox role (a removed worktree whose file went with it), nothing is deleted: the version stays
+// queued, shown as not deletable, until a person forgets it. Never with the focused workspace's
+// file: that may name another sandbox, which may hold a version of the same name.
 //
 // Whether each workspace's last full deploy ended is stored, always before the owner: a version
 // whose deploy failed or was cut short by a restart is never reloaded, and after a restart it
@@ -50,9 +52,9 @@ const DELETE_TIMEOUT_MS = 2 * 60_000
 /** What is kept in the piece's storage. */
 const KEYS = { owner: 'owner', versions: 'versions', pending: 'pending', deploys: 'deploys', projects: 'projects', roots: 'roots', pendingRoots: 'pendingRoots' } as const
 
-/** The option that names a folder to b2c; none (the runner's own choice) for a version queued before folders were kept. */
-function choiceOf(root: string | undefined): ConfigChoice {
-  return root === undefined ? {} : { configRoot: root }
+/** The option that names a folder to b2c. */
+function choiceOf(root: string): ConfigChoice {
+  return { configRoot: root }
 }
 
 /** The workspace that uploads, as stored: its id, its version and its name when it was picked. */
@@ -153,11 +155,16 @@ export class Ownership {
   /** The project of each workspace with a version, when Orca named one. */
   private projects: Record<string, string> = {}
   private deploys: Record<string, DeployRecord> = {}
-  /** The folder each workspace with a version was picked from: its dw.json names its sandbox. */
+  /**
+   * The folder each workspace's dw.json was read from when it was picked (its root, or its main
+   * checkout's): that file names the sandbox its version is on.
+   */
   private roots: Record<string, string> = {}
   private pending: string[] = []
-  /** The folder whose dw.json each queued version is deleted with, taken when it was queued. */
+  /** The folder whose dw.json each queued version is deleted with, its workspace's, kept when queued. */
   private pendingRoots: Record<string, string> = {}
+  /** Queued versions the last pass could not delete: no folder, or one without a ready sandbox role. */
+  private stuck: string[] = []
   /** Raised by every pick, release and removal: work started before it is stale. */
   private generation = 0
   /** Raised by every release: a pick, redeploy or restore queued or running before it stops. */
@@ -254,8 +261,32 @@ export class Ownership {
     return this.projects[workspaceId] ?? null
   }
 
+  /** Queued versions still to be deleted, but the ones that cannot be (`stuckVersions`). */
   pendingCount(): number {
-    return this.pending.length
+    return this.pending.filter((version) => !this.stuck.includes(version)).length
+  }
+
+  /** Queued versions that cannot be deleted: their workspace's dw.json is gone. */
+  stuckVersions(): string[] {
+    return this.pending.filter((version) => this.stuck.includes(version))
+  }
+
+  /**
+   * Drops, by a person's hand, a queued version that cannot be deleted, without deleting it: it
+   * may stay on its sandbox. Refused for any other version.
+   */
+  dropStuck(version: string): Promise<void> {
+    return this.serial(async (live) => {
+      if (!this.stuckVersions().includes(version)) throw new SandboxError('version_not_stuck')
+      this.pending = this.pending.filter((item) => item !== version)
+      this.stuck = this.stuck.filter((item) => item !== version)
+      const { [version]: _gone, ...rest } = this.pendingRoots
+      this.pendingRoots = rest
+      await live(this.deps.store.set(KEYS.pending, [...this.pending]))
+      await live(this.deps.store.set(KEYS.pendingRoots, { ...this.pendingRoots }))
+      this.deps.log(`forgot the code version ${version}, which could not be deleted`)
+      this.deps.onChange()
+    })
   }
 
   /**
@@ -324,9 +355,11 @@ export class Ownership {
           this.versions = derived.names
           await live(this.deps.store.set(KEYS.versions, { ...this.versions }))
         }
-        // The folder whose dw.json this version's sandbox comes from, for its deletion later.
-        if (this.roots[workspace.id] !== workspace.path) {
-          this.roots = { ...this.roots, [workspace.id]: workspace.path }
+        // The folder its dw.json was read from (its root, or its main checkout's), kept with its
+        // version: its deletion uses that file and no other.
+        const folder = await live(this.deps.b2c.configFolder(workspace.path))
+        if (folder && this.roots[workspace.id] !== folder) {
+          this.roots = { ...this.roots, [workspace.id]: folder }
           await live(this.deps.store.set(KEYS.roots, { ...this.roots }))
         }
         const projectId = workspace.projectId ?? null
@@ -461,8 +494,8 @@ export class Ownership {
     // The version is queued first, so a step stopped halfway never forgets a version undeleted,
     // with the folder whose dw.json it is deleted with.
     if (version && !this.pending.includes(version)) {
-      const root = await this.deletionRoot(live, workspaceId)
-      if (typeof root === 'string') {
+      const root = this.roots[workspaceId]
+      if (root !== undefined) {
         this.pendingRoots = { ...this.pendingRoots, [version]: root }
         await live(this.deps.store.set(KEYS.pendingRoots, { ...this.pendingRoots }))
       }
@@ -481,33 +514,12 @@ export class Ownership {
   }
 
   /**
-   * The folder a workspace's version is deleted with: the one it was picked from while its
-   * dw.json still configures the sandbox, else the one in force now (a removed worktree's folder
-   * is gone). Taken once, when the version is queued.
-   */
-  private async deletionRoot(live: Live, workspaceId: string): Promise<string | null> {
-    const own = this.roots[workspaceId]
-    if (own !== undefined) {
-      try {
-        const { instances } = await live(this.deps.b2c.instances({ configRoot: own }), HOST_LIMIT)
-        if (instances.sandbox === 'ready') return own
-      } catch (error) {
-        if (codeOf(error) === 'disposed' || codeOf(error) === 'superseded') throw error
-      }
-    }
-    try {
-      return await live(this.deps.workspaces.configRoot(), HOST_LIMIT)
-    } catch (error) {
-      if (codeOf(error) === 'disposed' || codeOf(error) === 'superseded') throw error
-      return null
-    }
-  }
-
-  /**
    * Deletes every queued version that is not active; one that is no longer listed is forgotten.
    * One pass at a time. A delete that fails is looked for in `code list` again: Salesforce can
    * answer a timeout and still go on deleting, renaming the version `.deleted_<n>_<name>`, so one
-   * gone or renamed counts as deleted; one still there stays queued for the next activation.
+   * gone or renamed counts as deleted; one still there stays queued for the next activation. A
+   * version with no folder, or whose folder no longer holds a ready sandbox role, is not touched:
+   * it stays queued, listed as not deletable (`stuckVersions`).
    */
   deletePending(): Promise<void> {
     this.deleting = this.deleting.then(() => this.deleteNow()).catch(() => undefined)
@@ -516,21 +528,38 @@ export class Ownership {
 
   private async deleteNow(): Promise<void> {
     if (this.pending.length === 0 || this.disposed) return
-    // One list per folder in a pass: versions queued with the same dw.json share it.
+    // One check and one list per folder in a pass: versions queued with the same dw.json share them.
+    const usable = new Map<string, Promise<boolean>>()
+    const usableRoot = (root: string) => {
+      let answer = usable.get(root)
+      if (!answer) {
+        answer = this.bounded(this.deps.b2c.instances(choiceOf(root)), HOST_LIMIT).then(
+          ({ instances }) => instances.sandbox === 'ready',
+          () => false
+        )
+        usable.set(root, answer)
+      }
+      return answer
+    }
     const lists = new Map<string, Promise<Record<string, unknown>[]>>()
-    const listWith = (root: string | undefined) => {
-      const key = root ?? ''
-      let listed = lists.get(key)
+    const listWith = (root: string) => {
+      let listed = lists.get(root)
       if (!listed) {
         listed = this.listVersions(root)
-        lists.set(key, listed)
+        lists.set(root, listed)
       }
       return listed
     }
     let failure: string | null = null
+    const stuck: string[] = []
     for (const version of [...this.pending]) {
       if (this.disposed) return
       const root = this.pendingRoots[version]
+      // Its workspace's dw.json is gone: nothing is deleted, with no other file.
+      if (root === undefined || !(await usableRoot(root))) {
+        stuck.push(version)
+        continue
+      }
       let listed: Record<string, unknown>[]
       try {
         listed = await listWith(root)
@@ -560,6 +589,8 @@ export class Ownership {
       const { [version]: _done, ...rest } = this.pendingRoots
       this.pendingRoots = rest
     }
+    this.stuck = stuck
+    if (stuck.length > 0) this.deps.log(`${stuck.length} code version(s) cannot be deleted: their dw.json is gone`)
     await this.bounded(this.deps.store.set(KEYS.pending, [...this.pending]), HOST_LIMIT).catch(() => undefined)
     await this.bounded(this.deps.store.set(KEYS.pendingRoots, { ...this.pendingRoots }), HOST_LIMIT).catch(() => undefined)
     this.deps.onProblem('delete', failure)
@@ -567,7 +598,7 @@ export class Ownership {
   }
 
   /** The versions on the sandbox the dw.json of `root` names. */
-  private async listVersions(root: string | undefined): Promise<Record<string, unknown>[]> {
+  private async listVersions(root: string): Promise<Record<string, unknown>[]> {
     const { json } = await this.bounded(this.deps.b2c.run(['code', 'list'], { role: 'sandbox', timeoutMs: LIST_TIMEOUT_MS, ...choiceOf(root) }), CODE_LIST_LIMIT)
     return listedVersions(json)
   }
@@ -577,7 +608,7 @@ export class Ownership {
    * the same dw.json as the delete. A list that cannot be read says it may be: the version stays
    * queued.
    */
-  private async stillListed(version: string, root: string | undefined): Promise<boolean> {
+  private async stillListed(version: string, root: string): Promise<boolean> {
     try {
       return (await this.listVersions(root)).some((item) => item.id === version)
     } catch {

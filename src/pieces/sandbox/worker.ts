@@ -148,6 +148,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
         owner: workspace.id === upload.workspaceId
       })),
       pendingDeletes: ownership.pendingCount(),
+      stuckDeletes: ownership.stuckVersions(),
       leftovers,
       problem
     }
@@ -242,6 +243,7 @@ export function startSandbox(ctx: PieceContext, timers: Timers = REAL_TIMERS, li
     orca.panels.handle('sandbox.pick', (input) => answer(() => actions.pick(String(input?.workspaceId ?? '')))),
     orca.panels.handle('sandbox.release', () => answer(actions.release)),
     orca.panels.handle('sandbox.forget', (input) => answer(() => ownership.forget(String(input?.workspaceId ?? '')))),
+    orca.panels.handle('sandbox.dropDelete', (input) => answer(() => ownership.dropStuck(String(input?.codeVersion ?? '')))),
     orca.panels.handle('sandbox.deploy', () => answer(actions.deploy)),
     orca.panels.handle('sandbox.reload', () => answer(actions.reload)),
     orca.panels.handle('sandbox.start', () => answer(actions.start)),
