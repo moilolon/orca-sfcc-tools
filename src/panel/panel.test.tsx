@@ -10,7 +10,7 @@ import { afterEach, assert, hostError, mockHost, mount, test, type TestPanel } f
 import { PIECE_IDS, type PanelSection } from '../core/piece'
 import type { CoreStatus } from '../protocol'
 import * as panelModule from './panel'
-import { createPanel, ORCA_LIMITS, treeCost, VIEW_BUDGET } from './panel'
+import { createPanel, ORCA_LIMITS, SLOW_VIEW_MS, treeCost, VIEW_BUDGET } from './panel'
 import { CHECKS } from './checks'
 import { mergeScenarios, opensOwnView, READY_STATUS, viewOf as namedView } from './scenarios'
 import { SECTIONS } from './sections'
@@ -894,4 +894,63 @@ test('a view too large because of what is open in it offers a reset: it closes t
   panel.unmount()
   panel = await mount(panelOver([kept]), { host: hostAnswering(ALL_READY), locale: 'es', persisted: { plugin: { probeOpen: 3000 } } })
   assert.ok(panel.find({ role: 'button', text: 'Restablecer vista' }))
+})
+
+test('a view that takes too long to draw is not drawn again until it is reset: a slow draw never repeats on each change', async () => {
+  // Orca suspends a panel whose answer to its ping takes over 5 s, and the answer waits for a draw.
+  // The clock is the panel's own, so the test needs no slow code: each draw of the view costs
+  // what `cost` says.
+  let clock = 0
+  const cost = atom(10)
+  const tick = atom(0)
+  let draws = 0
+  let resets = 0
+  const slow: PanelSection = {
+    ...viewOf('errors', 'Errors', 'Errores'),
+    render: () => {
+      draws++
+      read(tick)
+      clock += read(cost)
+      return <Text>Errors body</Text>
+    },
+    reset: () => {
+      resets++
+      set(cost, 10)
+    }
+  }
+  const { setup, Panel } = createPanel([viewOf('sandbox', 'Sandbox and upload', 'Sandbox y subida'), slow], { now: () => clock })
+  panel = await mount({ setup, default: Panel }, { host: hostAnswering(ALL_READY), locale: 'en', persisted: { plugin: { view: 'errors' } } })
+  assert.ok(panel.find({ text: 'Errors body' }))
+  // An ordinary draw, even a slowish one, changes nothing.
+  set(cost, SLOW_VIEW_MS - 100)
+  set(tick, 1)
+  await panel.settled()
+  assert.ok(panel.find({ text: 'Errors body' }))
+  // One draw past the bound: the view shows its error state, with the bar and the status line.
+  set(cost, SLOW_VIEW_MS + 100)
+  set(tick, 2)
+  await panel.settled()
+  assert.match(panel.summary().join('\n'), /Errors took too long to draw/)
+  assert.ok(panel.find({ text: 'Reset it to close what is open in it.' }))
+  assert.deepEqual(barOf(panel), ['Sandbox and upload', 'Errors', 'Setup'])
+  // What changes afterwards draws the error state, never the slow view.
+  const before = draws
+  for (let i = 3; i < 10; i++) set(tick, i)
+  await panel.settled()
+  assert.equal(draws, before)
+  // Another view draws; coming back still waits for the reset.
+  await pick(panel, 'sandbox')
+  assert.ok(panel.find({ text: 'Sandbox and upload body' }))
+  await pick(panel, 'errors')
+  assert.match(panel.summary().join('\n'), /Errors took too long to draw/)
+  // The reset closes what made it slow, and the view draws again.
+  await panel.press({ role: 'button', text: 'Reset view' })
+  assert.equal(resets, 1)
+  assert.ok(panel.find({ text: 'Errors body' }))
+  panel.unmount()
+  panel = await mount({ setup, default: Panel }, { host: hostAnswering(ALL_READY), locale: 'es', persisted: { plugin: { view: 'errors' } } })
+  set(cost, SLOW_VIEW_MS + 100)
+  set(tick, 1)
+  await panel.settled()
+  assert.match(panel.summary().join('\n'), /Errores ha tardado demasiado en dibujarse/)
 })

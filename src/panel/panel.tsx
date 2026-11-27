@@ -417,6 +417,25 @@ export function overBudget(node: unknown, budget: { bytes: number; nodes: number
   return cost.bytes > budget.bytes || cost.nodes > budget.nodes
 }
 
+/**
+ * How long one view may take to draw. Orca pings a panel every 10 s and suspends it when the answer
+ * takes more than 5 s; the answer waits for whatever the panel is doing, a draw included. An
+ * ordinary view draws in tens of milliseconds, so a view past this is drawing something that grows
+ * with its data: it is not drawn again until it is reset, so a slow draw never repeats on every
+ * change and, under a loaded machine, adds up to a suspension.
+ */
+export const SLOW_VIEW_MS = 1500
+
+/** The view whose last draw took longer than `SLOW_VIEW_MS`, until its reset or *Try again*. */
+const slowView = atom<string | null>(null)
+
+/** Records, after this draw, that a view drew too slowly; atoms cannot change while drawing. */
+function noteSlowRender(view: string | null): void {
+  void Promise.resolve().then(() => {
+    if (read(slowView) !== view) set(slowView, view)
+  })
+}
+
 /** Records, after this draw, which view's render threw last; atoms cannot change while drawing. */
 function noteFailedRender(view: string | null): void {
   void Promise.resolve().then(() => {
@@ -429,12 +448,24 @@ function noteFailedRender(view: string | null): void {
  * returns null); why it did not start; or, when its `render` throws, an error state with a retry,
  * so the bar and the status line stay and the person can go elsewhere.
  */
-function PieceView({ section, failed, locale }: { section: PanelSection; failed: boolean; locale: string }) {
+function PieceView({ section, failed, locale, now }: { section: PanelSection; failed: boolean; locale: string; now: () => number }) {
   if (failed) return <FailedSection section={section} locale={locale} />
   read(attempt)
+  const reset = section.reset
+  const retry = () => {
+    reset?.()
+    noteSlowRender(null)
+    set(attempt, read(attempt) + 1)
+  }
+  if (read(slowView) === section.id) {
+    // Drawing it again would take as long: it waits for the person to reset it or try again.
+    return <ErrorState title={text('viewTooSlowTitle', { piece: section.title(locale) })} message={text(reset ? 'viewTooLargeResetBody' : 'viewFailedBody')} retryLabel={text(reset ? 'resetView' : 'tryAgain')} onRetry={retry} />
+  }
   let body: OrcaNode
+  const started = now()
   try {
     body = drawNow(section.render(locale))
+    if (now() - started > SLOW_VIEW_MS) noteSlowRender(section.id)
   } catch {
     noteFailedRender(section.id)
     return (
@@ -503,7 +534,8 @@ function activeView(views: readonly PanelSection[], stored: string | null): stri
  * The panel over a list of sections: `setup` and the component Orca mounts. The plugin's panel is
  * `createPanel(SECTIONS)`; tests build one over sections of their own.
  */
-export function createPanel(sections: readonly PanelSection[]): { setup(ctx: PanelContext): void; Panel(): OrcaNode } {
+export function createPanel(sections: readonly PanelSection[], options: { now?: () => number } = {}): { setup(ctx: PanelContext): void; Panel(): OrcaNode } {
+  const now = options.now ?? (() => performance.now())
   const views = sections.filter((section) => section.delivered && section.hasView)
   return {
     setup(ctx) {
@@ -557,7 +589,7 @@ export function createPanel(sections: readonly PanelSection[]): { setup(ctx: Pan
           <StatusLine current={current} failure={failure} busy={busy} attention={attention} onAttention={open ? () => set(lastView, SETUP_VIEW) : undefined} />
           <Box key={viewBoxKey(active)} paddingY="xs">
             {open ? (
-              <PieceView section={open} failed={failed.includes(open.id)} locale={locale} />
+              <PieceView section={open} failed={failed.includes(open.id)} locale={locale} now={now} />
             ) : (
               <SetupView sections={sections} failed={failed} locale={locale} busy={busy} />
             )}

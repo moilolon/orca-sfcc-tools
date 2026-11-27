@@ -90,6 +90,28 @@ async function loadFile(): Promise<void> {
   }
 }
 
+/**
+ * Asks again after the worker said the problems changed. Posts that come while an answer is awaited
+ * make one more request once it came, never one each: however fast the worker posts, the view asks
+ * at most one list and one file at a time, and draws at most once per answer.
+ */
+let reloading: Promise<void> | null = null
+let reloadAgain = false
+function reloadOnChange(): void {
+  if (reloading) {
+    reloadAgain = true
+    return
+  }
+  reloading = Promise.all([loadList(), loadFile()]).then(() => {
+    reloading = null
+    if (reloadAgain) {
+      reloadAgain = false
+      reloadOnChange()
+    }
+  })
+}
+
+/** Asks at once, for what the person changed (a filter, a search): its answer is the one that counts. */
 function reload(): void {
   void loadList()
   void loadFile()
@@ -359,9 +381,11 @@ export const section: PanelSection = {
   delivered: true,
   hasView: true,
   setup(ctx: PanelContext) {
-    ctx.subscriptions.push(plugin.on('engine.problems.changed', () => reload()))
+    ctx.subscriptions.push(plugin.on('engine.problems.changed', () => reloadOnChange()))
     lastJson = ''
     lastFileJson = ''
+    reloading = null
+    reloadAgain = false
     reload()
   },
   render(locale) {

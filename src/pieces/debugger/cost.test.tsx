@@ -3,7 +3,7 @@
 // draws the view once.
 import { afterEach, assert, mockHost, mount, test, type TestPanel } from 'orca/testing'
 import type { DebuggerScripts, DebuggerSource, DebuggerState } from './protocol'
-import { section, WINDOW_LINES } from './section'
+import { builds, section, WINDOW_LINES } from './section'
 import { treeCost, VIEW_BUDGET } from '../../panel/panel'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
@@ -109,4 +109,87 @@ test('a 10,000-line script of the longest lines, paged from the first line to th
   }
   assert.equal(panel.rowsOf(table).at(-1), '10000', 'it reached the last line')
   console.log(`debugger window: 10,000 lines of 240 characters in ${pages + 1} windows, the largest tree ${Math.round(largest / 1024)} KiB of a ${VIEW_BUDGET.bytes / 1024} KiB budget, by Orca's measure`)
+})
+
+test('a cartridge of 20,000 scripts in one folder, open: its tree is built once per change of the list, never on each draw, in linear time', async () => {
+  // Orca's `derived` builds on every draw: the tree of one large cartridge open took a tenth of a
+  // second at each change of the debugger's state (its folders were grouped in n² copies), which a
+  // loaded machine turns into the seconds after which Orca suspends a panel.
+  let state = STATE
+  const BIG: DebuggerScripts = { cartridges: [{ name: 'app_big', path: 'cartridges/app_big', files: Array.from({ length: 20_000 }, (_, f) => `cartridges/app_big/cartridge/scripts/file${f}.js`) }], truncated: false }
+  let draws = 0
+  const started = performance.now()
+  panel = await mount(
+    {
+      setup: section.setup,
+      default: () => {
+        draws++
+        return section.render('en')
+      }
+    },
+    {
+      host: mockHost({ capabilities: CAPABILITIES, requests: { 'debugger.state': () => state, 'debugger.scripts': () => BIG } }),
+      persisted: { plugin: { debuggerWorkspace: 'w-example', debuggerScriptsOpen: ['c:cartridges/app_big', 'd:cartridges/app_big/cartridge', 'd:cartridges/app_big/cartridge/scripts'] } }
+    }
+  )
+  const firstMs = performance.now() - started
+  assert.deepEqual(panel.errors, [])
+  const tree = { type: 'Tree' } as const
+  assert.ok(panel.find(tree))
+  const built = builds.scripts
+
+  // Ten posts that change the session, not the scripts: ten draws, the tree built no more.
+  const before = draws
+  const postsStarted = performance.now()
+  for (let i = 0; i < 10; i++) {
+    state = { ...state, status: i % 2 ? 'attached' : 'connecting' }
+    await panel.post('debugger.state', state)
+  }
+  const perPostMs = (performance.now() - postsStarted) / 10
+  assert.equal(draws - before, 10)
+  assert.equal(builds.scripts, built)
+
+  // A folder's next page builds it once more, in linear time.
+  const pageStarted = performance.now()
+  await panel.activateItem(tree, 'm:d:cartridges/app_big/cartridge/scripts')
+  const pageMs = performance.now() - pageStarted
+  assert.equal(builds.scripts, built + 1)
+
+  console.log(`debugger tree of 20,000 scripts: first draw ${firstMs.toFixed(1)} ms; a post that leaves the scripts alone ${perPostMs.toFixed(1)} ms; a page more ${pageMs.toFixed(1)} ms`)
+  // Generous bounds: before, each was 0.5 s or more on the same machine.
+  assert.ok(perPostMs < 50, `${perPostMs} ms per post`)
+  assert.ok(pageMs < 250, `${pageMs} ms for a page`)
+})
+
+test('an open script’s rows are built once per change of the script, its window or its marks, never on each draw', async () => {
+  let state = STATE
+  panel = await mount(
+    { setup: section.setup, default: () => section.render('en') },
+    {
+      host: mockHost({
+        capabilities: CAPABILITIES,
+        requests: {
+          'debugger.state': () => state,
+          'debugger.scripts': () => SCRIPTS,
+          'debugger.source': () => SOURCE,
+          'debugger.breakpoint': (input: { line: number; on: boolean }) => {
+            state = { ...state, breakpoints: [{ path: PATH, lines: [...state.breakpoints[0].lines, { line: input.line, verified: null }] }] }
+            return state
+          }
+        }
+      }),
+      persisted: { plugin: { debuggerScript: PATH } }
+    }
+  )
+  const table = { type: 'Table' } as const
+  assert.equal(panel.rowsOf(table).length, WINDOW_LINES)
+  const built = builds.rows
+  for (let i = 0; i < 5; i++) {
+    state = { ...state, status: i % 2 ? 'attached' : 'connecting' }
+    await panel.post('debugger.state', state)
+  }
+  assert.equal(builds.rows, built)
+  // A new breakpoint on the script changes its marks: built once more.
+  await panel.selectRows(table, ['20'])
+  assert.equal(builds.rows, built + 1)
 })

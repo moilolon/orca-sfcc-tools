@@ -1,8 +1,8 @@
 // The building blocks of the panel: what each one draws, with Orca's own components only, and
 // that Orca would drop none of their props.
-import { Button, Code, RelativeTime, Text, type OrcaNode } from 'orca'
+import { atom, Button, Code, derived, read, RelativeTime, set, Text, type OrcaNode } from 'orca'
 import { afterEach, assert, mount, test, type TestPanel } from 'orca/testing'
-import { Actions, Empty, ErrorState, Group, LabelledRow, ListRow, MaskedText, MAX_ROWS, Notice, NOTICE_ICONS, NoticeLine, PAGE_SIZE, placeholderParts, ShowMore, StateBadge, StateMark, TONES, type StateTone } from './ui'
+import { Actions, Empty, ErrorState, Group, LabelledRow, ListRow, MaskedText, memo, MAX_ROWS, Notice, NOTICE_ICONS, NoticeLine, PAGE_SIZE, placeholderParts, ShowMore, StateBadge, StateMark, TONES, type StateTone } from './ui'
 
 let panel: TestPanel | undefined
 afterEach(() => panel?.unmount())
@@ -261,4 +261,42 @@ test('ShowMore draws a page more at a time, and stops at MAX_ROWS with a line on
   shown.unmount()
   shown = await draw(() => <ShowMore shown={30} total={30} label={label} capped={capped} onPress={() => more++} />)
   assert.equal(shown.tree(), null)
+})
+
+test('memo builds a value once per change of its inputs, where Orca’s derived builds it on every draw', async () => {
+  const list = atom<readonly number[]>(Array.from({ length: 1000 }, (_, i) => i))
+  const query = atom('')
+  const other = atom(0)
+  let memoBuilds = 0
+  let derivedBuilds = 0
+  const filtered = memo(
+    () => [read(list), read(query)],
+    () => {
+      memoBuilds++
+      return read(list).filter((n) => String(n).includes(read(query)))
+    }
+  )
+  const viaDerived = derived(() => {
+    derivedBuilds++
+    return read(list).length
+  })
+  derivedBuilds = 0
+  panel = await mount(() => (
+    <Text>
+      {`${filtered().length} of ${read(viaDerived)}, ${read(other)}`}
+    </Text>
+  ))
+  assert.ok(panel.find({ text: '1000 of 1000, 0' }))
+  // Something it does not read changes: the draw runs again, the value is not built again.
+  for (let i = 1; i <= 5; i++) set(other, i)
+  await panel.settled()
+  assert.ok(panel.find({ text: '1000 of 1000, 5' }))
+  assert.equal(memoBuilds, 1)
+  // Orca's derived is built on each draw: why the views use memo for what grows with their data.
+  assert.ok(derivedBuilds >= 2, `${derivedBuilds} builds`)
+  // An input changes: built once more, and the draw follows it.
+  set(query, '99')
+  await panel.settled()
+  assert.ok(panel.find({ text: '19 of 1000, 5' }))
+  assert.equal(memoBuilds, 2)
 })
