@@ -38,6 +38,9 @@ const REMAP_HOOK_MS = 1_000
 /** How long after a save its text is looked for on disk, and how often, before its breakpoints move. */
 const SAVE_WAIT_MS = 10_000
 const SAVE_POLL_MS = 100
+
+/** One save of a file waiting to move its breakpoints: the text it saved, as lines and joined. */
+type SaveRemap = { lines: string[]; joined: string }
 /** A file larger than this is not read to move its breakpoints: they stay where they are. */
 const REMAP_MAX_BYTES = 4 * 1024 * 1024
 
@@ -105,6 +108,8 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
   let lastPosted: DebuggerState | null = null
   /** The workspace the running session debugs; the breakpoints shown are its own while it runs. */
   let sessionWorkspace: Workspace | null = null
+  /** The remaps of each saved file waiting their turn, by workspace and path, oldest first. */
+  const remaps = new Map<string, { entries: SaveRemap[]; tail: Promise<void> }>()
   /** The hover's listings, kept for the halted stack they were read in. */
   let hoverCache: { frames: unknown; lists: Map<string, Promise<Variable[]>> } = { frames: null, lists: new Map() }
   /** The scripts of each workspace's cartridges, by folder, the newest last. */
@@ -292,6 +297,10 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
    * nothing is changed or refused of the save itself. The store moves only once the file on disk
    * holds the text saved (looked at every `savePollMs`, for `saveWaitMs` at most): a save that
    * failed, or that another hook refused, moves nothing.
+   *
+   * The saves of one file are moved one after another (`remaps`): a save made while the one before
+   * it waits takes that one's text as the file it starts from, and waits its turn; a save counts as
+   * written once the disk holds its text or the text of a save after it (saves land in order).
    */
   async function remapOnSave(event: { workspaceId?: unknown; path?: unknown; text?: unknown } | undefined): Promise<void> {
     if (typeof event?.path !== 'string' || typeof event.text !== 'string') return
@@ -299,25 +308,51 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     if (!workspace) return
     const rel = relativeTo(workspace.path, event.path)
     if (!rel) return
-    const lines = (await breakpoints.list(workspace.id)).find((file) => file.path === rel)?.lines ?? []
-    if (lines.length === 0) return
-    const before = await readOld((platform === 'win32' ? win32 : posix).join(workspace.path, ...rel.split('/')))
-    if (before === null) return
-    const beforeLines = textLines(before)
-    const afterLines = textLines(event.text)
-    const moved = remapLines(lines, beforeLines, afterLines)
-    if (moved.length === lines.length && moved.every((line, i) => line === lines[i])) return
-    // The save need not wait for the store or the session: only the read had to come first.
+    const key = `${workspace.id}\n${rel}`
     const file = (platform === 'win32' ? win32 : posix).join(workspace.path, ...rel.split('/'))
-    const saved = afterLines.join('\n')
-    void (async () => {
-      if (!(await written(file, saved))) return
-      // A line removed meanwhile stays removed; one set meanwhile was set on the saved text and stays.
-      const now = (await breakpoints.list(workspace.id)).find((each) => each.path === rel)?.lines ?? []
-      const moved = remapLines(lines.filter((line) => now.includes(line)), beforeLines, afterLines)
-      const files = await breakpoints.set(workspace.id, rel, [...moved, ...now.filter((line) => !lines.includes(line))])
-      await synced(workspace.id, files.find((file) => file.path === rel) ?? { path: rel, lines: [] })
-    })().catch((error: unknown) => ctx.log(`moving breakpoints after a save failed (${codeOf(error)})`))
+    let chain = remaps.get(key)
+    let beforeLines: string[]
+    const last = chain?.entries.at(-1)
+    if (last) beforeLines = last.lines
+    else {
+      if (((await breakpoints.list(workspace.id)).find((each) => each.path === rel)?.lines ?? []).length === 0) return
+      const before = await readOld(file)
+      if (before === null) return
+      beforeLines = textLines(before)
+      chain = remaps.get(key)
+      const raced = chain?.entries.at(-1)
+      if (raced) beforeLines = raced.lines
+    }
+    const afterLines = textLines(event.text)
+    const entry: SaveRemap = { lines: afterLines, joined: afterLines.join('\n') }
+    if (!chain) {
+      chain = { entries: [], tail: Promise.resolve() }
+      remaps.set(key, chain)
+    }
+    const queue = chain
+    queue.entries.push(entry)
+    // The save need not wait for the store or the session: only the read had to come first.
+    queue.tail = queue.tail
+      .then(async () => {
+        const lines = (await breakpoints.list(workspace.id)).find((each) => each.path === rel)?.lines ?? []
+        const moved = remapLines(lines, beforeLines, afterLines)
+        if (moved.length === lines.length && moved.every((line, i) => line === lines[i])) return
+        if (!(await written(file, queue, entry))) return
+        // A line removed meanwhile stays removed; one set meanwhile was set on the saved text and stays.
+        const now = (await breakpoints.list(workspace.id)).find((each) => each.path === rel)?.lines ?? []
+        const kept = remapLines(
+          lines.filter((line) => now.includes(line)),
+          beforeLines,
+          afterLines
+        )
+        const files = await breakpoints.set(workspace.id, rel, [...kept, ...now.filter((line) => !lines.includes(line))])
+        await synced(workspace.id, files.find((each) => each.path === rel) ?? { path: rel, lines: [] })
+      })
+      .catch((error: unknown) => ctx.log(`moving breakpoints after a save failed (${codeOf(error)})`))
+      .finally(() => {
+        queue.entries.splice(queue.entries.indexOf(entry), 1)
+        if (queue.entries.length === 0 && remaps.get(key) === queue) remaps.delete(key)
+      })
   }
 
   /** Whether line `line` (1-based) of a file on disk is `text`; true when the file cannot be read, so a slow disk never blocks a click. */
@@ -326,13 +361,17 @@ export function activateDebugger(ctx: PieceContext, options: DebuggerOptions = {
     return now === null || textLines(now)[line - 1] === text
   }
 
-  /** Whether the file on disk comes to hold `text` (its lines, whatever their breaks) within the wait. */
-  async function written(file: string, text: string): Promise<boolean> {
+  /**
+   * Whether the file on disk comes to hold the text of this save, or of a save of the file after
+   * it (its lines, whatever their breaks), within the wait.
+   */
+  async function written(file: string, queue: { entries: SaveRemap[] }, entry: SaveRemap): Promise<boolean> {
     const until = Date.now() + (options.saveWaitMs ?? SAVE_WAIT_MS)
     for (;;) {
       if (disposed) return false
       const now = await readOld(file)
-      if (now !== null && textLines(now).join('\n') === text) return true
+      const joined = now === null ? null : textLines(now).join('\n')
+      if (joined !== null && queue.entries.slice(queue.entries.indexOf(entry)).some((each) => each.joined === joined)) return true
       if (Date.now() >= until) return false
       await new Promise((resolve) => setTimeout(resolve, options.savePollMs ?? SAVE_POLL_MS))
     }

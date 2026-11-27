@@ -565,3 +565,20 @@ test('a value cut for the pop-up never splits a surrogate pair', () => {
   assert.equal(cutText('ab😀cd', 3), 'ab…')
   assert.equal(cutText('ab😀cd', 4), 'ab😀…')
 })
+
+test('round 3, finding 2: two saves of one file close together both move its breakpoints, in order', async () => {
+  const { worker } = await mount()
+  const text0 = ['var a = 1;', 'var b = 2;', 'function show() {', '  return a + b;', '}'].join('\n')
+  const text1 = `// one\n${text0}`
+  const text2 = `// two\n${text1}`
+  DISK[`${FAKE_ROOT}/${PAGE}`] = text0
+  await worker.request('debugger.setBreakpoints', { path: PAGE, lines: [3] })
+  // A double save: the second hook runs before the first save's text was ever seen on disk.
+  await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: text1 })
+  await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: text2 })
+  DISK[`${FAKE_ROOT}/${PAGE}`] = text2
+  await until(() => JSON.stringify(worker.host.data().storage['debugger.breakpoints']) === JSON.stringify({ w1: { [PAGE]: [5] } }), 'both moves')
+  // And it stays there: nothing after them moves it again.
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [5] } })
+})

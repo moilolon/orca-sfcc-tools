@@ -163,12 +163,18 @@ Changing it needs the owner's yes.
       members with the `scopes` and `variables` requests the view's tree makes, so a hover runs
       nothing that expanding those names would not, a getter with a side effect included),
       `line-diff.ts` (where each line of one text stands in another: equal start and end, then
-      Myers' O(ND) diff on the rest within `MAX_DIFF_EDITS` and `MAX_DIFF_WORK`, past which lines
-      that occur once on both sides anchor the match, grown over the equal lines around them, so
-      unchanged lines stay right in a file of any size (50,000 lines in tens of milliseconds, a
-      test holds it). A hunk of as many new lines as old ones pairs in order, a line rewritten in
-      place keeping its breakpoint; an uneven one pairs by likeness, a line deleted whole dropped.
-      Pure and with no imports: the editor's frame loads it too),
+      Myers' O(ND) diff on the rest within `MAX_DIFF_EDITS` and `MAX_DIFF_WORK`. When that left out
+      a significant line (one with a letter or a digit) that occurs once on each side, a shortest
+      script having kept a brace or a blank line instead, those lines anchor the match first
+      (patience) and Myers matches each gap between them; past its budget, every line that occurs
+      once on both sides anchors a gap, grown over the equal lines around it. So an unchanged
+      unique statement always follows its text (a seeded fuzz test holds it), and unchanged lines
+      stay right in a file of any size (50,000 lines in tens of milliseconds, a test holds it). A
+      line moved past another (Alt+Up), or deleted in one place and written again in another, is
+      a move a diff cannot see: one of the two lines keeps its breakpoint. A hunk of as many new
+      lines as old ones pairs in order, a line rewritten in place keeping its breakpoint; an
+      uneven one pairs by likeness, a line deleted whole dropped. Pure and with no imports: the
+      editor's frame loads it too),
       `source.ts` (one script's lines for the view's source table: read only for a script
       `files.ts` found and only inside the workspace's folder, cut, masked, never stored; the
       view shows a window of `WINDOW_LINES` of them at a time), and `fake-adapter.ts`, the
@@ -189,7 +195,9 @@ Changing it needs the owner's yes.
       writes it) the worker computes where the saved file's breakpoints go with `line-diff.ts`,
       the file on disk against the text saved, and moves them once the disk holds that text
       (looked at for `SAVE_WAIT_MS`; a save that failed or was refused moves nothing), so the
-      store, the session and every view keep the lines that now run. Every
+      store, the session and every view keep the lines that now run. The saves of one file move
+      it one after another: a save made while another waits starts from that one's text, and a
+      save counts as written once the disk holds its text or a later one's. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
     - `src/pieces/engine/` (phase 6, delivered with its **Problems** view since 6.5): the syntax

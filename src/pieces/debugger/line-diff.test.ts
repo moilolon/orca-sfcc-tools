@@ -80,3 +80,46 @@ test('past the exact diff’s bound, unchanged lines still keep their breakpoint
   assert.deepEqual(moved, [2, 502, 25_003, 50_001])
   assert.ok(ms < 1_000, `took ${ms.toFixed(1)} ms`)
 })
+
+test('round 3: on a tie, an unchanged unique statement keeps its breakpoint over a brace or a blank line', () => {
+  // The closing brace moved up, taking `y();` out of the `if`.
+  assert.deepEqual(remapLines([3], ['if (a) {', '  x();', '  y();', '}', 'z();'], ['if (a) {', '  x();', '}', '  y();', 'z();']), [4])
+  // A `try {` written above the statement's brace.
+  assert.deepEqual(remapLines([2], ['start', 'run();', '}', 'end'], ['start', 'try {', '}', 'run();', 'end']), [4])
+  // A brace deleted and another added before the statement.
+  assert.deepEqual([...mapLines(['line 0', '  }', 'line 2', '}'], ['line 0', '  }', 'new', 'changed', '}', 'new', 'line 2', '// x', 'changed'])].slice(0, 3), [0, 1, 6])
+})
+
+test('round 3: 20,000 seeded random edits: a breakpoint on an unchanged unique statement always follows it', () => {
+  let seed = 20_261_127
+  const random = () => (seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648
+  const pick = <T>(list: readonly T[]): T => list[Math.floor(random() * list.length)]
+  // Braces, blank lines and repeated statements around unique ones, as in a script.
+  const fillers = ['}', '  }', '', '  return;', '// x', '  });']
+  const blanks = ['}', '  }', '', '  });']
+  let fresh = 0
+  let checked = 0
+  for (let run = 0; run < 20_000; run++) {
+    const lines = Array.from({ length: Math.floor(random() * 40) }, (_, i) => ({ text: random() < 0.5 ? pick(fillers) : `line ${i}`, origin: i }))
+    const before = lines.map((line) => line.text)
+    for (let edits = 1 + Math.floor(random() * 6); edits > 0; edits--) {
+      const op = random()
+      const at = Math.floor(random() * (lines.length + 1))
+      // An insert is a brace or blank line, or a statement never seen before; a rewrite is one too.
+      if (op < 0.4) lines.splice(at, 0, { text: random() < 0.8 ? pick(blanks) : `new ${fresh++}();`, origin: -1 })
+      else if (op < 0.7) lines.splice(at, 1)
+      else if (at < lines.length) lines[at] = { text: `changed ${fresh++}();`, origin: -1 }
+    }
+    const after = lines.map((line) => line.text)
+    const map = mapLines(before, after)
+    const counts = (list: string[]) => list.reduce((all, text) => all.set(text, (all.get(text) ?? 0) + 1), new Map<string, number>())
+    const inBefore = counts(before)
+    const inAfter = counts(after)
+    lines.forEach((line, at) => {
+      if (line.origin < 0 || !/[\p{L}\p{N}]/u.test(line.text) || inBefore.get(line.text) !== 1 || inAfter.get(line.text) !== 1) return
+      checked++
+      assert.equal(map[line.origin], at, `run ${run}: ${JSON.stringify(before)} → ${JSON.stringify(after)}, line ${line.origin}`)
+    })
+  }
+  assert.ok(checked > 100_000, `${checked} statements checked`)
+})

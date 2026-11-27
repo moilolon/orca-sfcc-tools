@@ -4,11 +4,15 @@
 // editor shows before a save is what the store holds after it. Pure: no Node, no Orca, no
 // imports, so the editor's frame loads it too.
 //
-// The rule: lines equal at the start and the end match; in between, a shortest edit script
-// (Myers' O(ND) diff) matches the rest of the equal lines. Its cost is bounded (`MAX_DIFF_WORK`
-// steps): past it, the lines that occur once on both sides and keep their order anchor the match
-// (patience), each anchor grown over the equal lines around it, so unchanged lines stay right in a
-// file of any size. Each changed hunk then pairs its lines: as many new lines as old ones pair in
+// The rule: lines equal at the start and the end match; in between, the significant lines (with
+// a letter or a digit: never a brace, a blank line or punctuation alone) that occur once on each
+// side and keep their order anchor the match first (patience), so an unchanged statement always
+// follows its text, whichever way a shortest script could have gone around a `}`. Between two
+// anchors, a shortest edit script (Myers' O(ND) diff) matches the rest of the equal lines (braces,
+// blank lines, repeated statements). Its cost is bounded (`MAX_DIFF_WORK` steps in all): past it,
+// a gap is matched by every line that occurs once on both sides, each grown over the equal lines
+// around it, so unchanged lines stay right in a file of any size. A line moved past another
+// (Alt+Up) is seen as one deleted and one added: one of the two loses its breakpoint. Each changed hunk then pairs its lines: as many new lines as old ones pair in
 // order (a line rewritten in place keeps its breakpoint, even emptied while it is retyped); an
 // uneven hunk pairs each old line with the new one it is most like (a line split by Enter keeps
 // it on its first part; a blank line put before an edited one does not take it), and an old line
@@ -38,7 +42,30 @@ export function mapLines(before: readonly string[], after: readonly string[]): I
     map[endBefore] = endAfter
   }
   if (endBefore === start || endAfter === start) return map
-  const matches = myers(before, start, endBefore, after, start, endAfter) ?? anchors(before, start, endBefore, after, start, endAfter)
+  // Myers alone when it keeps every unique significant line (what nearly every edit gives, at a
+  // cost of the edits); else those lines anchor first, and Myers (or, past its budget, every
+  // unique line) matches each gap between them.
+  const budget = { work: MAX_DIFF_WORK }
+  let matches = myers(before, start, endBefore, after, start, endAfter, budget)
+  if (!matches || losesUnique(before, start, endBefore, after, start, endAfter, matches)) {
+    budget.work = MAX_DIFF_WORK
+    matches = []
+    let gapA = start
+    let gapB = start
+    for (const [ai, aj] of [...uniqueRun(before, start, endBefore, after, start, endAfter, SIGNIFICANT), [endBefore, endAfter] as const]) {
+      if (ai - gapA === 1 && aj > gapB) {
+        // One old line (the most common gap, a line rewritten between two anchors): its first equal.
+        for (let j = gapB; j < aj; j++) {
+          if (before[gapA] !== after[j]) continue
+          matches.push([gapA, j])
+          break
+        }
+      } else if (ai > gapA && aj > gapB) matches.push(...(myers(before, gapA, ai, after, gapB, aj, budget) ?? anchors(before, gapA, ai, after, gapB, aj)))
+      if (ai < endBefore) matches.push([ai, aj])
+      gapA = ai + 1
+      gapB = aj + 1
+    }
+  }
   // Each hunk between two matches pairs its lines.
   let i = start
   let j = start
@@ -53,9 +80,10 @@ export function mapLines(before: readonly string[], after: readonly string[]): I
 
 /**
  * The equal lines of a shortest edit script between `before[a0..a1)` and `after[b0..b1)`, in
- * order (Myers, "An O(ND) difference algorithm"); null once it would take more than MAX_DIFF_WORK steps.
+ * order (Myers, "An O(ND) difference algorithm"); null once it would take more steps than the budget
+ * has left (what it took is taken from it either way).
  */
-function myers(before: readonly string[], a0: number, a1: number, after: readonly string[], b0: number, b1: number): (readonly [number, number])[] | null {
+function myers(before: readonly string[], a0: number, a1: number, after: readonly string[], b0: number, b1: number, budget: { work: number }): (readonly [number, number])[] | null {
   const n = a1 - a0
   const m = b1 - b0
   const maxD = Math.min(n + m, MAX_DIFF_EDITS)
@@ -76,10 +104,14 @@ function myers(before: readonly string[], a0: number, a1: number, after: readonl
       }
       work += 1 + x - from
       v[offset + k] = x
-      if (x >= n && y >= m) return backtrack(trace, d, n, m, a0, b0)
+      if (x >= n && y >= m) {
+        budget.work -= work
+        return backtrack(trace, d, n, m, a0, b0)
+      }
     }
-    if (work > MAX_DIFF_WORK) return null
+    if (work > budget.work) break
   }
+  budget.work -= work
   return null
 }
 
@@ -119,44 +151,15 @@ function backtrack(trace: Int32Array[], d: number, n: number, m: number, a0: num
  * before and after it.
  */
 function anchors(before: readonly string[], a0: number, a1: number, after: readonly string[], b0: number, b1: number): (readonly [number, number])[] {
-  const seen = new Map<string, { a: number; b: number; inA: number; inB: number }>()
-  for (let i = a0; i < a1; i++) {
-    const entry = seen.get(before[i]) ?? { a: i, b: -1, inA: 0, inB: 0 }
-    entry.inA++
-    seen.set(before[i], entry)
-  }
-  for (let j = b0; j < b1; j++) {
-    const entry = seen.get(after[j])
-    if (!entry) continue
-    entry.inB++
-    entry.b = j
-  }
-  const unique = [...seen.values()].filter((entry) => entry.inA === 1 && entry.inB === 1).sort((p, q) => p.a - q.a)
-  // The longest run of unique lines whose positions increase on both sides (patience sorting).
-  const tails: number[] = []
-  const previous = new Int32Array(unique.length).fill(-1)
-  for (let u = 0; u < unique.length; u++) {
-    let lo = 0
-    let hi = tails.length
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (unique[tails[mid]].b < unique[u].b) lo = mid + 1
-      else hi = mid
-    }
-    if (lo > 0) previous[u] = tails[lo - 1]
-    tails[lo] = u
-  }
-  const chosen: number[] = []
-  for (let u = tails.length > 0 ? tails[tails.length - 1] : -1; u >= 0; u = previous[u]) chosen.push(u)
-  chosen.reverse()
+  const unique = uniqueRun(before, a0, a1, after, b0, b1, () => true).map(([a, b]) => ({ a, b }))
   // Each anchor grown over the equal lines around it, up to the next one.
   const pairs: (readonly [number, number])[] = []
   let lastA = a0 - 1
   let lastB = b0 - 1
-  for (let c = 0; c < chosen.length; c++) {
-    const anchor = unique[chosen[c]]
-    const nextA = c + 1 < chosen.length ? unique[chosen[c + 1]].a : a1
-    const nextB = c + 1 < chosen.length ? unique[chosen[c + 1]].b : b1
+  for (let c = 0; c < unique.length; c++) {
+    const anchor = unique[c]
+    const nextA = c + 1 < unique.length ? unique[c + 1].a : a1
+    const nextB = c + 1 < unique.length ? unique[c + 1].b : b1
     let back = 0
     while (anchor.a - back - 1 > lastA && anchor.b - back - 1 > lastB && before[anchor.a - back - 1] === after[anchor.b - back - 1]) back++
     for (let t = back; t > 0; t--) pairs.push([anchor.a - t, anchor.b - t])
@@ -170,6 +173,79 @@ function anchors(before: readonly string[], a0: number, a1: number, after: reado
     lastB = anchor.b + ahead - 1
   }
   return pairs
+}
+
+/**
+ * Whether a match left out a significant line that occurs once on each side: a shortest script
+ * that kept a brace or a blank line in its place. Only the lines the match left out are looked at,
+ * and only their texts are counted.
+ */
+function losesUnique(before: readonly string[], a0: number, a1: number, after: readonly string[], b0: number, b1: number, matches: readonly (readonly [number, number])[]): boolean {
+  const matchedA = new Uint8Array(a1 - a0)
+  const matchedB = new Uint8Array(b1 - b0)
+  for (const [i, j] of matches) {
+    matchedA[i - a0] = 1
+    matchedB[j - b0] = 1
+  }
+  const left = new Set<string>()
+  for (let i = a0; i < a1; i++) if (!matchedA[i - a0] && SIGNIFICANT(before[i])) left.add(before[i])
+  if (left.size === 0) return false
+  const both = new Set<string>()
+  for (let j = b0; j < b1; j++) if (!matchedB[j - b0] && left.has(after[j])) both.add(after[j])
+  if (both.size === 0) return false
+  const counts = new Map<string, [number, number]>()
+  for (const text of both) counts.set(text, [0, 0])
+  for (let i = a0; i < a1; i++) {
+    const count = counts.get(before[i])
+    if (count) count[0]++
+  }
+  for (let j = b0; j < b1; j++) {
+    const count = counts.get(after[j])
+    if (count) count[1]++
+  }
+  for (const [inA, inB] of counts.values()) if (inA === 1 && inB === 1) return true
+  return false
+}
+
+/** A line that can anchor the match: one with a letter or a digit, never a brace, a blank line or punctuation alone. */
+const SIGNIFICANT = (line: string): boolean => /[\p{L}\p{N}]/u.test(line)
+
+/**
+ * The lines that occur once in each range and pass `accept`, in the longest run whose positions
+ * increase on both sides (patience sorting), as pairs of lines.
+ */
+function uniqueRun(before: readonly string[], a0: number, a1: number, after: readonly string[], b0: number, b1: number, accept: (line: string) => boolean): (readonly [number, number])[] {
+  const seen = new Map<string, { a: number; b: number; inA: number; inB: number }>()
+  for (let i = a0; i < a1; i++) {
+    const entry = seen.get(before[i]) ?? { a: i, b: -1, inA: 0, inB: 0 }
+    entry.inA++
+    seen.set(before[i], entry)
+  }
+  for (let j = b0; j < b1; j++) {
+    const entry = seen.get(after[j])
+    if (!entry) continue
+    entry.inB++
+    entry.b = j
+  }
+  const unique: { a: number; b: number }[] = []
+  for (const [line, entry] of seen) if (entry.inA === 1 && entry.inB === 1 && accept(line)) unique.push(entry)
+  unique.sort((p, q) => p.a - q.a)
+  const tails: number[] = []
+  const previous = new Int32Array(unique.length).fill(-1)
+  for (let u = 0; u < unique.length; u++) {
+    let lo = 0
+    let hi = tails.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (unique[tails[mid]].b < unique[u].b) lo = mid + 1
+      else hi = mid
+    }
+    if (lo > 0) previous[u] = tails[lo - 1]
+    tails[lo] = u
+  }
+  const chosen: (readonly [number, number])[] = []
+  for (let u = tails.length > 0 ? tails[tails.length - 1] : -1; u >= 0; u = previous[u]) chosen.push([unique[u].a, unique[u].b])
+  return chosen.reverse()
 }
 
 /** Past this many pairs in one uneven hunk, its lines pair in order. */
