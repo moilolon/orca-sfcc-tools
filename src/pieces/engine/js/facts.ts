@@ -12,6 +12,7 @@
 import type * as AST from './ast'
 import type { Comment, Expression, Node, Pattern, Range } from './ast'
 import { forEachChild } from './ast'
+import { countWork } from '../work'
 
 /** `params` holds a function's parameters and is the parent of its body's `function` scope. */
 export type ScopeKind = 'module' | 'template' | 'function' | 'params' | 'block' | 'catch' | 'class' | 'loop'
@@ -173,7 +174,9 @@ export interface TemplateDeclaration {
 export function scriptFacts(program: AST.Program): ScriptFacts {
   const builder = new FactsBuilder('module', program, false)
   builder.visitProgram(program, builder.rootScope)
-  return builder.finish()
+  const facts = builder.finish()
+  countWork(builder.steps)
+  return facts
 }
 
 /**
@@ -224,7 +227,9 @@ export function fragmentFacts(range: Range, fragments: readonly Fragment[], decl
     if (fragment.node.type === 'Program') builder.visitProgram(fragment.node, scope)
     else builder.visit(fragment.node, scope)
   }
-  return builder.finish()
+  const facts = builder.finish()
+  countWork(builder.steps)
+  return facts
 }
 
 const contains = (outer: Range, inner: Range) => outer.start <= inner.start && inner.end <= outer.end
@@ -252,6 +257,8 @@ interface PendingExtension {
 }
 
 class FactsBuilder {
+  /** The steps taken (../work.ts): each node visited, each scope a lookup looks in. */
+  steps = 0
   private readonly scopes: ScopeData[] = []
   private readonly declarations: Declaration[] = []
   private readonly references: Reference[] = []
@@ -331,6 +338,7 @@ class FactsBuilder {
   /** The declaration `name` refers to from `scope` at `offset`. Ordered scopes' lists are sorted by `finish`. */
   private lookup(name: string, scope: number, offset: number): Declaration | null {
     for (let current: number | null = scope; current !== null; current = this.scopes[current].parent) {
+      this.steps++
       const data = this.scopes[current]
       const list = data.names.get(name)
       if (!list) continue
@@ -398,6 +406,7 @@ class FactsBuilder {
   }
 
   private visitNode(node: Node, scope: number): void {
+    this.steps++
     switch (node.type) {
       case 'Identifier':
         this.use(node, scope, false)

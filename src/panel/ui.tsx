@@ -319,3 +319,22 @@ export function ShowMore({
     </Row>
   )
 }
+
+/**
+ * A value computed from what a view reads, computed again only when one of its inputs changed.
+ * Orca's `derived` is no cache: each `read` of it calls its function again, so a list built in one
+ * (a tree of thousands of scripts) was built on every draw, whatever changed. `inputs` reads every
+ * value `compute` depends on (so the draw still follows them) and returns them; `compute` runs only
+ * when one of them is not the same value as last time (`Object.is`: atoms are replaced, never
+ * changed in place), and reads them again itself. Only the last result is kept.
+ */
+export function memo<T>(inputs: () => readonly unknown[], compute: () => T): () => T {
+  let last: { keys: readonly unknown[]; value: T } | null = null
+  return () => {
+    const keys = inputs()
+    if (last && last.keys.length === keys.length && last.keys.every((value, i) => Object.is(value, keys[i]))) return last.value
+    const value = compute()
+    last = { keys, value }
+    return value
+  }
+}

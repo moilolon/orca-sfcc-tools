@@ -4,6 +4,7 @@
 // closes a `${…}` of a template. `tokenize` reads a whole text without a parser (for
 // highlighting), choosing regex or division from the token before. Pure: no Node, no Orca.
 import type { Comment, Problem, ProblemCode } from './ast'
+import { countWork } from '../work'
 
 export type TokenType =
   | 'identifier'
@@ -94,6 +95,8 @@ export class Lexer {
   readonly comments: Comment[]
   readonly problems: Problem[]
   private commentsEnd = -1
+  /** The characters read (../work.ts): every token with the trivia before it, every rescan. */
+  scanned = 0
 
   constructor(text: string, start = 0, end = text.length, comments: Comment[] = [], problems: Problem[] = []) {
     this.text = text
@@ -180,8 +183,10 @@ export class Lexer {
 
   /** The next token; `/` and `/=` come as punctuators. */
   next(): Token {
+    const from = this.pos
     this.skipTrivia()
     const token = this.scanToken()
+    this.scanned += this.pos - from + 1
     token.newlineBefore = this.triviaNewline
     token.doc = this.triviaDoc
     return token
@@ -451,6 +456,7 @@ export class Lexer {
     result.newlineBefore = token.newlineBefore
     if (token.doc) result.doc = token.doc
     result.regex = { pattern, flags }
+    this.scanned += this.pos - start
     return result
   }
 
@@ -458,6 +464,7 @@ export class Lexer {
   rescanTemplate(token: Token): Token {
     const result = this.scanTemplate(token.start, false)
     result.newlineBefore = token.newlineBefore
+    this.scanned += this.pos - token.start
     return result
   }
 }
@@ -497,6 +504,7 @@ export function tokenize(text: string, start = 0, end = text.length): { tokens: 
     tokens.push(token)
     previous = token
   }
+  countWork(lexer.scanned)
   if (comments.length === 0) return { tokens, problems }
   // Merge the comments in, by position.
   const merged: Token[] = []

@@ -163,7 +163,7 @@ test('a 5,000-line script parses well under 100 ms', () => {
 
 test('the syntax modules import nothing but each other: no Node, no Orca', () => {
   const ROOT = fileURLToPath(HERE)
-  const modules = ['index.ts', ...readdirSync(new URL('js/', HERE)).map((f) => `js/${f}`), ...readdirSync(new URL('isml/', HERE)).map((f) => `isml/${f}`)].filter(
+  const modules = ['index.ts', 'work.ts', ...readdirSync(new URL('js/', HERE)).map((f) => `js/${f}`), ...readdirSync(new URL('isml/', HERE)).map((f) => `isml/${f}`)].filter(
     (f) => f.endsWith('.ts') && !f.endsWith('.test.ts')
   )
   assert.ok(modules.length >= 6)

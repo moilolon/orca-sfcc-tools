@@ -1,7 +1,7 @@
 {
   "format": 1,
   "version": "26.10",
-  "generated": "2026-11-26",
+  "generated": "2026-11-27",
   "base": "https://developer.salesforce.com/docs/commerce/b2c-commerce/references/b2c-script-api/",
   "classes": {
     "TopLevel.APIException": {
@@ -1216,7 +1216,7 @@
     "dw.campaign.ABTestMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"assignedTestSegments","type":"dw.util.Collection","readOnly":true}
+        {"name":"assignedTestSegments","type":"dw.util.Collection","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getAssignedTestSegments","params":[],"returns":"dw.util.Collection","static":true},
@@ -1325,7 +1325,7 @@
       "super": "TopLevel.Object",
       "deprecated": true,
       "properties": [
-        {"name":"applicablePromotions","type":"dw.util.Collection","readOnly":true,"deprecated":true}
+        {"name":"applicablePromotions","type":"dw.util.Collection","static":true,"readOnly":true,"deprecated":true}
       ],
       "methods": [
         {"name":"applyBonusPromotions","params":[{"name":"lineItemCtnr","type":"dw.order.LineItemCtnr"},{"name":"promotions","type":"dw.util.Collection"}],"returns":"TopLevel.Boolean","static":true,"deprecated":true},
@@ -1395,7 +1395,7 @@
         {"name":"MR_ERROR_INVALID_SITE_ID","type":"TopLevel.String","value":"MASKREDEMPTIONS_SITE_NOT_FOUND"}
       ],
       "properties": [
-        {"name":"coupons","type":"dw.util.Collection","readOnly":true}
+        {"name":"coupons","type":"dw.util.Collection","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getCoupon","params":[{"name":"couponID","type":"TopLevel.String"}],"returns":"dw.campaign.Coupon","static":true},
@@ -1627,10 +1627,10 @@
     "dw.campaign.PromotionMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"activeCustomerPromotions","type":"dw.campaign.PromotionPlan","readOnly":true},
-        {"name":"activePromotions","type":"dw.campaign.PromotionPlan","readOnly":true},
-        {"name":"campaigns","type":"dw.util.Collection","readOnly":true},
-        {"name":"promotions","type":"dw.util.Collection","readOnly":true}
+        {"name":"activeCustomerPromotions","type":"dw.campaign.PromotionPlan","static":true,"readOnly":true},
+        {"name":"activePromotions","type":"dw.campaign.PromotionPlan","static":true,"readOnly":true},
+        {"name":"campaigns","type":"dw.util.Collection","static":true,"readOnly":true},
+        {"name":"promotions","type":"dw.util.Collection","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"applyDiscounts","params":[{"name":"discountPlan","type":"dw.campaign.DiscountPlan"}],"returns":"void","static":true},
@@ -1763,9 +1763,9 @@
     "dw.catalog.CatalogMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"siteCatalog","type":"dw.catalog.Catalog","readOnly":true},
-        {"name":"sortingOptions","type":"dw.util.List","readOnly":true},
-        {"name":"sortingRules","type":"dw.util.Collection","readOnly":true}
+        {"name":"siteCatalog","type":"dw.catalog.Catalog","static":true,"readOnly":true},
+        {"name":"sortingOptions","type":"dw.util.List","static":true,"readOnly":true},
+        {"name":"sortingRules","type":"dw.util.Collection","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getCatalog","params":[{"name":"id","type":"TopLevel.String"}],"returns":"dw.catalog.Catalog","static":true},
@@ -1945,9 +1945,9 @@
     "dw.catalog.PriceBookMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"allPriceBooks","type":"dw.util.Collection","readOnly":true},
-        {"name":"applicablePriceBooks","type":"dw.util.Collection"},
-        {"name":"sitePriceBooks","type":"dw.util.Collection","readOnly":true}
+        {"name":"allPriceBooks","type":"dw.util.Collection","static":true,"readOnly":true},
+        {"name":"applicablePriceBooks","type":"dw.util.Collection","static":true},
+        {"name":"sitePriceBooks","type":"dw.util.Collection","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"assignPriceBookToSite","params":[{"name":"priceBook","type":"dw.catalog.PriceBook"},{"name":"siteId","type":"TopLevel.String"}],"returns":"TopLevel.Boolean","static":true},
@@ -2351,8 +2351,8 @@
         {"name":"INTEGRATIONMODE_OCI_CACHE","type":"TopLevel.String","value":"OCI_CACHE"}
       ],
       "properties": [
-        {"name":"inventoryIntegrationMode","type":"TopLevel.String","readOnly":true},
-        {"name":"inventoryList","type":"dw.catalog.ProductInventoryList","readOnly":true}
+        {"name":"inventoryIntegrationMode","type":"TopLevel.String","static":true,"readOnly":true},
+        {"name":"inventoryList","type":"dw.catalog.ProductInventoryList","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getInventoryIntegrationMode","params":[],"returns":"TopLevel.String","static":true},
@@ -3158,8 +3158,8 @@
     "dw.catalog.StoreMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"allStoreGroups","type":"dw.util.Collection","readOnly":true},
-        {"name":"storeIDFromSession","type":"TopLevel.String","readOnly":true}
+        {"name":"allStoreGroups","type":"dw.util.Collection","static":true,"readOnly":true},
+        {"name":"storeIDFromSession","type":"TopLevel.String","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getAllStoreGroups","params":[],"returns":"dw.util.Collection","static":true},
@@ -3368,7 +3368,7 @@
         {"name":"PRIVATE_LIBRARY","type":"TopLevel.String","value":"PrivateLibrary"}
       ],
       "properties": [
-        {"name":"siteLibrary","type":"dw.content.Library","readOnly":true}
+        {"name":"siteLibrary","type":"dw.content.Library","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getContent","params":[{"name":"library","type":"dw.content.Library"},{"name":"id","type":"TopLevel.String"}],"returns":"dw.content.Content","static":true},
@@ -4176,7 +4176,7 @@
     "dw.customer.CustomerContextMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"effectiveTime","type":"TopLevel.Date"}
+        {"name":"effectiveTime","type":"TopLevel.Date","static":true}
       ],
       "methods": [
         {"name":"getEffectiveTime","params":[],"returns":"TopLevel.Date","static":true},
@@ -4212,10 +4212,10 @@
     "dw.customer.CustomerMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"customerGroups","type":"dw.util.Collection","readOnly":true},
-        {"name":"passwordConstraints","type":"dw.customer.CustomerPasswordConstraints","readOnly":true},
-        {"name":"registeredCustomerCount","type":"TopLevel.Number","readOnly":true},
-        {"name":"siteCustomerList","type":"dw.customer.CustomerList","readOnly":true}
+        {"name":"customerGroups","type":"dw.util.Collection","static":true,"readOnly":true},
+        {"name":"passwordConstraints","type":"dw.customer.CustomerPasswordConstraints","static":true,"readOnly":true},
+        {"name":"registeredCustomerCount","type":"TopLevel.Number","static":true,"readOnly":true},
+        {"name":"siteCustomerList","type":"dw.customer.CustomerList","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"authenticateCustomer","params":[{"name":"login","type":"TopLevel.String"},{"name":"password","type":"TopLevel.String"}],"returns":"dw.customer.AuthenticationStatus","static":true},
@@ -4254,11 +4254,11 @@
     "dw.customer.CustomerPasswordConstraints": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"forceLetters","type":"TopLevel.Boolean","readOnly":true},
-        {"name":"forceMixedCase","type":"TopLevel.Boolean","readOnly":true},
-        {"name":"forceNumbers","type":"TopLevel.Boolean","readOnly":true},
-        {"name":"minLength","type":"TopLevel.Number","readOnly":true},
-        {"name":"minSpecialChars","type":"TopLevel.Number","readOnly":true}
+        {"name":"forceLetters","type":"TopLevel.Boolean","static":true,"readOnly":true},
+        {"name":"forceMixedCase","type":"TopLevel.Boolean","static":true,"readOnly":true},
+        {"name":"forceNumbers","type":"TopLevel.Boolean","static":true,"readOnly":true},
+        {"name":"minLength","type":"TopLevel.Number","static":true,"readOnly":true},
+        {"name":"minSpecialChars","type":"TopLevel.Number","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getMinLength","params":[],"returns":"TopLevel.Number","static":true},
@@ -4670,7 +4670,7 @@
     "dw.customer.consent.ShopperConsentMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"subscriptions","type":"dw.util.Collection","readOnly":true}
+        {"name":"subscriptions","type":"dw.util.Collection","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getSubscriptions","params":[],"returns":"dw.util.Collection","static":true},
@@ -4795,8 +4795,8 @@
     "dw.customer.shoppercontext.ShopperContextMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"geolocation","type":"dw.util.Geolocation","readOnly":true},
-        {"name":"shopperContext","type":"dw.customer.shoppercontext.ShopperContext"}
+        {"name":"geolocation","type":"dw.util.Geolocation","static":true,"readOnly":true},
+        {"name":"shopperContext","type":"dw.customer.shoppercontext.ShopperContext","static":true}
       ],
       "methods": [
         {"name":"getGeolocation","params":[],"returns":"dw.util.Geolocation","static":true},
@@ -5855,7 +5855,7 @@
         {"name":"REFUND_REASON_REQUESTED_BY_CUSTOMER","type":"TopLevel.String","value":"requested_by_customer"}
       ],
       "properties": [
-        {"name":"paymentsSiteConfig","type":"dw.extensions.payments.SalesforcePaymentsSiteConfiguration","readOnly":true}
+        {"name":"paymentsSiteConfig","type":"dw.extensions.payments.SalesforcePaymentsSiteConfiguration","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"attachPaymentMethod","params":[{"name":"paymentMethod","type":"dw.extensions.payments.SalesforcePaymentMethod"},{"name":"customer","type":"dw.customer.Customer"}],"returns":"void","static":true,"deprecated":true},
@@ -7232,11 +7232,11 @@
     "dw.order.BasketMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"baskets","type":"dw.util.List","readOnly":true},
-        {"name":"currentBasket","type":"dw.order.Basket","readOnly":true},
-        {"name":"currentOrNewBasket","type":"dw.order.Basket","readOnly":true},
-        {"name":"storedBasket","type":"dw.order.Basket","readOnly":true},
-        {"name":"temporaryBaskets","type":"dw.util.List","readOnly":true}
+        {"name":"baskets","type":"dw.util.List","static":true,"readOnly":true},
+        {"name":"currentBasket","type":"dw.order.Basket","static":true,"readOnly":true},
+        {"name":"currentOrNewBasket","type":"dw.order.Basket","static":true,"readOnly":true},
+        {"name":"storedBasket","type":"dw.order.Basket","static":true,"readOnly":true},
+        {"name":"temporaryBaskets","type":"dw.util.List","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"createAgentBasket","params":[],"returns":"dw.order.Basket","static":true},
@@ -8282,7 +8282,7 @@
     "dw.order.PaymentMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"activePaymentMethods","type":"dw.util.List","readOnly":true}
+        {"name":"activePaymentMethods","type":"dw.util.List","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getActivePaymentMethods","params":[],"returns":"dw.util.List","static":true},
@@ -8970,8 +8970,8 @@
     "dw.order.ShippingMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"allShippingMethods","type":"dw.util.Collection","readOnly":true},
-        {"name":"defaultShippingMethod","type":"dw.order.ShippingMethod","readOnly":true}
+        {"name":"allShippingMethods","type":"dw.util.Collection","static":true,"readOnly":true},
+        {"name":"defaultShippingMethod","type":"dw.order.ShippingMethod","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"applyShipping","params":[{"name":"basket","type":"dw.order.Basket"}],"returns":"void","static":true},
@@ -9111,11 +9111,11 @@
         {"name":"TAX_POLICY_NET","type":"TopLevel.Number","value":1}
       ],
       "properties": [
-        {"name":"customRateTaxClassID","type":"TopLevel.String","readOnly":true},
-        {"name":"defaultTaxClassID","type":"TopLevel.String","readOnly":true},
-        {"name":"defaultTaxJurisdictionID","type":"TopLevel.String","readOnly":true},
-        {"name":"taxExemptTaxClassID","type":"TopLevel.String","readOnly":true},
-        {"name":"taxationPolicy","type":"TopLevel.Number","readOnly":true}
+        {"name":"customRateTaxClassID","type":"TopLevel.String","static":true,"readOnly":true},
+        {"name":"defaultTaxClassID","type":"TopLevel.String","static":true,"readOnly":true},
+        {"name":"defaultTaxJurisdictionID","type":"TopLevel.String","static":true,"readOnly":true},
+        {"name":"taxExemptTaxClassID","type":"TopLevel.String","static":true,"readOnly":true},
+        {"name":"taxationPolicy","type":"TopLevel.Number","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"applyExternalTax","params":[{"name":"basket","type":"dw.order.Basket"}],"returns":"void","static":true},
@@ -9412,7 +9412,7 @@
     "dw.sitemap.SitemapMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"customSitemapFiles","type":"dw.util.Map","readOnly":true}
+        {"name":"customSitemapFiles","type":"dw.util.Map","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"addCustomSitemapFile","params":[{"name":"hostName","type":"TopLevel.String"},{"name":"file","type":"dw.io.File"}],"returns":"void","static":true},
@@ -9928,7 +9928,7 @@
     "dw.system.Log": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"NDC","type":"dw.system.LogNDC","readOnly":true},
+        {"name":"NDC","type":"dw.system.LogNDC","static":true,"readOnly":true},
         {"name":"debugEnabled","type":"TopLevel.Boolean","readOnly":true},
         {"name":"errorEnabled","type":"TopLevel.Boolean","readOnly":true},
         {"name":"infoEnabled","type":"TopLevel.Boolean","readOnly":true},
@@ -9959,11 +9959,11 @@
     "dw.system.Logger": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"debugEnabled","type":"TopLevel.Boolean","readOnly":true},
-        {"name":"errorEnabled","type":"TopLevel.Boolean","readOnly":true},
-        {"name":"infoEnabled","type":"TopLevel.Boolean","readOnly":true},
-        {"name":"rootLogger","type":"dw.system.Log","readOnly":true},
-        {"name":"warnEnabled","type":"TopLevel.Boolean","readOnly":true}
+        {"name":"debugEnabled","type":"TopLevel.Boolean","static":true,"readOnly":true},
+        {"name":"errorEnabled","type":"TopLevel.Boolean","static":true,"readOnly":true},
+        {"name":"infoEnabled","type":"TopLevel.Boolean","static":true,"readOnly":true},
+        {"name":"rootLogger","type":"dw.system.Log","static":true,"readOnly":true},
+        {"name":"warnEnabled","type":"TopLevel.Boolean","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"debug","params":[{"name":"msg","type":"TopLevel.String"},{"name":"args","type":"TopLevel.Object","rest":true}],"returns":"void","static":true},
@@ -10252,12 +10252,12 @@
       "properties": [
         {"name":"ID","type":"TopLevel.String","readOnly":true},
         {"name":"OMSEnabled","type":"TopLevel.Boolean","readOnly":true,"deprecated":true},
-        {"name":"allSites","type":"dw.util.List","readOnly":true},
+        {"name":"allSites","type":"dw.util.List","static":true,"readOnly":true},
         {"name":"allowedCurrencies","type":"dw.util.List","readOnly":true},
         {"name":"allowedLocales","type":"dw.util.List","readOnly":true},
-        {"name":"calendar","type":"dw.util.Calendar","readOnly":true},
+        {"name":"calendar","type":"dw.util.Calendar","static":true,"readOnly":true},
         {"name":"currencyCode","type":"TopLevel.String","readOnly":true,"deprecated":true},
-        {"name":"current","type":"dw.system.Site","readOnly":true},
+        {"name":"current","type":"dw.system.Site","static":true,"readOnly":true},
         {"name":"defaultCurrency","type":"TopLevel.String","readOnly":true},
         {"name":"defaultLocale","type":"TopLevel.String","readOnly":true},
         {"name":"einsteinSiteID","type":"TopLevel.String","readOnly":true},
@@ -10307,8 +10307,8 @@
     "dw.system.Status": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"ERROR","type":"TopLevel.Number"},
-        {"name":"OK","type":"TopLevel.Number"},
+        {"name":"ERROR","type":"TopLevel.Number","static":true},
+        {"name":"OK","type":"TopLevel.Number","static":true},
         {"name":"code","type":"TopLevel.String","readOnly":true},
         {"name":"details","type":"dw.util.Map","readOnly":true},
         {"name":"error","type":"TopLevel.Boolean","readOnly":true},
@@ -10374,13 +10374,13 @@
         {"name":"STAGING_SYSTEM","type":"TopLevel.Number","value":1}
       ],
       "properties": [
-        {"name":"calendar","type":"dw.util.Calendar","readOnly":true},
-        {"name":"compatibilityMode","type":"TopLevel.Number","readOnly":true},
-        {"name":"instanceHostname","type":"TopLevel.String","readOnly":true},
-        {"name":"instanceTimeZone","type":"TopLevel.String","readOnly":true},
-        {"name":"instanceType","type":"TopLevel.Number","readOnly":true},
-        {"name":"preferences","type":"dw.system.OrganizationPreferences","readOnly":true},
-        {"name":"salesforceMyDomain","type":"dw.web.URL","readOnly":true}
+        {"name":"calendar","type":"dw.util.Calendar","static":true,"readOnly":true},
+        {"name":"compatibilityMode","type":"TopLevel.Number","static":true,"readOnly":true},
+        {"name":"instanceHostname","type":"TopLevel.String","static":true,"readOnly":true},
+        {"name":"instanceTimeZone","type":"TopLevel.String","static":true,"readOnly":true},
+        {"name":"instanceType","type":"TopLevel.Number","static":true,"readOnly":true},
+        {"name":"preferences","type":"dw.system.OrganizationPreferences","static":true,"readOnly":true},
+        {"name":"salesforceMyDomain","type":"dw.web.URL","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getCalendar","params":[],"returns":"dw.util.Calendar","static":true},
@@ -10777,7 +10777,7 @@
       "super": "dw.util.Collection",
       "subclasses": ["dw.util.ArrayList"],
       "properties": [
-        {"name":"EMPTY_LIST","type":"dw.util.List"}
+        {"name":"EMPTY_LIST","type":"dw.util.List","static":true}
       ],
       "methods": [
         {"name":"addAt","params":[{"name":"index","type":"TopLevel.Number"},{"name":"value","type":"TopLevel.Object"}],"returns":"void"},
@@ -10836,7 +10836,7 @@
       "super": "TopLevel.Object",
       "subclasses": ["dw.util.HashMap","dw.util.LinkedHashMap","dw.util.SortedMap"],
       "properties": [
-        {"name":"EMPTY_MAP","type":"dw.util.Map"},
+        {"name":"EMPTY_MAP","type":"dw.util.Map","static":true},
         {"name":"empty","type":"TopLevel.Boolean","readOnly":true},
         {"name":"length","type":"TopLevel.Number","readOnly":true}
       ],
@@ -10885,7 +10885,7 @@
     "dw.util.MappingMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"mappingNames","type":"dw.util.Collection","readOnly":true}
+        {"name":"mappingNames","type":"dw.util.Collection","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"get","params":[{"name":"mappingName","type":"TopLevel.String"},{"name":"key","type":"dw.util.MappingKey"}],"returns":"dw.util.Map","static":true},
@@ -10965,7 +10965,7 @@
       "super": "dw.util.Collection",
       "subclasses": ["dw.util.HashSet","dw.util.LinkedHashSet","dw.util.SortedSet"],
       "properties": [
-        {"name":"EMPTY_SET","type":"dw.util.Set"}
+        {"name":"EMPTY_SET","type":"dw.util.Set","static":true}
       ]
     },
     "dw.util.SortedMap": {
@@ -11166,7 +11166,7 @@
     "dw.web.CSRFProtection": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"tokenName","type":"TopLevel.String","readOnly":true}
+        {"name":"tokenName","type":"TopLevel.String","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"generateToken","params":[],"returns":"TopLevel.String","static":true},
@@ -11346,11 +11346,11 @@
     "dw.web.FormField": {
       "super": "dw.web.FormElement",
       "properties": [
-        {"name":"FIELD_TYPE_BOOLEAN","type":"TopLevel.Number"},
-        {"name":"FIELD_TYPE_DATE","type":"TopLevel.Number"},
-        {"name":"FIELD_TYPE_INTEGER","type":"TopLevel.Number"},
-        {"name":"FIELD_TYPE_NUMBER","type":"TopLevel.Number"},
-        {"name":"FIELD_TYPE_STRING","type":"TopLevel.Number"},
+        {"name":"FIELD_TYPE_BOOLEAN","type":"TopLevel.Number","static":true},
+        {"name":"FIELD_TYPE_DATE","type":"TopLevel.Number","static":true},
+        {"name":"FIELD_TYPE_INTEGER","type":"TopLevel.Number","static":true},
+        {"name":"FIELD_TYPE_NUMBER","type":"TopLevel.Number","static":true},
+        {"name":"FIELD_TYPE_STRING","type":"TopLevel.Number","static":true},
         {"name":"checked","type":"TopLevel.Boolean","readOnly":true},
         {"name":"description","type":"TopLevel.String","readOnly":true},
         {"name":"error","type":"TopLevel.String","readOnly":true},
@@ -11693,8 +11693,8 @@
     "dw.web.URLRedirectMgr": {
       "super": "TopLevel.Object",
       "properties": [
-        {"name":"redirect","type":"dw.web.URLRedirect","readOnly":true},
-        {"name":"redirectOrigin","type":"TopLevel.String","readOnly":true}
+        {"name":"redirect","type":"dw.web.URLRedirect","static":true,"readOnly":true},
+        {"name":"redirectOrigin","type":"TopLevel.String","static":true,"readOnly":true}
       ],
       "methods": [
         {"name":"getRedirect","params":[],"returns":"dw.web.URLRedirect","static":true},

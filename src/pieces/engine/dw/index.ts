@@ -69,7 +69,13 @@ export type DwMember = {
   value?: string | number
   params?: readonly DwParam[]
   returns?: DwType
+  /** Read off the class: a static method, a static property (`Site.current`), a constant. */
   static: boolean
+  /**
+   * A constant, read off the class and off an instance alike: one of the constant summary, or one
+   * the documentation lists as a property (`Status.ERROR`: static, an upper-case name, no getter).
+   */
+  constant: boolean
   readOnly: boolean
   deprecated: boolean
 }
@@ -134,12 +140,24 @@ export function callableKey(callable: Pick<DwCallableData, 'name' | 'params'>): 
   return `${callable.name}(${callable.params.map((param) => simpleName(param.type) + (param.rest ? '...' : '')).join(', ')})`
 }
 
+/** Whether a name is written as a constant's: upper case, digits and `_` (`ERROR`, `EMPTY_LIST`). */
+export function isConstantName(name: string): boolean {
+  return /^[A-Z][A-Z0-9_]*$/.test(name)
+}
+
+/** A property's getters among `methods`: `get<Name>()` and `is<Name>()`, with no parameters. */
+export function gettersOf<T extends { name: string; params?: readonly DwParam[] }>(name: string, methods: readonly T[]): T[] {
+  const capital = name.charAt(0).toUpperCase() + name.slice(1)
+  return methods.filter((method) => (method.params ?? []).length === 0 && (method.name === `get${capital}` || method.name === `is${capital}`))
+}
+
 /**
  * How a member reads: `static getProduct(productID: String): Product`,
  * `orderNo: String (read-only)`, `ORDER_STATUS_NEW: Number = 3`.
  */
 export function signature(member: DwMember): string {
-  const prefix = member.static ? 'static ' : ''
+  // A constant is always static, and the documentation writes it without the word.
+  const prefix = member.static && member.kind !== 'constant' ? 'static ' : ''
   if (member.kind === 'constructor' || member.kind === 'method') {
     const params = (member.params ?? []).map((param) => `${param.rest ? '...' : ''}${param.name}: ${simpleName(param.type)}`).join(', ')
     return `${prefix}${member.name}(${params})${member.returns ? `: ${simpleName(member.returns)}` : ''}`
@@ -194,7 +212,9 @@ function membersOf(id: string, data: Json): DwMember[] {
         owner: id,
         name,
         key: name,
-        static: entry.static === true,
+        // The index writes no `static` on a constant: every one is read off the class.
+        static: kind === 'constant' || entry.static === true,
+        constant: kind === 'constant',
         readOnly: entry.readOnly === true,
         deprecated: entry.deprecated === true
       }
@@ -213,6 +233,12 @@ function membersOf(id: string, data: Json): DwMember[] {
   add('property', list(data.properties, `${id}.properties`), 'properties')
   add('constructor', list(data.constructors, `${id}.constructors`), 'constructors')
   add('method', list(data.methods, `${id}.methods`), 'methods')
+  // A constant the documentation lists as a property: one the index marks static, with a
+  // constant's name and no getter (`Status.ERROR`; `Log.NDC` has `static getNDC()`).
+  const methods = out.filter((member) => member.kind === 'method')
+  for (const member of out) {
+    if (member.kind === 'property' && member.static && isConstantName(member.name) && gettersOf(member.name, methods).length === 0) member.constant = true
+  }
   return out
 }
 

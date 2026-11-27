@@ -11,6 +11,7 @@ import type * as AST from './ast'
 import type { Comment, Expression, Pattern, Problem, ProblemCode, Statement } from './ast'
 import { forEachChild } from './ast'
 import { Lexer, type Token } from './lexer'
+import { countWork } from '../work'
 
 export interface ParseOptions {
   /** Where to start reading `text` (default 0): positions stay offsets of the whole text. */
@@ -45,6 +46,7 @@ export function parseScript(text: string, options: ParseOptions = {}): ScriptPar
   const end = Math.min(options.end ?? text.length, text.length)
   const program: AST.Program = { type: 'Program', start, end, body }
   if (parser.problems.length > 0) coverChildren(program)
+  countWork(parser.lexer.scanned)
   return { program, comments: parser.comments, problems: parser.problems }
 }
 
@@ -86,6 +88,7 @@ export function parseExpression(text: string, options: ParseOptions = {}): Expre
     const at = options.start ?? 0
     expression = { type: 'InvalidExpression', start: at, end: at }
   }
+  countWork(parser.lexer.scanned)
   return { expression, comments: parser.comments, problems: parser.problems }
 }
 
