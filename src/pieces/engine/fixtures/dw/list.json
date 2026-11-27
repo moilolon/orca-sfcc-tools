@@ -1,0 +1,57 @@
+{
+  "entries": [
+    {
+      "id": "index",
+      "title": "B2C Commerce Script API 99.1",
+      "category": "script-api",
+      "url": "https://docs.example.com/script-api/index.html",
+      "sourceUrl": "https://docs.example.com/script-api/index.md"
+    },
+    {
+      "id": "TopLevel",
+      "title": "Package TopLevel",
+      "category": "script-api",
+      "url": "https://docs.example.com/script-api/TopLevel.html",
+      "sourceUrl": "https://docs.example.com/script-api/TopLevel.md"
+    },
+    {
+      "id": "TopLevel.Object",
+      "title": "Class Object",
+      "category": "script-api",
+      "url": "https://docs.example.com/script-api/TopLevel.Object.html",
+      "sourceUrl": "https://docs.example.com/script-api/TopLevel.Object.md",
+      "preview": "- [TopLevel.Object](TopLevel.Object.md)"
+    },
+    {
+      "id": "dw.garden",
+      "title": "Package dw.garden",
+      "category": "script-api",
+      "url": "https://docs.example.com/script-api/dw.garden.html",
+      "sourceUrl": "https://docs.example.com/script-api/dw.garden.md"
+    },
+    {
+      "id": "dw.garden.Tree",
+      "title": "Class Tree",
+      "category": "script-api",
+      "url": "https://docs.example.com/script-api/dw.garden.Tree.html",
+      "sourceUrl": "https://docs.example.com/script-api/dw.garden.Tree.md",
+      "preview": "- [TopLevel.Object](TopLevel.Object.md)"
+    },
+    {
+      "id": "dw.garden.GardenMgr",
+      "title": "Class GardenMgr",
+      "category": "script-api",
+      "url": "https://docs.example.com/script-api/dw.garden.GardenMgr.html",
+      "sourceUrl": "https://docs.example.com/script-api/dw.garden.GardenMgr.md",
+      "preview": "- [TopLevel.Object](TopLevel.Object.md)"
+    },
+    {
+      "id": "dw.garden.Plant",
+      "title": "Class Plant",
+      "category": "script-api",
+      "url": "https://docs.example.com/script-api/dw.garden.Plant.html",
+      "sourceUrl": "https://docs.example.com/script-api/dw.garden.Plant.md",
+      "preview": "- [TopLevel.Object](TopLevel.Object.md)"
+    }
+  ]
+}

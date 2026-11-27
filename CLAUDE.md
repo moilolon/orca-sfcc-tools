@@ -370,6 +370,34 @@ control, ASCII boxes).
 - `orca plugin inspect .` is refused in a checkout whose worktrees push the folder over its
   size limit; run it on such a clean copy (`orca plugin inspect <dir> --json`).
 
+## Regenerating the `dw.*` index
+
+`data/dw-api.json` is the committed `dw.*` index: classes, inheritance, constants with their
+values, properties, constructors and methods with parameters and types, deprecation, and a link
+per page and member. **No description of any kind**: Salesforce's terms grant no right to copy
+the text, only to link to it. Descriptions are read at run time by
+`src/pieces/engine/dw/describe.ts` through `b2c docs read`, kept in memory, never stored.
+`src/pieces/engine/dw/index.ts` loads the file and answers the queries (pure: no Node, no Orca).
+
+- `npm run dw-index` regenerates it, on the owner's machine only (the documentation's CDN blocks
+  hosted runners after about a hundred requests). It runs `b2c docs search --list` and one
+  `b2c docs read <class>` per class (about 500, four at a time, a quarter of an hour) through
+  `src/core/b2c.ts` with no role: `docs` needs no instance and no credentials. Every `docs`
+  command carries `--workspace all`, or `b2c` walks its working folder first (minutes in a home
+  folder).
+- `scripts/dw-pages.ts` parses each page's Markdown and fails, naming the class and the section,
+  on any shape it does not know; `scripts/generate-dw-index.ts` then writes nothing. A failed
+  read (a 403 from the CDN) stops the run. Fix the parser for the new shape, with a fixture in
+  `src/pieces/engine/fixtures/dw/` that shows it, rather than loosening a check.
+- The file is written whole, sorted, one member per line, so a regeneration's diff shows what
+  the documentation changed. A test fails when the committed file is not in that form, and
+  another when it holds anything but names, types, keys and constant values.
+- Node runs the script with `--import ./scripts/resolve-ts.ts`, which lets it import the
+  plugin's extensionless modules.
+- `.github/workflows/check-script-api-version.yml` (once the owner approves it) reads the
+  version of the public index weekly and opens an issue "Regenerate the dw.* index: <old> →
+  <new>" when it differs from the file's `version`. It regenerates nothing.
+
 ## Git
 
 - **Commits:** English, imperative, sentence case, one line of at most 72 characters with no

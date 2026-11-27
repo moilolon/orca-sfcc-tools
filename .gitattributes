@@ -1,0 +1,15 @@
+# Text is stored and checked out with LF on every platform, whatever core.autocrlf says: the
+# tests read fixtures as they are on disk, and the parsers must see the same bytes everywhere.
+* text=auto eol=lf
+
+# Binary: never converted, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.pdf binary
