@@ -7,6 +7,7 @@
       { "id": "debugger.stepOver", "title": "SFCC: Step over (debugger)" },
       { "id": "debugger.stepIn", "title": "SFCC: Step in (debugger)" },
       { "id": "debugger.stepOut", "title": "SFCC: Step out (debugger)" }
-    ]
+    ],
+    "hooks": [{ "event": "editor.save.before" }]
   }
 }

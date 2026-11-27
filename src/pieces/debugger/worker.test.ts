@@ -15,7 +15,7 @@ import type { ReadDir } from './files'
 import type { SourceFileSystem } from './source'
 import type { DebuggerState } from './protocol'
 import { createActivate, deactivate } from '../../worker/worker'
-import { activateDebugger } from './worker'
+import { activateDebugger, cutText, HOVER_MAX_TEXT } from './worker'
 
 const CAPABILITIES = ['storage:own', 'settings:own', 'workspace:read', 'workspace:write', 'notifications:show']
 const COMMANDS = ['debugger.start', 'debugger.stop', 'debugger.continue', 'debugger.stepOver', 'debugger.stepIn', 'debugger.stepOut']
@@ -117,7 +117,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
     instances: async () => ({ config: 'ok', instances: { sandbox, development: 'absent', staging: 'absent', production: 'absent' } }),
     isHost: async () => false
   } as unknown as B2c
-  const options = { coalesceMs: 20, platform: 'linux', readDir, sourceFs, openFile: opening.openFile, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
+  const options = { coalesceMs: 20, platform: 'linux', readDir, sourceFs, openFile: opening.openFile, readText: async (file: string) => DISK[file] ?? null, saveWaitMs: 300, savePollMs: 5, timeouts: { requestMs: 500, launchMs: 500, disconnectMs: 300, exitMs: 50 } }
   const module = throughCore
     ? {
         default: createActivate({
@@ -139,7 +139,7 @@ async function mount({ sandbox = 'ready' as RoleState, workspace = LOCAL as Work
         },
         deactivate: () => disposable?.dispose()
       }
-  const worker = await mountWorker(module, { host: mockHost({ capabilities: CAPABILITIES, storage, results: { 'editor.open': { opened: true } } }), commands: COMMANDS })
+  const worker = await mountWorker(module, { host: mockHost({ capabilities: CAPABILITIES, storage, results: { 'editor.open': { opened: true } } }), commands: COMMANDS, hooks: ['editor.save.before'] })
   const states = () => worker.posts.filter((post) => post.event === 'debugger.state').map((post) => post.payload as DebuggerState)
   return { worker, adapter, logs, states, opened: opening.calls }
 }
@@ -385,4 +385,200 @@ test('a session that did not end cleanly is cleaned up on the next start, from t
   assert.equal(adapter.processes.length, 2)
   assert.deepEqual(adapter.processes[0].commands, ['initialize', 'launch', 'disconnect'])
   assert.equal(worker.host.data().storage['debugger.unclean'], true, 'set again while the new session runs')
+})
+
+// ---- What the plugin's editor asks (phase 7.3) ----
+
+const TEMPLATE = 'cartridges/app_example/cartridge/templates/default/page.isml'
+
+test('the editor’s view of a file: a script of a cartridge takes breakpoints, any other file and any other workspace none', async () => {
+  const { worker } = await mount()
+  const none = { scriptable: false, session: 'none', lines: [], stopped: null }
+  assert.deepEqual(await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE }), { ...none, scriptable: true })
+  // A script saved after the walk counts too: the path decides.
+  assert.equal((await worker.request('debugger.file', { workspaceId: 'w1', path: 'cartridges/app_example/cartridge/scripts/helpers/newHelper.js' })).scriptable, true)
+  for (const path of [TEMPLATE, 'dw.json', 'package.json', 'cartridges/app_example/node_modules/lib/index.js', '../outside.js', `${FAKE_ROOT}/${PAGE}`]) {
+    assert.deepEqual(await worker.request('debugger.file', { workspaceId: 'w1', path }), none, path)
+  }
+  assert.deepEqual(await worker.request('debugger.file', { workspaceId: 'elsewhere', path: PAGE }), none)
+  assert.deepEqual(await worker.request('debugger.file', {} as never), none)
+})
+
+test('the editor sets and removes breakpoints of its own workspace in the one store, only in a script', async () => {
+  const { worker } = await mount()
+  const state = await worker.request('debugger.breakpoint', { workspaceId: 'w1', path: PAGE, line: 11, on: true })
+  assert.deepEqual(state.breakpoints, [{ path: PAGE, lines: [{ line: 11, verified: null }] }], 'the debugger’s view shows it too')
+  assert.deepEqual((await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })).lines, [{ line: 11, verified: null }])
+  // Moved lines written on the editor's save replace the file's lines.
+  await worker.request('debugger.setBreakpoints', { workspaceId: 'w1', path: PAGE, lines: [13, 2] })
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [2, 13] } })
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { workspaceId: 'w1', path: TEMPLATE, line: 3, on: true })), 'not_script')
+  assert.equal(await codeOf(worker.request('debugger.setBreakpoints', { workspaceId: 'w1', path: 'dw.json', lines: [1] })), 'not_script')
+  assert.equal(await codeOf(worker.request('debugger.breakpoint', { workspaceId: 'elsewhere', path: PAGE, line: 3, on: true })), 'no_workspace')
+  // Without a workspace named (the debugger's view, an error's frame) it is the debugged one, as before.
+  await worker.request('debugger.breakpoint', { path: PAGE, line: 20, on: true })
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [2, 13, 20] } })
+})
+
+test('while a session runs: the editor sees which lines it verified, the halted line with its frame, and values of plain reads only', async () => {
+  const { worker, adapter, states } = await mount()
+  adapter.config.unverified = { [`${FAKE_ROOT}/${PAGE}`]: [30] }
+  await worker.request('debugger.setBreakpoints', { workspaceId: 'w1', path: PAGE, lines: [11, 30] })
+  await worker.request('debugger.start', {})
+  await until(() => states().some((state) => state.status === 'attached'), 'attached')
+  let file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.equal(file.session, 'attached')
+  assert.deepEqual(file.lines, [
+    { line: 11, verified: true },
+    { line: 30, verified: false }
+  ])
+  assert.equal(file.stopped, null)
+
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => (states().at(-1)?.frames.length ?? 0) > 0, 'the halted stack')
+  file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.equal(file.session, 'halted')
+  assert.deepEqual(file.stopped, { line: 11, name: 'show()', frameId: 70000, top: true })
+  // A halt in another file opens nothing there and shows nothing in this one's neighbours.
+  assert.equal((await worker.request('debugger.file', { workspaceId: 'w1', path: 'cartridges/app_example/cartridge/controllers/Home.js' })).stopped, null)
+
+  // The frame's variables as the tree of the debugger's view lists them.
+  adapter.config.scopes = [
+    { name: 'Local', variablesReference: 1 },
+    { name: 'Closure', variablesReference: 2 },
+    { name: 'Global', variablesReference: 3, expensive: true }
+  ]
+  adapter.config.variables = {
+    1: [
+      { name: 'basket', value: '[Basket]', variablesReference: 10 },
+      { name: 'items', value: '[Collection]', variablesReference: 12 }
+    ],
+    2: [],
+    3: [{ name: 'BasketMgr', value: '[BasketMgr]', variablesReference: 20 }],
+    10: [{ name: 'totalGrossPrice', value: `EUR 42.00 on ${FAKE_HOST}`, variablesReference: 11 }],
+    12: [{ name: '[0]', value: '[ProductLineItem]', variablesReference: 13 }],
+    13: [{ name: 'productID', value: 'P-0001', variablesReference: 0 }],
+    20: [{ name: 'getCurrentBasket', value: 'function getCurrentBasket()', variablesReference: 0 }]
+  }
+  const sent = () => adapter.last.requests.map((request) => request.command)
+  const hover = (expression: string, frameId = 70000, path = PAGE) => worker.request('debugger.hover', { workspaceId: 'w1', path, expression, frameId })
+  const before = sent().length
+  assert.deepEqual(await hover(' basket . totalGrossPrice '), { expression: 'basket.totalGrossPrice', value: 'EUR 42.00 on ***', expandable: true })
+  assert.deepEqual(await hover("items[0]['productID']"), { expression: 'items[0]["productID"]', value: 'P-0001', expandable: false })
+  assert.deepEqual(await hover('BasketMgr'), { expression: 'BasketMgr', value: '[BasketMgr]', expandable: true }, 'a global, from the Global scope')
+  // Finding 1: a documented getter with a side effect is never evaluated; it is read only if the
+  // listing the tree shows has it, and this one does not.
+  assert.equal(await hover('BasketMgr.currentOrNewBasket'), null)
+  assert.equal(await hover('coupon.nextCouponCode'), null)
+  assert.equal(await hover('basket.missing'), null)
+  for (const expression of ['basket.getTotalGrossPrice()', 'a = 1', 'i++', 'new Date()', 'a[i]', 'delete a.b']) assert.equal(await hover(expression), null, expression)
+  assert.equal(await hover('basket', 99), null, 'a frame that is not one of the halt')
+  assert.equal(await hover('basket', 70000, 'cartridges/app_example/cartridge/controllers/Home.js'), null, 'a frame of another file')
+  const asked = sent().slice(before)
+  assert.ok(asked.length > 0 && asked.every((command) => command === 'scopes' || command === 'variables'), `only what expanding the tree asks: ${[...new Set(asked)].join(', ')}`)
+
+  // Round 2, finding 4: the listings are kept for the halt, so resting on names again asks the instance nothing more.
+  const kept = sent().length
+  for (const expression of ['basket.totalGrossPrice', 'BasketMgr', "items[0]['productID']", 'basket.missing']) await hover(expression)
+  assert.equal(sent().length, kept, 'nothing asked again during the same halt')
+
+  // Another halt reads them again; a long value is cut for the pop-up, after masking.
+  adapter.config.variables = { ...adapter.config.variables, 1: [{ name: 'basket', value: `${FAKE_HOST} ${'x'.repeat(5_000)}`, variablesReference: 10 }] }
+  const posted = states().length
+  await worker.request('debugger.step', { kind: 'continue' })
+  adapter.last.event('stopped', { reason: 'breakpoint', threadId: 7 })
+  await until(() => states().slice(posted).some((state) => state.status === 'halted' && state.frames.length > 0), 'the second halt')
+  const long = await hover('basket')
+  assert.ok(long && long.value.startsWith('*** x') && long.value.length <= HOVER_MAX_TEXT + 1 && long.expandable, JSON.stringify(long))
+
+  // The thread continues: the halted line goes, and a hover evaluates nothing.
+  await worker.request('debugger.step', { kind: 'continue' })
+  file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.equal(file.stopped, null)
+  assert.equal(await hover('basket'), null)
+  await worker.request('debugger.stop', {})
+  file = await worker.request('debugger.file', { workspaceId: 'w1', path: PAGE })
+  assert.deepEqual([file.session, file.lines.map((each) => each.verified)], ['none', [null, null]])
+  assert.ok(!JSON.stringify(worker.posts).includes(FAKE_HOST), 'no host anywhere')
+})
+
+/** The files on disk as a save finds them before it writes, by absolute path. */
+const DISK: Record<string, string> = {}
+
+test('findings 2 to 5: a save from any editor tab moves the file’s breakpoints with its text, before it is written', async () => {
+  const { worker } = await mount()
+  const before = ['a', 'b', 'c', 'd', 'e', 'f'].map((name) => `var ${name} = 1;`).join('\n')
+  DISK[`${FAKE_ROOT}/${PAGE}`] = before
+  await worker.request('debugger.setBreakpoints', { path: PAGE, lines: [3, 5] })
+  // One gained since the editor was flushed (the Errors view's frame): the save moves it too.
+  await worker.request('debugger.breakpoint', { path: PAGE, line: 6, on: true })
+  // Two lines above, and the line of the breakpoint on 5 deleted whole.
+  const after = `// one\n// two\n${before.replace('var e = 1;\n', '')}`
+  const decision = await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, languageId: 'javascript', text: after })
+  assert.equal(decision.kind, 'continue', 'the save goes on as it was')
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [3, 5, 6] } }, 'nothing moves before the file is written')
+  DISK[`${FAKE_ROOT}/${PAGE}`] = after
+  await until(() => JSON.stringify(worker.host.data().storage['debugger.breakpoints']) === JSON.stringify({ w1: { [PAGE]: [5, 7] } }), 'the moved lines')
+  // A tab names its workspace `<project>::<folder>`; an edit inside a line moves nothing.
+  DISK[`${FAKE_ROOT}/${PAGE}`] = after
+  await worker.hooks.fire('editor.save.before', { workspaceId: `repo::${FAKE_ROOT}`, path: `${FAKE_ROOT}/${PAGE}`, text: after.replace('var c = 1;', 'var c = 2;') })
+  await worker.hooks.fire('editor.save.before', { workspaceId: `repo::${FAKE_ROOT}`, path: `${FAKE_ROOT}/${PAGE}`, text: `\n${after}` })
+  DISK[`${FAKE_ROOT}/${PAGE}`] = `\n${after}`
+  await until(() => JSON.stringify(worker.host.data().storage['debugger.breakpoints']) === JSON.stringify({ w1: { [PAGE]: [6, 8] } }), 'moved again')
+  // A file with no breakpoints, one outside every workspace, or one that cannot be read: nothing changes.
+  for (const path of [`${FAKE_ROOT}/cartridges/app_example/cartridge/controllers/Home.js`, '/elsewhere/Other.js']) {
+    assert.equal((await worker.hooks.fire('editor.save.before', { workspaceId: null, path, text: 'x' })).kind, 'continue')
+  }
+  delete DISK[`${FAKE_ROOT}/${PAGE}`]
+  await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: 'var z;' })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [6, 8] } })
+})
+
+test('round 2, finding 4: a save that never reaches the disk (it failed, or another hook refused it) moves nothing', async () => {
+  const { worker } = await mount()
+  const before = ['a', 'b', 'c'].map((name) => `var ${name} = 1;`).join('\n')
+  DISK[`${FAKE_ROOT}/${PAGE}`] = before
+  await worker.request('debugger.setBreakpoints', { path: PAGE, lines: [2] })
+  await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: `// top\n${before}` })
+  // The wait for the written text (300 ms here) passes with the old text still on disk.
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [2] } })
+})
+
+test('round 2, finding 3: a line set from the editor is refused when the disk holds another text there', async () => {
+  const { worker } = await mount()
+  DISK[`${FAKE_ROOT}/${PAGE}`] = ['var a = 1;', 'function show() {', '  return a;', '}'].join('\n')
+  const set = (line: number, text: string) => worker.request('debugger.breakpoint', { workspaceId: 'w1', path: PAGE, line, on: true, text })
+  // The editor took another tab's unsaved Enter for the file: its line 4 is `return a;`, the disk's is `}`.
+  assert.equal(await codeOf(set(4, '  return a;')), 'line_changed')
+  assert.equal(worker.host.data().storage['debugger.breakpoints'], undefined)
+  await set(3, '  return a;')
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [3] } })
+  // Removing needs no text: it removes what the store holds.
+  await worker.request('debugger.breakpoint', { workspaceId: 'w1', path: PAGE, line: 3, on: false })
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], {})
+})
+
+test('a value cut for the pop-up never splits a surrogate pair', () => {
+  assert.equal(cutText('abc', 5), 'abc')
+  assert.equal(cutText('ab😀cd', 3), 'ab…')
+  assert.equal(cutText('ab😀cd', 4), 'ab😀…')
+})
+
+test('round 3, finding 2: two saves of one file close together both move its breakpoints, in order', async () => {
+  const { worker } = await mount()
+  const text0 = ['var a = 1;', 'var b = 2;', 'function show() {', '  return a + b;', '}'].join('\n')
+  const text1 = `// one\n${text0}`
+  const text2 = `// two\n${text1}`
+  DISK[`${FAKE_ROOT}/${PAGE}`] = text0
+  await worker.request('debugger.setBreakpoints', { path: PAGE, lines: [3] })
+  // A double save: the second hook runs before the first save's text was ever seen on disk.
+  await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: text1 })
+  await worker.hooks.fire('editor.save.before', { workspaceId: 'w1', path: `${FAKE_ROOT}/${PAGE}`, text: text2 })
+  DISK[`${FAKE_ROOT}/${PAGE}`] = text2
+  await until(() => JSON.stringify(worker.host.data().storage['debugger.breakpoints']) === JSON.stringify({ w1: { [PAGE]: [5] } }), 'both moves')
+  // And it stays there: nothing after them moves it again.
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.deepEqual(worker.host.data().storage['debugger.breakpoints'], { w1: { [PAGE]: [5] } })
 })

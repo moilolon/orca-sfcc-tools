@@ -161,17 +161,54 @@ Changing it needs the owner's yes.
     - `src/pieces/debugger/`: `dap-client.ts` (the debug adapter protocol's framing and
       request matching), `session.ts` (one `b2c debug` session: its states, driven by the
       adapter's events, never by its responses), `breakpoints.ts` (the single store of
-      breakpoints, per workspace, paths relative to it; the editor phase reads and writes it
-      too), `workspace.ts` (which workspace is debugged, by `activeWorkspace()` like
-      `configRoot()` so credentials and cartridges come from one folder, and how a file is
-      opened, each in one function), `files.ts` (the scripts of the workspace's cartridges, and the cartridges),
+      breakpoints, per workspace, paths relative to it, lines of the file as saved; the editor
+      reads and writes it too), `workspace.ts` (which workspace is debugged, by
+      `activeWorkspace()` like `configRoot()`, its folder named as the `configRoot` of every b2c
+      call of a session so credentials and cartridges come from one folder, and how a file is
+      opened, each in one function), `files.ts` (the scripts of the workspace's cartridges, and
+      the cartridges; `isScriptPath` decides from a path whether a breakpoint can go in it),
+      `inspect.ts` (what the editor may ask the value of: a plain name, `this` or a chain of
+      property reads with literal indexes, read by the engine's parser; any call, `new`,
+      assignment, update, operator or expression index is refused. What passes is **never
+      evaluated**: it is a path of names the worker walks through the halted frame's scopes and
+      members with the `scopes` and `variables` requests the view's tree makes, so a hover runs
+      nothing that expanding those names would not, a getter with a side effect included),
+      `line-diff.ts` (where each line of one text stands in another: equal start and end, then
+      Myers' O(ND) diff on the rest within `MAX_DIFF_EDITS` and `MAX_DIFF_WORK`. When that left out
+      a significant line (one with a letter or a digit) that occurs once on each side, a shortest
+      script having kept a brace or a blank line instead, those lines anchor the match first
+      (patience) and Myers matches each gap between them; past its budget, every line that occurs
+      once on both sides anchors a gap, grown over the equal lines around it. So an unchanged
+      unique statement always follows its text (a seeded fuzz test holds it), and unchanged lines
+      stay right in a file of any size (50,000 lines in tens of milliseconds, a test holds it). A
+      line moved past another (Alt+Up), or deleted in one place and written again in another, is
+      a move a diff cannot see: one of the two lines keeps its breakpoint. A hunk of as many new
+      lines as old ones pairs in order, a line rewritten in place keeping its breakpoint; an
+      uneven one pairs by likeness, a line deleted whole dropped. Pure and with no imports: the
+      editor's frame loads it too),
       `source.ts` (one script's lines for the view's source table: read only for a script
       `files.ts` found and only inside the workspace's folder, cut, masked, never stored; the
       view shows a window of `WINDOW_LINES` of them at a time), and `fake-adapter.ts`, the
       scripted adapter its tests use. The open script and folders are kept with the id of the
       workspace they belong to and let go when another is debugged.
       `debugger.breakpoint` sets or removes one line; the Errors view calls it too, for *Add
-      breakpoint here* on a frame. Every
+      breakpoint here* on a frame. The editor names its own workspace (`workspaceId`) on it and on
+      `debugger.setBreakpoints`, and then only a script of its cartridges is taken
+      (`not_script`); it asks `debugger.file { workspaceId, path }` (whether the file takes
+      breakpoints, its lines with the session's verdict, the topmost frame of the halt in it)
+      again on every `debugger.state` post, and `debugger.hover` reads an `inspect.ts` path in a
+      frame of the halt in that file, masked and cut to `HOVER_MAX_TEXT`; its listings are kept
+      until the halted stack changes, so resting on names again asks the instance nothing. A line
+      the editor sets carries the text it believes the line holds on disk (`text`), refused with
+      `line_changed` when the disk holds another (an editor that took another tab's unsaved edits
+      for the file). On every `editor.save.before` (from any editor tab, the plugin's or Orca's
+      own; observed only, it waits at most `REMAP_HOOK_MS` for the file to be read before Orca
+      writes it) the worker computes where the saved file's breakpoints go with `line-diff.ts`,
+      the file on disk against the text saved, and moves them once the disk holds that text
+      (looked at for `SAVE_WAIT_MS`; a save that failed or was refused moves nothing), so the
+      store, the session and every view keep the lines that now run. The saves of one file move
+      it one after another: a save made while another waits starts from that one's text, and a
+      save counts as written once the disk holds its text or a later one's. Every
       way out of a session disconnects first (a halted request is otherwise held), and a flag
       in its storage makes the next start run a cleanup session after an unclean end.
     - `src/pieces/engine/` (phase 6, delivered with its **Problems** view since 6.5): the syntax
@@ -427,6 +464,29 @@ Changing it needs the owner's yes.
       text on Windows, so Orca never matches it on a Spanish layout) opens the file last saved in
       the focused workspace in the editor: no host call gives the focused tab's path. The errors'
       and the debugger's jumps open their file with `inEditor`. The piece has no panel view.
+      **Breakpoints** (phase 7.3, `debug/`, started by `attachDebug` in `app.ts`): for a named
+      file only, `controller.ts` draws the store's lines in the mark column, by shape and in a
+      tooltip (a disc verified, a ring not verified, a ring with a dot with no session, a dashed
+      ring until saved), and a click or `F9` (Orca binds no F9; handled in the frame, no
+      keybinding) sets or removes one through `debugger.breakpoint`, only where the worker says
+      the file is a script of a cartridge. The store keeps lines of the file as saved; `marks.ts`
+      keeps the text it believes is on disk and draws each stored line where the debugger's
+      `line-diff.ts` from that text to the text now puts it, the same diff the worker moves the
+      store with on save, so a mark shows before a save where the store has it after. A line
+      deleted whole hides its mark, and undo brings it back. That text is the last save this
+      editor saw of the file (its own, `editor.flush` then an `own` `editor.saved`, or any save
+      whose hash is its text), or the last write from outside (the outside side of a merge, else
+      the replaced text): marks never move with an outside write, they stay on the store's lines,
+      which is what runs, and the stopped line and a click use them too. A click on a line
+      written since is held (`line-map.ts` moves it with edits) and set once a save makes it a
+      line of the file. Two editors of one file agree after every save; while one has unsaved
+      edits, the other takes them as a write from outside, and a click there on a line the disk
+      holds differently is refused with a one-line notice (`line_changed`). The halted line (the topmost frame of
+      the halt in this file, or a caller's) is highlighted with its frame's name and scrolled into
+      view once per halt; a halt elsewhere opens nothing. While halted in a script (never a
+      template), a pointer resting on a name asks its value, in that topmost frame of the file:
+      `expression.ts` takes the chain of reads that ends at it, and the worker checks it again
+      and walks it (`inspect.ts`).
     - `scripts/build-manifest.ts`: the manifest merge (run by Node, which strips the types).
 - **Rules of the plugin:**
     - Upload, logs, the sandbox, debugging and API documentation go through the official `b2c`

@@ -6,6 +6,7 @@
 // asks the worker which file it shows (locate-client.ts), with a one-line notice when it cannot
 // tell. The features of 7.2 and 7.3 build on `editor` below.
 import { t } from '../../core/i18n'
+import { attachDebug } from './debug/attach'
 import { guessLanguage, languageOfPath, LEXERS } from './highlight/language'
 import { IdentityStore } from './identity'
 import { LocateClient } from './locate-client'
@@ -164,12 +165,16 @@ async function main(kind: EditorKind): Promise<void> {
     const located = await client.locate(model.text())
     if (located.line) view.revealLine(located.line, located.column)
   }
+  // 7.3: breakpoints in the margin, the stopped line and values while halted (debug/).
+  const debug = attachDebug({ api, view, model, identity, sync, notify: (text) => showNotice(notice, { text, dismissible: true }) })
   // A save names this editor's file only when this editor was the one flushed for it.
   api.on('editor.flush', () => {
     client.flushed(model.text())
+    debug.flushed()
   })
   api.plugin.on('editor.saved', (payload) => {
-    if (payload && typeof payload.path === 'string' && typeof payload.hash === 'string') void client.saved(payload, () => model.text())
+    if (payload && typeof payload.path === 'string' && typeof payload.hash === 'string')
+      void client.saved(payload, () => model.text()).then((whose) => whose === 'own' && debug.saved())
   })
   view.focus()
   await locate()
