@@ -55,9 +55,6 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--orca-b
 .ed-highlight-line { position: absolute; left: -6px; right: 0; top: 0; height: var(--ed-line); background: color-mix(in srgb, var(--ed-stopped) 24%, transparent); box-shadow: inset 2px 0 0 var(--ed-stopped); }
 .ed-highlight-caller { background: color-mix(in srgb, var(--ed-stopped) 11%, transparent); }
 .ed-highlight-label { position: absolute; top: 0; padding: 0 6px; white-space: nowrap; font: 11px/var(--ed-line) var(--orca-font-sans, system-ui, sans-serif); color: var(--orca-muted-foreground, #59636e); }
-.ed-debug-value { position: absolute; max-width: min(520px, 80vw); max-height: 200px; overflow: auto; padding: 4px 8px; font: 12px/1.45 var(--ed-font, ui-monospace, monospace); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--orca-popover-foreground, var(--orca-foreground, #1f2328)); background: var(--orca-popover, var(--orca-background, #fff)); border: 1px solid var(--orca-border, #d1d9e0); border-radius: var(--orca-radius, 6px); box-shadow: 0 4px 14px rgb(0 0 0 / 0.16); }
-.ed-debug-value .ed-debug-expression { color: var(--t-key); }
-.ed-debug-value .ed-debug-muted { color: var(--orca-muted-foreground, #59636e); font-family: var(--orca-font-sans, system-ui, sans-serif); }
 .ed-text { position: absolute; top: 0; bottom: 0; left: calc(var(--ed-gutter) + 6px); right: 0; cursor: text; white-space: pre; tab-size: 4; }
 .ed-lines { position: absolute; left: 0; top: 0; will-change: transform; }
 .ed-line { height: var(--ed-line); }

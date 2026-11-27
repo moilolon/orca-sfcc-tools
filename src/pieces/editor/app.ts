@@ -4,8 +4,9 @@
 // (surface/view.ts) over the editing model, keeps the document in sync with Orca (sync.ts), colours
 // the text with the engine's lexers (highlight/), takes Orca's editor typography and theme, and
 // asks the worker which file it shows (locate-client.ts), with a one-line notice when it cannot
-// tell. The features of 7.2 and 7.3 build on `editor` below.
+// tell. The language features of 7.2 (features/) start once the surface is drawn.
 import { t } from '../../core/i18n'
+import { startFeatures } from './features/dom'
 import { attachDebug } from './debug/attach'
 import { guessLanguage, languageOfPath, LEXERS } from './highlight/language'
 import { IdentityStore } from './identity'
@@ -106,6 +107,8 @@ async function main(kind: EditorKind): Promise<void> {
   const language = kind === 'isml' ? 'isml' : guessLanguage(sync.initial, ['javascript', 'xml', 'properties'])
   const view = new SurfaceView(surface, model, { lexer: LEXERS[language], label: word('editorLabel') })
   const identity = new IdentityStore()
+  // Completion, hover, warnings, go to definition, signature help and references (7.2).
+  const features = startFeatures({ api, view, model, identity, language: () => language })
 
   // Every edit goes to Orca (the session coalesces them); a composition in progress does not.
   model.onUpdate((event) => {
@@ -167,6 +170,9 @@ async function main(kind: EditorKind): Promise<void> {
   }
   // 7.3: breakpoints in the margin, the stopped line and values while halted (debug/).
   const debug = attachDebug({ api, view, model, identity, sync, notify: (text) => showNotice(notice, { text, dismissible: true }) })
+  // One pointer pop-up: while halted, the value first and the language hover under it.
+  features.setValueSource(debug.valueAt)
+  debug.onState(() => features.features.debugChanged())
   // A save names this editor's file only when this editor was the one flushed for it.
   api.on('editor.flush', () => {
     client.flushed(model.text())

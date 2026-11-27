@@ -26,11 +26,22 @@ export type EditorLocated = { path: string; line?: number; column?: number } | {
 
 export type EditorChooseInput = EditorText & { workspaceId: string | null; path: string }
 
+/**
+ * A file of the workspace to open in this editor at a line (go to definition, a reference): its
+ * path relative to the workspace, as the engine names it; line and column 1-based.
+ */
+export type EditorOpenInput = { workspaceId: string | null; path: string; line?: number; column?: number }
+
+/** Whether it opened; why not as a code (`no_workspace`, `invalid_path`, or open-file's own). */
+export type EditorOpenResult = { opened: boolean; reason?: string }
+
 declare module 'orca' {
   interface PluginRequests {
     'editor.locate': { input: EditorLocateInput; output: EditorLocated }
     /** Keeps the person's choice among identical files, per workspace and text. */
     'editor.choose': { input: EditorChooseInput; output: { ok: boolean } }
+    /** Opens a file of the frame's workspace in the plugin's editor at a line (`open-file.ts`, `inEditor`). */
+    'editor.open': { input: EditorOpenInput; output: EditorOpenResult }
   }
   interface PluginPanelEvents {
     /**

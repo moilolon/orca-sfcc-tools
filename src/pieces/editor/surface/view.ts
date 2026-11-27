@@ -3,9 +3,10 @@
 // only the lines in view and `OVERSCAN` around them are in the DOM, each line's element kept while
 // its tokens stay the same. No contenteditable: the browser never edits the DOM, so the text, the
 // history and the colours stay the model's. A gutter holds the line numbers and a column for
-// marks (the breakpoints of 7.3). The hooks of 7.2 are here without their features: a layer of
-// underlines drawn from ranges, a layer for pop-ups, the caret's place on screen, and a callback
-// when the caret moves.
+// marks (the breakpoints of 7.3). The hooks the language features (7.2, ../features/) draw with: a
+// layer of underlines drawn from ranges, a layer for pop-ups, a place's box on screen, the place
+// under the pointer, and a callback when the caret moves. The features take keys and clicks before
+// the surface does, in the capture phase on `root`, so the surface knows nothing of them.
 import { comparePos, type Pos } from './buffer'
 import { Highlighter } from '../highlight/highlighter'
 import { CLASSES, type LineLexer } from '../highlight/tokens'

@@ -1,6 +1,7 @@
 // Starts the editor's debugging features (phase 7.3) on a surface: the controller over Orca's
-// requests, the gutter's clicks and F9 (Orca binds no F9), the stopped line, and the value pop-up
-// under the pointer while a thread is halted in a script. app.ts calls `attachDebug` once and tells
+// requests, the gutter's clicks and F9 (Orca binds no F9), the stopped line, and the value of the
+// name under the pointer while a thread is halted in a script, which the language features' one
+// pointer pop-up shows first (features/hover.ts). app.ts calls `attachDebug` once and tells
 // it of a flush and of the editor's own save; the rest it listens to itself: which text is on disk
 // after a write from outside (the document sync's replace) or a save of a text it holds.
 import type { OrcaFrameApi } from 'orca/frame'
@@ -12,17 +13,19 @@ import type { DocumentSync } from '../sync'
 import type { EditorModel } from '../surface/model'
 import type { SurfaceView } from '../surface/view'
 import { DebugController, type DebugWords } from './controller'
+import type { Section, ValueAt } from '../features/ui'
 import { HoverReader } from './expression'
 import { debugMessages } from './i18n'
-
-/** How long the pointer rests on a name before its value is asked. */
-export const HOVER_DELAY_MS = 350
 
 export type AttachedDebug = {
   /** Orca flushed this editor for a save. */
   flushed(): void
   /** The save that followed was this editor's, of its file. */
   saved(): void
+  /** The value under a place while halted, for the editor's pointer pop-up. */
+  valueAt: ValueAt
+  /** The session or the file's state changed: a value shown may be gone. */
+  onState(listener: () => void): void
 }
 
 export function attachDebug(options: { api: OrcaFrameApi; view: SurfaceView; model: EditorModel; identity: IdentityStore; sync: DocumentSync; notify: (text: string) => void }): AttachedDebug {
@@ -76,90 +79,35 @@ export function attachDebug(options: { api: OrcaFrameApi; view: SurfaceView; mod
     })
   })
 
-  const hover = valuePopup(view, model, controller, word)
   view.addKeyHandler((event) => {
-    if (event.key === 'Escape') hover.hide()
     if (event.key !== 'F9' || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return false
-    hover.hide()
     void controller.toggle(model.selection.head.line)
     return true
   })
-  controller.onState(() => hover.hide())
 
   return {
     flushed: () => controller.flushed(),
-    saved: () => void controller.savedOwn()
+    saved: () => void controller.savedOwn(),
+    valueAt: valueSource(model, controller, word),
+    onState: (listener) => controller.onState(listener)
   }
 }
 
-/** The value under the pointer: asked after it rests, shown below the name, gone when it moves off. */
-function valuePopup(view: SurfaceView, model: EditorModel, controller: DebugController, word: DebugWords): { hide(): void } {
+/**
+ * The value of the name at an offset while a thread is halted in this script: its range in the
+ * text and its lines, for the editor's one pointer pop-up (features/hover.ts draws it first, the
+ * language hover under it); null when not halted or there is no value.
+ */
+function valueSource(model: EditorModel, controller: DebugController, word: DebugWords): ValueAt {
   const reader = new HoverReader()
-  let timer: ReturnType<typeof setTimeout> | null = null
-  let asked = 0
-  let shown: { box: HTMLDivElement; from: number; to: number } | null = null
-
-  function hide(): void {
-    asked++
-    if (timer) clearTimeout(timer)
-    timer = null
-    shown?.box.remove()
-    shown = null
-  }
-
-  async function show(clientX: number, clientY: number): Promise<void> {
-    if (!controller.stopped) return hide()
-    const at = view.posAtPoint(clientX, clientY)
-    if (!at) return hide()
-    const buffer = model.buffer
-    const offset = buffer.offsetAt(at)
-    if (shown && offset >= shown.from && offset < shown.to) return
-    const target = reader.at(buffer.text(), offset)
-    if (!target) return hide()
-    const mine = ++asked
+  return async (offset) => {
+    if (!controller.stopped) return null
+    const target = reader.at(model.buffer.text(), offset)
+    if (!target) return null
     const value = await controller.hoverValue(target.expression)
-    if (mine !== asked) return
-    shown?.box.remove()
-    shown = null
-    if (!value) return
-    const box = document.createElement('div')
-    box.className = 'ed-debug-value'
-    box.setAttribute('role', 'tooltip')
-    box.setAttribute('aria-label', word('valueLabel'))
-    const name = document.createElement('span')
-    name.className = 'ed-debug-expression'
-    name.textContent = value.expression
-    box.append(name, document.createTextNode(` = ${value.value}`))
-    if (value.expandable) {
-      const more = document.createElement('div')
-      more.className = 'ed-debug-muted'
-      more.textContent = word('valueMembers')
-      box.appendChild(more)
-    }
-    const place = view.boxAt(buffer.posAt(target.from))
-    box.style.left = `${Math.max(0, place.x)}px`
-    box.style.top = `${place.y + place.height + 2}px`
-    view.popupLayer.appendChild(box)
-    // Above the line when it would run past the bottom.
-    const room = view.root.clientHeight
-    if (room > 0 && place.y + place.height + 2 + box.offsetHeight > room) box.style.top = `${Math.max(0, place.y - box.offsetHeight - 2)}px`
-    shown = { box, from: target.from, to: target.to }
+    if (!value || !controller.stopped) return null
+    const sections: Section[] = [{ tone: 'code', text: `${value.expression} = ${value.value}` }]
+    if (value.expandable) sections.push({ tone: 'muted', text: word('valueMembers') })
+    return { from: target.from, to: target.to, label: word('valueLabel'), sections }
   }
-
-  view.scroller.addEventListener('mousemove', (event) => {
-    if (!controller.stopped) {
-      if (shown || timer) hide()
-      return
-    }
-    if (timer) clearTimeout(timer)
-    const { clientX, clientY } = event
-    timer = setTimeout(() => {
-      timer = null
-      void show(clientX, clientY)
-    }, HOVER_DELAY_MS)
-  })
-  view.scroller.addEventListener('mouseleave', hide)
-  view.scroller.addEventListener('scroll', hide, { passive: true })
-  view.scroller.addEventListener('mousedown', hide)
-  return { hide }
 }
