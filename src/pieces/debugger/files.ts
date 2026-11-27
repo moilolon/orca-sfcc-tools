@@ -9,17 +9,20 @@ const SKIPPED = new Set(['node_modules', 'dist', 'build', 'coverage', '.git', '.
 const SCRIPT = /\.(js|ds)$/i
 const MAX_FILES = 5_000
 const MAX_DEPTH = 12
-/** How many matches one search answers. */
-export const MAX_MATCHES = 50
 
 type Entry = { name: string; isDirectory(): boolean; isFile(): boolean }
 export type ReadDir = (path: string) => Promise<Entry[]>
 
 const defaultReadDir: ReadDir = (path) => readdir(path, { withFileTypes: true })
 
-/** Every script file of the workspace's cartridges, relative to `root`; `truncated` past MAX_FILES. */
-export async function scriptFiles(root: string, readDir: ReadDir = defaultReadDir): Promise<{ files: string[]; truncated: boolean }> {
+/**
+ * Every script file of the workspace's cartridges, relative to `root`; `truncated` past MAX_FILES.
+ * `cartridges` are the folders, relative to `root` (`''` for the root itself), holding the
+ * `.project` file that makes a cartridge, outermost only, in the order they were found.
+ */
+export async function scriptFiles(root: string, readDir: ReadDir = defaultReadDir): Promise<{ files: string[]; truncated: boolean; cartridges: string[] }> {
   const files: string[] = []
+  const cartridges: string[] = []
   let truncated = false
 
   async function entries(path: string): Promise<Entry[]> {
@@ -35,6 +38,7 @@ export async function scriptFiles(root: string, readDir: ReadDir = defaultReadDi
     if (truncated || parts.length > MAX_DEPTH) return
     const list = await entries(dir)
     const cartridge = inCartridge || list.some((entry) => entry.isFile() && entry.name === '.project')
+    if (cartridge && !inCartridge) cartridges.push(parts.join('/'))
     for (const entry of list.sort((a, b) => (a.name < b.name ? -1 : 1))) {
       if (truncated) return
       if (entry.isDirectory()) {
@@ -51,22 +55,21 @@ export async function scriptFiles(root: string, readDir: ReadDir = defaultReadDi
   }
 
   await walk(root, [], false)
-  return { files, truncated }
+  return { files, truncated, cartridges }
 }
 
-/**
- * The files whose path holds every word of `query`, ignoring case; the shortest paths first, at
- * most MAX_MATCHES. An empty query matches nothing: there are too many files to list.
- */
-export function matchFiles(files: readonly string[], query: string): { files: string[]; truncated: boolean } {
-  const words = query.toLowerCase().split(/[\s]+/).filter(Boolean)
-  if (words.length === 0) return { files: [], truncated: false }
-  const matches = files.filter((file) => {
-    const lower = file.toLowerCase()
-    return words.every((word) => lower.includes(word))
-  })
-  // The file's own name matching first, then the shorter path.
-  const name = (file: string) => file.slice(file.lastIndexOf('/') + 1).toLowerCase()
-  matches.sort((a, b) => Number(words.every((w) => name(b).includes(w))) - Number(words.every((w) => name(a).includes(w))) || a.length - b.length || (a < b ? -1 : 1))
-  return { files: matches.slice(0, MAX_MATCHES), truncated: matches.length > MAX_MATCHES }
+/** The script files grouped by the cartridge that holds them; a cartridge with none is left out. */
+export function byCartridge(files: readonly string[], cartridges: readonly string[]): { path: string; files: string[] }[] {
+  // The longest cartridge path that holds a file wins, so a cartridge's files are only its own.
+  const roots = [...cartridges].sort((a, b) => b.length - a.length)
+  const groups = new Map<string, string[]>()
+  for (const file of files) {
+    const root = roots.find((path) => path === '' || file.startsWith(`${path}/`))
+    if (root === undefined) continue
+    const list = groups.get(root) ?? []
+    list.push(file)
+    groups.set(root, list)
+  }
+  return cartridges.filter((path) => groups.has(path)).map((path) => ({ path, files: groups.get(path) ?? [] }))
 }
+

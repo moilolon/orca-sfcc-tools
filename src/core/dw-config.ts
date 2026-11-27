@@ -115,6 +115,17 @@ export async function locateConfig(root: string, configFile: string, fs: FileSys
   return null
 }
 
+/**
+ * Whether a workspace has a file to read, by the rule of `locateConfig`, without reading it: only
+ * whether each place holds a file (a worktree's `.git` file is read to find its main checkout).
+ */
+export async function hasConfigFile(root: string, configFile: string, isFile: (path: string) => Promise<boolean>, fs: FileSystem = nodeFiles): Promise<boolean> {
+  if (configFile.trim()) return isFile(isAbsolute(configFile) ? configFile : resolve(root, configFile))
+  if (await isFile(join(root, 'dw.json'))) return true
+  const main = await mainCheckoutOf(root, fs)
+  return main !== null && (await isFile(join(main, 'dw.json')))
+}
+
 export type DwConfigOptions = { root: string | null; configFile: string; suffixes: Suffixes }
 
 function everyRole(map: (role: Role) => RoleConfig): Record<Role, RoleConfig> {

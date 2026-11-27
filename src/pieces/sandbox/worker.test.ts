@@ -116,6 +116,75 @@ test('the requests answer with the state; a refused one rejects with its code', 
   sandbox.dispose()
 })
 
+test('the project in use: the owner’s; else the focused one’s when it has dw.json; else every project with one', async () => {
+  const { b2c, fake, host, sandbox, timers } = await start()
+  const DOCS = { id: 'w-docs', kind: 'worktree' as const, name: 'Docs', path: 'C:/work/docs', branch: 'main', hostId: 'local', projectId: 'p-docs' }
+  host.state.listed = [{ ...SHOP, projectId: 'p-shop' }, { ...FIX, projectId: 'p-shop' }, { ...REMOTE, projectId: 'p-shop' }, DOCS]
+  const grouping = async () => (await fake.request('sandbox.status')).workspaces.map((w) => [w.id, w.inProject])
+  /** Whether a folder has a file is asked again only after a while: the test lets it pass. */
+  const configure = async (paths: string[]) => {
+    b2c.configured = new Set(paths)
+    await timers.advance(31_000)
+  }
+  // No project has a dw.json: every workspace is listed as one, with its branch.
+  assert.deepEqual(
+    (await fake.request('sandbox.status')).workspaces.map((w) => [w.id, w.branch, w.inProject]),
+    [
+      [SHOP.id, 'main', true],
+      [FIX.id, 'fix', true],
+      [REMOTE.id, null, true],
+      [DOCS.id, 'main', true]
+    ]
+  )
+  // The shop has one: its workspaces come first, the other project folds away.
+  await configure([SHOP.path, FIX.path])
+  const shopFirst = [
+    [SHOP.id, true],
+    [FIX.id, true],
+    [REMOTE.id, true],
+    [DOCS.id, false]
+  ]
+  assert.deepEqual(await grouping(), shopFirst)
+  // Focusing a workspace of a project with no dw.json changes nothing: the shop stays first.
+  host.state.focused = DOCS.id
+  assert.deepEqual(await grouping(), shopFirst)
+  // Focusing a workspace with one keeps its project first.
+  host.state.focused = SHOP.id
+  assert.deepEqual(await grouping(), shopFirst)
+  // Two projects with one, the focus on neither (a remote workspace is never looked at): both first.
+  await configure([SHOP.path, FIX.path, DOCS.path])
+  host.state.focused = REMOTE.id
+  assert.deepEqual(await grouping(), [
+    [SHOP.id, true],
+    [FIX.id, true],
+    [REMOTE.id, true],
+    [DOCS.id, true]
+  ])
+  // The focus on a workspace with one: only its project.
+  host.state.focused = DOCS.id
+  assert.deepEqual(await grouping(), [
+    [SHOP.id, false],
+    [FIX.id, false],
+    [REMOTE.id, false],
+    [DOCS.id, true]
+  ])
+  assert.equal((await fake.request('sandbox.status')).upload.workspaceId, null, 'the focus never picks what uploads')
+  // Once one uploads, its project wins over the focus.
+  await fake.request('sandbox.pick', { workspaceId: FIX.id })
+  assert.deepEqual(await grouping(), shopFirst)
+  // A workspace Orca names no project for is not taken as the project's.
+  host.state.listed = [{ ...SHOP, projectId: null }, { ...FIX, projectId: 'p-shop' }, REMOTE, DOCS]
+  assert.deepEqual(await grouping(), [
+    [SHOP.id, false],
+    [FIX.id, true],
+    [REMOTE.id, false],
+    [DOCS.id, false]
+  ])
+  // Only whether the file exists was asked: b2c ran nothing to learn it.
+  assert.ok(!b2c.commands().some((command) => /dw|config/i.test(command)))
+  sandbox.dispose()
+})
+
 test('the prefix setting names new code versions', async () => {
   const { fake, sandbox } = await start({ settings: { codeVersionPrefix: 'dev_' } })
   const picked = await fake.request('sandbox.pick', { workspaceId: FIX.id })
@@ -181,7 +250,7 @@ test('a sandbox role that is not ready shows as such, and every command answers 
   b2c.state = { config: 'ok', instances: { sandbox: 'incomplete', development: 'ready', staging: 'absent', production: 'absent' } }
   const { fake, host, sandbox } = await start({ b2c })
   host.state.focused = SHOP.id
-  const reason = 'The sandbox is not ready in dw.json: it needs a host and credentials b2c can use.'
+  const reason = 'The sandbox is not set up in dw.json.'
   for (const id of [COMMANDS.pick, COMMANDS.deploy, COMMANDS.reload, COMMANDS.refresh, COMMANDS.start, COMMANDS.stop]) {
     assert.equal(await fake.command(id), reason, id)
   }
