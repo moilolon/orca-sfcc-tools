@@ -10,8 +10,12 @@
 // starts, within `RESUME_MS` of being asked. Each read asks for the ERROR and FATAL entries
 // (`--level`) of the files a setting names (`--filter`), since a few minutes before the newest
 // entry already read (`cursor.<role>`), at most `MAX_ENTRIES`; an entry counts once, by the
-// newest time read from its own file. What is stored, in the plugin's own storage: per signature
-// its counters and one bounded sample, masked; never a raw entry.
+// newest time read from its own file. What is kept: per signature its counters and one bounded
+// sample, masked, never a raw entry, in `seen.json` of the plugin's data folder (data-folder.ts),
+// which every copy of the plugin and the command line of bin/errors.ts share; the cursors and the
+// state of each read stay in the plugin's own storage. On its first start the piece copies the
+// seen lists an older version kept in storage into `seen.json`, once, when that file does not
+// exist yet, and leaves storage as it is.
 //
 // b2c's `logs get` reads only the last 64 KB of each log file (not a flag) and keeps at most
 // `--count` entries, so a busy log can hold entries no read ever sees. That cannot be fixed here;
@@ -30,19 +34,15 @@ import { isRole, ROLES, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
 import { isLocal } from '../../core/workspaces'
+import { createSeenFileStore, dataFiles, dataFolder, DATA_VERSION, readDataFile, updateDataFile } from './data-folder'
+import { FILE_WINDOW_BYTES, listArguments, maskedSamples, occurrencesOf, readArguments, windowFull } from './digest'
 import { createFrameResolver, type FrameResolver } from './frames'
 import { messages, ROLE_KEYS } from './i18n'
 import type { ErrorRow, OpenFrameResult, RoleErrors } from './protocol'
-import { ERROR_LEVELS, filtersOf, parseLogEntries, parseMessage, type ParsedMessage } from './reader'
-import { createSeenList, type Occurrence, type Sample, type SeenJson, type SeenStore } from './seen'
-import { identityOf, normalize, signatureOfIdentity } from './signature'
+import { ERROR_LEVELS, filtersOf, parseLogEntries } from './reader'
+import { createSeenList, listKey, type Occurrence, type Sample, type SeenJson } from './seen'
 
-/** The most entries one read asks for. b2c also reads only the last 64 KB of each file. */
-export const MAX_ENTRIES = 200
-/** How much of a file b2c reads, from its end. */
-export const FILE_WINDOW_BYTES = 64 * 1024
-/** Entries of one file adding up to this much mean its window was (nearly) full. */
-export const FULL_WINDOW_BYTES = 48 * 1024
+export { FILE_WINDOW_BYTES, FULL_WINDOW_BYTES, listArguments, MAX_ENTRIES, readArguments } from './digest'
 /** How far before the cursor a read starts, so an entry another server wrote late is still read. */
 export const OVERLAP_MS = 5 * 60 * 1000
 /** How long a file's own cursor is kept. */
@@ -61,6 +61,8 @@ export const RESUME_MS = 10 * 60_000
 // request (`errors.refresh` starts it and answers at once), so the two calls together may take
 // longer than a request may wait.
 const READ_TIMEOUT_MS = 90_000
+/** Set in the piece's storage once its seen lists were copied to the data folder. */
+export const MIGRATED_KEY = 'seenMoved'
 /** The status bar item, declared in this piece's manifest. */
 export const STATUS_ITEM = 'errors-new'
 
@@ -74,6 +76,8 @@ export type ErrorsDeps = {
   clearTimer?: (handle: unknown) => void
   openFile?: OpenFile
   frames?: FrameResolver
+  /** The data folder that holds `seen.json`; default `dataFolder()`, read when the piece starts. */
+  dataFolder?: string
 }
 
 type ReadStatus = { lastRead: number | null; error: string | null; missedSince: number | null }
@@ -131,12 +135,6 @@ export function outgrewWindow(previous: Record<string, number>, current: Map<str
   return false
 }
 
-/** The number of entries b2c returned, whatever their level. */
-function returnedCount(json: unknown): number {
-  const entries = json && typeof json === 'object' ? (json as { entries?: unknown }).entries : undefined
-  return Array.isArray(entries) ? entries.length : 0
-}
-
 function invalid(): Error {
   return Object.assign(new Error('invalid_params'), { code: 'invalid_params' })
 }
@@ -151,27 +149,6 @@ function roleOf(input: unknown): Role {
 export function intervalOf(value: unknown): number {
   const minutes = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : 0
   return Number.isFinite(minutes) && minutes > 0 ? Math.min(Math.round(minutes), 1440) : 0
-}
-
-/** The arguments of one read: ERROR and FATAL entries of the files named, since `since`, at most `MAX_ENTRIES`. */
-export function readArguments(filters: readonly string[], since: number): string[] {
-  // `--no-normalize`: the frames keep the instance's own script paths, so a signature does not
-  // depend on the checkout, and no local path reaches the sample. `--level`: a file the setting
-  // names may mix levels (`custom-*`); only errors are read.
-  return [
-    'logs',
-    'get',
-    '--no-normalize',
-    ...filters.map((filter) => `--filter=${filter}`),
-    ...ERROR_LEVELS.map((level) => `--level=${level}`),
-    `--count=${MAX_ENTRIES}`,
-    `--since=${new Date(since).toISOString()}`
-  ]
-}
-
-/** The arguments of the listing that comes before each read: the same files. */
-export function listArguments(filters: readonly string[]): string[] {
-  return ['logs', 'list', ...filters.map((filter) => `--filter=${filter}`)]
 }
 
 export function createErrorsPiece(deps: ErrorsDeps = {}): WorkerPiece {
@@ -189,11 +166,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   const clearTimer = deps.clearTimer ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>))
   const openFile = deps.openFile ?? createOpenFile({ log: ctx.log })
   const frames = deps.frames ?? createFrameResolver()
-  const store: SeenStore = {
-    get: (key, fallback) => ctx.store.get(key, fallback) as Promise<typeof fallback>,
-    set: (key, value: SeenJson) => ctx.store.set(key, value)
-  }
-  const seen = createSeenList(store)
+  const seenPath = dataFiles(deps.dataFolder ?? dataFolder()).seen
+  const seen = createSeenList(createSeenFileStore(seenPath))
   const reads = new Map<Role, Promise<void>>()
   let stopped = false
   // Each answer says which state it shows: this worker, and a number raised on every change of a
@@ -239,7 +213,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   async function updateStatusBar(): Promise<void> {
-    const count = await seen.newCount('sandbox')
+    // A seen list that cannot be read shows nothing: the view says why.
+    const count = await seen.newCount('sandbox').catch(() => 0)
     try {
       await ctx.orca.host.call('statusBar.update', {
         id: STATUS_ITEM,
@@ -258,60 +233,6 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     const newCount = await seen.newCount(role)
     ctx.orca.panels.post('errors.changed', { role, newCount })
     if (role === 'sandbox') await updateStatusBar()
-  }
-
-  /** Texts masked with one call to `mask`. A text holds no line break, so the lines map back. */
-  async function maskAll(texts: readonly string[]): Promise<string[]> {
-    if (texts.length === 0) return []
-    const masked = (await ctx.b2c.mask(texts.map((text) => text.replace(/[\r\n]+/g, ' ')).join('\n'))).split('\n')
-    return texts.map((_, index) => masked[index] ?? '')
-  }
-
-  /**
-   * The samples of the newest entry of each signature. Masked, then normalised (a host in the text
-   * is masked whole before its digits go, and a URL loses its host), then masked again.
-   */
-  async function maskedSamples(newest: Map<string, { parsed: ParsedMessage; level: string }>): Promise<Map<string, Sample>> {
-    const plan = [...newest].map(([signature, { parsed, level }]) => ({ signature, parsed, level, identity: identityOf(parsed) }))
-    // A sample as a list of texts, and back: message, logger, pipeline, then each frame's file and
-    // function. The level is one of ERROR_LEVELS, never a text of the log; the site is not kept.
-    const flatten = (sample: Sample) => [sample.message, sample.logger ?? '', sample.pipeline ?? '', ...sample.frames.flatMap((frame) => [frame.file, frame.function ?? ''])]
-    const rebuild = (sample: Sample, texts: string[]): Sample => {
-      let i = 0
-      const next = () => texts[i++] ?? ''
-      const message = next()
-      const logger = next()
-      const pipeline = next()
-      return {
-        message,
-        logger: sample.logger === null ? null : logger,
-        pipeline: sample.pipeline ? pipeline : null,
-        level: sample.level ?? null,
-        frames: sample.frames.map((frame) => {
-          const file = next()
-          const name = next()
-          return { file, function: frame.function === null ? null : name, line: frame.line }
-        })
-      }
-    }
-    const maskEach = async (samples: Sample[]): Promise<Sample[]> => {
-      const masked = await maskAll(samples.flatMap(flatten))
-      let offset = 0
-      return samples.map((sample) => {
-        const size = flatten(sample).length
-        return rebuild(sample, masked.slice(offset, (offset += size)))
-      })
-    }
-    const raw: Sample[] = plan.map(({ parsed, level, identity }) => ({
-      message: parsed.text,
-      logger: identity.logger,
-      pipeline: parsed.pipeline,
-      level: ERROR_LEVELS.includes(level.toUpperCase()) ? level.toUpperCase() : null,
-      frames: identity.frames.map((frame) => ({ file: frame.file, function: frame.function, line: frame.line }))
-    }))
-    const normalised = (await maskEach(raw)).map((sample) => ({ ...sample, message: normalize(sample.message) }))
-    const twice = await maskEach(normalised)
-    return new Map(twice.map((sample, index) => [plan[index].signature, sample]))
   }
 
   /**
@@ -359,16 +280,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     // An entry at or before the newest one read from its own file was counted by an earlier read;
     // a file not read before has nothing counted since the read's start.
     const entries = all.filter((entry) => !cursor || entry.timestamp > (cursor.files[entry.file] ?? since))
-    const occurrences: { signature: string; at: number }[] = []
-    const newest = new Map<string, { parsed: ParsedMessage; level: string }>()
-    for (const entry of entries) {
-      const parsed = parseMessage(entry.message)
-      const signature = signatureOfIdentity(identityOf(parsed))
-      occurrences.push({ signature, at: entry.timestamp })
-      // Entries come oldest first: the last one of a signature is its newest.
-      newest.set(signature, { parsed, level: entry.level })
-    }
-    const samples = await maskedSamples(newest)
+    const { occurrences, newest } = occurrencesOf(entries)
+    const samples = await maskedSamples(newest, (text) => ctx.b2c.mask(text))
     const recorded: Occurrence[] = occurrences.map(({ signature, at }) => ({ signature, at, sample: samples.get(signature) as Sample }))
     const { added } = await seen.record(role, recorded)
 
@@ -384,12 +297,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     }
     // b2c kept at most MAX_ENTRIES, and read only the end of each file: any cut means entries
     // since the last read may never be seen. It is said in the view, never notified.
-    const bytesPerFile = new Map<string, number>()
-    for (const entry of all) bytesPerFile.set(entry.file, (bytesPerFile.get(entry.file) ?? 0) + entry.bytes)
-    const cut =
-      returnedCount(json) >= MAX_ENTRIES ||
-      [...bytesPerFile.values()].some((bytes) => bytes >= FULL_WINDOW_BYTES) ||
-      (sizes !== null && outgrewWindow(cursor?.sizes ?? {}, sizes, since))
+    const cut = windowFull(json, all) || (sizes !== null && outgrewWindow(cursor?.sizes ?? {}, sizes, since))
     await ctx.store.set(statusKey(role), { lastRead: now(), error: null, missedSince: cut ? (cursor?.at ?? since) : null })
     if (cut) ctx.log(`the ${role} read may have missed entries`)
     if (added.length > 0 && !stopped) {
@@ -563,7 +471,36 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
   const resumed: unknown[] = []
 
+  /**
+   * Copies the seen lists an older version kept in the plugin's storage into `seen.json`, once:
+   * only while that file does not exist, under its lock, and storage is left as it is. Marked done
+   * in storage (`seenMoved`), so a later start never copies them again, even once the file is gone.
+   */
+  async function migrate(): Promise<boolean> {
+    if ((await ctx.store.get<SeenJson>(MIGRATED_KEY, false)) === true) return false
+    const found: Record<string, SeenJson> = {}
+    for (const role of ROLES) {
+      const value = await ctx.store.get<SeenJson>(listKey(role), null)
+      if (value && typeof value === 'object' && !Array.isArray(value)) found[role] = value
+    }
+    // Nothing to copy, or already copied by another copy of the plugin: the file is not touched.
+    let copied = false
+    if (Object.keys(found).length > 0 && (await readDataFile(seenPath)) === null) {
+      await updateDataFile<SeenJson>(seenPath, (current) => {
+        if (current !== null) return undefined
+        copied = true
+        return { version: DATA_VERSION, roles: found }
+      })
+      if (copied) ctx.log('the seen lists were copied to the data folder')
+    }
+    await ctx.store.set(MIGRATED_KEY, true)
+    return copied
+  }
+
   void updateStatusBar()
+  void migrate()
+    .then((copied) => (copied ? Promise.all(ROLES.map((role) => changed(role))) : undefined))
+    .catch((error) => ctx.log(`the seen lists were not copied: ${error instanceof Error ? error.message : 'error'}`))
   void schedule(START_DELAY_MS)
   void resumeCutReads().catch(() => undefined)
 

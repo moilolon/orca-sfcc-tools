@@ -71,9 +71,22 @@ Changing it needs the owner's yes.
       configuration file; else every project with one; else all); `testing.ts` holds the fakes
       its tests share.
     - `src/pieces/errors/`: `reader.ts` parses `logs get`, `signature.ts` (its rules written
-      beside the code) and `seen.ts` (over a store it is given) are pure, for phase 4's command
-      line; `frames.ts` finds which stack frames are files of a local cartridge (such a frame
-      of a row carries its path in the workspace, for a breakpoint). A read stores per signature
+      beside the code) and `seen.ts` (over a store it is given) are pure; `digest.ts` holds what
+      one read becomes (its arguments, each entry's signature, the masked and normalised samples),
+      shared by the worker and the command line; `frames.ts` finds which stack frames are files
+      of a local cartridge (such a frame of a row carries its path in the workspace, for a
+      breakpoint). **The seen list is not in Orca's storage** (spike S8: it is rewritten whole with
+      no lock): it is `seen.json` in the plugin's data folder (`data-folder.ts`: `%APPDATA%`, that
+      is `~\AppData\Roaming`, `~/Library/Application Support` or `~/.local/share`, then
+      `orca-sfcc-tools`, from the home folder only, since the worker has no `APPDATA`;
+      `ORCA_SFCC_TOOLS_DATA` overrides it for tests, and every test that starts the piece sets it
+      or the piece's `dataFolder`), `{ version: 1, roles: { <role>: table } }`, shared by every
+      copy of the plugin, written by the worker only, under an exclusive lock file (stale after
+      30 s) and an atomic rename, read by anyone. A file that does not parse is refused, never
+      read as empty or overwritten. On its first start the piece copies the `errors.seen.<role>`
+      keys of storage into it, once (`seenMoved` in storage), only when the file does not exist,
+      and leaves storage alone. The cursors and the state of each read stay in storage. A read
+      stores per signature
       only its counters and a masked, bounded sample (the normalised first line, the logger, the
       pipeline or controller, the level and the top frames; never the site, which names the
       shop), never a raw entry; a notification says how many, never what. The workspace whose cartridges a frame is looked
@@ -101,7 +114,23 @@ Changing it needs the owner's yes.
       that `logs list`, run before each read, shows grew by more than 64 KB, whatever the level
       of its lines) and the view says "some entries may have been missed since <time>", never a
       notification.
-      Phase 4's command line has the same limit.
+      The command line has the same limit, and says so per environment (`mayHaveMissed`).
+    - **The command line** (`bin/errors.ts`, a shim over `src/pieces/errors/cli.ts`, the report in
+      `report.ts`): `node bin/errors.ts --config-file <dw.json> --role <role>… [--json]
+      [--since <time>] [--lang en|es]`, for the bot `sfcc` (its prompt is `docs/bot-prompt.md`).
+      It builds the plugin's own runner with the file given as its `configFile` setting and the
+      default suffixes, so `dw-config.ts` stays the only reader and values reach `b2c` only in
+      the child's environment; the path is never printed. It reads `seen.json` and never writes
+      it (recording there would count the panel's entries twice); its own cursor is
+      `report.json` beside it (`{ version: 1, roles: { <role>: { lastReportAt, reported } } }`,
+      locked and atomic too), moved only after a report was printed whole and only for a role
+      read. It prints per role what is new since the last report and what is still unmarked:
+      short signature, count, first and last time, the masked normalised message, the logger and
+      the top frame's file and function (the pipeline without one); never a raw entry, the rest
+      of a stack, the site or a host. Exit 0 with a report, 1 when a role, the seen list or the
+      last report could not be read, 2 on wrong arguments. It runs under plain Node 22.18 or
+      later: **every module it reaches imports with explicit `.ts` extensions** (a test walks
+      them; an `import type` needs none, since Node erases it). Orca loads nothing of `bin/`.
     - `src/pieces/debugger/`: `dap-client.ts` (the debug adapter protocol's framing and
       request matching), `session.ts` (one `b2c debug` session: its states, driven by the
       adapter's events, never by its responses), `breakpoints.ts` (the single store of

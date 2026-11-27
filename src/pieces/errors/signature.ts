@@ -62,7 +62,7 @@
 // Too loose a rule hides a new error under an old one; too tight a rule repeats an old one. The
 // rules are tuned on the fixtures of signature.test.ts, near misses included.
 import { createHash } from 'node:crypto'
-import { parseMessage, type Frame, type ParsedMessage } from './reader'
+import { parseMessage, type Frame, type ParsedMessage } from './reader.ts'
 
 /** How many frames, from the top, identify an error. */
 export const TOP_FRAMES = 3

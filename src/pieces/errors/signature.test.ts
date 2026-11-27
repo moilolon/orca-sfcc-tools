@@ -426,6 +426,6 @@ test('signature.ts and seen.ts stay pure: no Orca import, and no Node import bey
   for (const file of ['signature.ts', 'seen.ts', 'reader.ts']) {
     const source = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')
     const imports = [...source.matchAll(/(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]|import\s*['"]([^'"]+)['"]/g)].map((m) => m[1] ?? m[2])
-    for (const spec of imports) assert.ok(spec === 'node:crypto' || spec === './reader', `${file} imports ${spec}`)
+    for (const spec of imports) assert.ok(spec === 'node:crypto' || spec === './reader.ts', `${file} imports ${spec}`)
   }
 })
