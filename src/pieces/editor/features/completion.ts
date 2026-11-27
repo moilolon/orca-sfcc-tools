@@ -5,9 +5,10 @@
 // only), so the list never waits for the worker; arrows and Page keys move, Enter and Tab accept,
 // Escape closes; filtered to nothing, it closes. Accepting replaces exactly the range the engine
 // said, moved through each change since by the change's place: typing inside it moves its end, a
-// change after it (an outside write below) moves nothing, and one before it or across its edge
-// closes the list. The selected item's description (`engine.hover` with its id) is asked once the
-// selection rests. Pure: no DOM.
+// change after it (an outside write below) moves nothing, and one before it or across its edge,
+// or one in it the caret did not end after (a write from outside at the caret), closes the list.
+// The selected item's description (`engine.hover` with its id) is asked once the selection rests.
+// Pure: no DOM.
 import type { Completion, CompletionContext, CompletionItem, EngineCompletion } from '../../engine/protocol'
 import type { Change } from '../surface/buffer'
 import { hint, noteState, plain, queryAt, type FeatureContext } from './context'
@@ -80,6 +81,12 @@ export class CompletionController {
   private readonly latest: Latest
   private readonly describing: Latest
   private open: Open | null = null
+  /**
+   * Where the last change inside the range ended: typing leaves the caret there or after it; a
+   * write from outside at the caret leaves the caret before it. Checked once the model has set
+   * the caret (`settle`), and the list closes when no typing explains the change.
+   */
+  private typedEnd: number | null = null
   private reask: unknown = null
   private describeTimer: unknown = null
 
@@ -103,9 +110,21 @@ export class CompletionController {
     if (at > open.end) return
     if (at >= open.start && removedEnd <= open.end) {
       open.end += change.inserted.length - change.removed.length
+      this.typedEnd = at + change.inserted.length
       return
     }
     this.close()
+  }
+
+  /** After the model set the caret: a change in the range the caret did not end after was not typed here. */
+  private settle(): boolean {
+    const typedEnd = this.typedEnd
+    this.typedEnd = null
+    if (this.open && typedEnd !== null && this.ctx.document.caret() < typedEnd) {
+      this.close()
+      return false
+    }
+    return this.open !== null
   }
 
   get isOpen(): boolean {
@@ -128,6 +147,7 @@ export class CompletionController {
 
   /** The text changed: the open list is filtered now, and the engine asked again shortly. */
   changed(startedAt: number): void {
+    if (!this.settle()) return
     const open = this.open
     if (!open) return
     const typed = this.typedSince(open)
@@ -149,6 +169,7 @@ export class CompletionController {
 
   /** The caret moved without typing: the list closes once it leaves the range. */
   caretMoved(): void {
+    if (!this.settle()) return
     if (this.open && this.typedSince(this.open) === null) this.close()
   }
 
@@ -211,6 +232,7 @@ export class CompletionController {
     this.describing.cancel()
     this.ctx.clearTimer(this.reask)
     this.ctx.clearTimer(this.describeTimer)
+    this.typedEnd = null
     if (this.open) {
       this.open = null
       this.ctx.ui.list(null)

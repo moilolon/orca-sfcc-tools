@@ -5,6 +5,7 @@ import { assert, test } from 'orca/testing'
 import type { Completion, CompletionItem, EngineHoverResult, Problem, SignatureHelp } from '../../engine/protocol'
 import { REASK_DELAY_MS, DESCRIBE_DELAY_MS, filterItems, opensAfter } from './completion'
 import { NO_WORKSPACE, STAND_IN } from './document'
+import { HINT_MS } from './features'
 import { featureKey, SHORTCUTS } from './keys'
 import { PROBLEMS_DELAY_MS } from './problems'
 import { SIGNATURE_DELAY_MS, splitLabel } from './signature'
@@ -187,6 +188,57 @@ test('the list’s range moves with each change by its place: an outside write a
   assert.equal(h.features.completion.isOpen, false)
   assert.equal(h.ui.now().list, null)
   assert.equal(h.key('Enter'), false)
+})
+
+test('an outside write exactly at the caret is no typing: the list closes and Enter deletes nothing', async () => {
+  // A line appended to a file with no final line break, while the list is open at its end.
+  const engine = new FakeEngine()
+  const h = harness('var a = product‸', { requests: engine.requests, identity: located(SCRIPT), language: 'javascript' })
+  h.type('.')
+  const at = h.offset()
+  engine.last('complete').resolve(completion([item('getID')], at, at))
+  await settle()
+  h.model.replaceAll(`${h.model.text()}\n// appended by someone else`)
+  assert.equal(h.features.completion.isOpen, false)
+  assert.equal(h.key('Enter'), false)
+  assert.equal(h.model.buffer.text(), 'var a = product.\n// appended by someone else')
+  // Text written right after the caret by someone else.
+  const other = harness('call(product‸);\nnext();', { requests: engine.requests, identity: located(SCRIPT), language: 'javascript' })
+  other.type('.')
+  const there = other.offset()
+  engine.last('complete').resolve(completion([item('getID')], there, there))
+  await settle()
+  other.model.replaceAll('call(product.,other);\nnext();')
+  assert.equal(other.features.completion.isOpen, false)
+  assert.equal(other.key('Enter'), false)
+  assert.equal(other.model.buffer.text(), 'call(product.,other);\nnext();')
+  // Typing at the caret still filters the list and is replaced on accept.
+  other.model.setSelection({ line: 0, col: 'call(product.'.length })
+  other.key(' ', { ctrl: true })
+  const again = other.offset()
+  engine.last('complete').resolve(completion([item('getID')], again, again))
+  await settle()
+  other.type('g')
+  assert.equal(other.features.completion.isOpen, true)
+  other.key('Enter')
+  assert.equal(other.model.buffer.line(0), 'call(product.getID,other);')
+})
+
+test('a hint that fades on its own leaves Escape to the editor', async () => {
+  const engine = new FakeEngine()
+  engine.handlers.complete = (input) => ({ ...READY, completion: { context: 'none', range: { start: input.offset, end: input.offset }, items: [], truncated: false, guessed: false } })
+  const h = harness('x‸', { requests: engine.requests, identity: located(SCRIPT), language: 'javascript' })
+  h.key(' ', { ctrl: true })
+  await settle()
+  assert.equal(h.ui.lastHint?.text, 'No suggestions here')
+  h.clock.advance(HINT_MS)
+  assert.equal(h.ui.lastHint, null, 'faded')
+  assert.equal(h.key('Escape'), false, 'nothing open: the editor’s')
+  // Shown again, then closed by Escape before it fades: one press, then the editor's.
+  h.key(' ', { ctrl: true })
+  await settle()
+  assert.equal(h.key('Escape'), true)
+  assert.equal(h.key('Escape'), false)
 })
 
 test('a list filtered to nothing closes: the arrows go back to the editor', async () => {

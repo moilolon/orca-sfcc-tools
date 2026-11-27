@@ -477,9 +477,13 @@ Changing it needs the owner's yes.
       `Ctrl+Shift+Space` signature help (and after `(` and `,`), `Mod+I` the hover at the caret
       (the pointer's after `HOVER_DELAY_MS`), `F12` and `Mod+click` go to definition,
       `Shift+F12` references; none is one of Orca's shortcuts. A list takes arrows, Page keys,
-      Enter (and Tab for completion); every other key goes to the surface. Escape closes the
-      pop-up opened last (every pop-up goes through one tracked UI in `features.ts`), one per
-      press, and stops there, so it never leaves the editor; with none open it goes on as before. One place
+      Enter (and Tab for completion); every other key goes to the surface. The completion list's
+      range moves with each change by its place; a change before it, across its edge, or in it
+      with the caret left before its end (a write from outside at the caret) closes the list, so
+      an accept never replaces what this editor did not type. Escape closes the
+      pop-up opened last (every pop-up goes through one tracked UI in `features.ts`, a hint fading
+      after `HINT_MS` through it too), one per press, and stops there, so it never leaves the
+      editor; with none open it goes on as before. One place
       in this file moves the caret; another file opens in this editor at its line through
       `editor.open` (src/core/open-file.ts, `inEditor`, a path inside a local workspace only);
       several are a list labelled with their storefronts. Keys go through the surface's `addKeyHandler` (as 7.3's F9), clicks through a capture

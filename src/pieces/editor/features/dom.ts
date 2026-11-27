@@ -20,8 +20,6 @@ import { frameRequests, type EngineRequests } from './requests'
 import type { FeatureUi, HintView, HoverView, ListView, Section, SignatureView, ValueAt } from './ui'
 import { word } from './words'
 
-/** How long a hint stays when no key comes. */
-export const HINT_MS = 4_000
 /** The answers' times kept per feature, for a live check (`latency()`). */
 export const KEPT_TIMES = 50
 
@@ -65,7 +63,6 @@ export class PopupLayer implements FeatureUi {
   private readonly api: OrcaFrameApi
   private readonly elements = new Map<'list' | 'hover' | 'signature' | 'hint', HTMLDivElement>()
   private readonly anchors = new Map<'list' | 'hover' | 'signature' | 'hint', { anchor: Pos; below: boolean }>()
-  private hintTimer: ReturnType<typeof setTimeout> | null = null
   /** A row of the list clicked; a row's index. */
   onChoose: (role: ListView['role'], index: number) => void = () => {}
   /** The pointer left the hover's box. */
@@ -231,16 +228,14 @@ export class PopupLayer implements FeatureUi {
     this.place('signature', view.anchor, false)
   }
 
+  /** A hint, or none; features.ts fades it after `HINT_MS`. */
   hint(view: HintView | null): void {
-    if (this.hintTimer !== null) clearTimeout(this.hintTimer)
-    this.hintTimer = null
     if (!view) return this.hide('hint')
     const element = this.element('hint')
     element.textContent = view.text
     element.setAttribute('role', 'status')
     element.hidden = false
     this.place('hint', view.anchor, true)
-    this.hintTimer = setTimeout(() => this.hide('hint'), HINT_MS)
   }
 
   underlines(list: Parameters<FeatureUi['underlines']>[0]): void {

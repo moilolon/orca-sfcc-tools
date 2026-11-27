@@ -18,6 +18,9 @@ import { NavigationController } from './navigation'
 import { ProblemsController } from './problems'
 import { SignatureController } from './signature'
 
+/** How long a hint stays when no key comes; it fades through the tracked UI, so Escape is free again. */
+export const HINT_MS = 4_000
+
 type Popup = 'list' | 'hover' | 'signature' | 'hint'
 
 export class Features {
@@ -34,7 +37,7 @@ export class Features {
   private readonly told = new Set<string>()
 
   constructor(context: Omit<FeatureContext, 'tellOnce'>, options: { isMac?: boolean } = {}) {
-    const ui = this.tracked(context.ui)
+    const ui = this.tracked(context.ui, context)
     const ctx: FeatureContext = {
       ...context,
       ui,
@@ -54,19 +57,27 @@ export class Features {
   }
 
   /** Records which pop-up is shown, so Escape closes the one opened last. */
-  private tracked(inner: FeatureUi): FeatureUi {
+  private tracked(inner: FeatureUi, timers: Pick<FeatureContext, 'setTimer' | 'clearTimer'>): FeatureUi {
     const mark = (popup: Popup, shown: boolean) => {
       const at = this.order.indexOf(popup)
       if (at !== -1) this.order.splice(at, 1)
       if (shown) this.order.push(popup)
     }
-    return {
+    // A hint fades after `HINT_MS` through this same UI, so it no longer counts as open.
+    let fade: unknown = null
+    const ui: FeatureUi = {
       list: (view) => (mark('list', view !== null), inner.list(view)),
       hover: (view) => (mark('hover', view !== null), inner.hover(view)),
       signature: (view) => (mark('signature', view !== null), inner.signature(view)),
-      hint: (view) => (mark('hint', view !== null), inner.hint(view)),
+      hint: (view) => {
+        timers.clearTimer(fade)
+        fade = view ? timers.setTimer(() => ui.hint(null), HINT_MS) : null
+        mark('hint', view !== null)
+        inner.hint(view)
+      },
       underlines: (list) => inner.underlines(list)
     }
+    return ui
   }
 
   /** Escape: the pop-up opened last closes; false when none is open. */
