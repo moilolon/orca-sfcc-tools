@@ -47,6 +47,21 @@ export type RoleErrors = {
   intervalMinutes: number
   /** New first, then by the newest occurrence. */
   rows: ErrorRow[]
+  /**
+   * Which state of the environment the answer shows: the worker that made it, and a number it
+   * raises on every change of the environment (a read starting or ending, a mark, a forget). Two
+   * answers can arrive out of order; the panel keeps an answer only when it is not older than the
+   * one it holds from the same worker. Absent in a stand-in answer: always kept.
+   */
+  version?: AnswerVersion
+}
+
+export type AnswerVersion = { worker: string; seq: number }
+
+/** Whether `next` shows an older state than `kept`, so the panel drops it. */
+export function isOlderAnswer(next: Pick<RoleErrors, 'version'>, kept: Pick<RoleErrors, 'version'> | undefined): boolean {
+  if (!next.version || !kept?.version || next.version.worker !== kept.version.worker) return false
+  return next.version.seq < kept.version.seq
 }
 
 export type OpenFrameResult = { opened: boolean; reason?: string }
@@ -58,6 +73,8 @@ declare module 'orca' {
     /**
      * Starts a read of the environment's log (or joins the one running) and answers at once, with
      * `reading` true; `errors.changed` tells when the read ended. One read per environment at a time.
+     * A read that cannot run (the environment is not ready in the dw.json read now) answers at
+     * once with why in `error`, and leaves the time of the last read as it was.
      */
     'errors.refresh': { input: { role: Role }; output: RoleErrors }
     /** Marks signatures as seen for good. */

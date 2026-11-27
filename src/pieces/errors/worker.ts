@@ -23,7 +23,8 @@
 //     each read for the same files: whatever the level of its lines, so a window that warnings
 //     or info lines filled counts too. A file not seen before counts when it is already larger
 //     than its window and was written since the read's start.
-import { B2cError } from '../../core/b2c'
+import { randomUUID } from 'node:crypto'
+import { B2cError, type InstancesState } from '../../core/b2c'
 import { isRole, ROLES, type Role } from '../../core/instances'
 import { createOpenFile, type OpenFile } from '../../core/open-file'
 import type { Disposable, PieceContext, WorkerPiece } from '../../core/piece'
@@ -194,6 +195,11 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   const seen = createSeenList(store)
   const reads = new Map<Role, Promise<void>>()
   let stopped = false
+  // Each answer says which state it shows: this worker, and a number raised on every change of a
+  // role, so the panel can drop an answer that arrives after a newer one.
+  const worker = randomUUID()
+  const versions = new Map<Role, number>()
+  const bump = (role: Role) => void versions.set(role, (versions.get(role) ?? 0) + 1)
 
   async function rawSettings(): Promise<Record<string, unknown>> {
     try {
@@ -246,6 +252,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   async function changed(role: Role): Promise<void> {
+    bump(role)
     if (stopped) return
     const newCount = await seen.newCount(role)
     ctx.orca.panels.post('errors.changed', { role, newCount })
@@ -300,9 +307,27 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     return new Map(twice.map((sample, index) => [plan[index].signature, sample]))
   }
 
-  async function read(role: Role): Promise<void> {
-    const { instances } = await ctx.b2c.instances()
-    if (instances[role] !== 'ready') return
+  /**
+   * Why a role's log cannot be read with the dw.json read now, as a code the panel words; null
+   * when it can. Never a value of the file.
+   */
+  function refusalOf({ config, instances }: InstancesState, role: Role): string | null {
+    if (config === 'invalid') return 'config_invalid'
+    if (instances[role] === 'ready') return null
+    return instances[role] === 'incomplete' ? 'credentials_missing' : 'role_not_configured'
+  }
+
+  /** A read that could not run: why, kept with the last read's time untouched. */
+  async function refused(role: Role, code: string): Promise<void> {
+    ctx.log(`the ${role} log was not read: ${code}`)
+    await ctx.store.set(statusKey(role), { ...(await readStatus(role)), error: code })
+  }
+
+  async function read(role: Role, askedAt: number | undefined): Promise<void> {
+    const refusal = refusalOf(await ctx.b2c.instances(), role)
+    if (refusal) return refused(role, refusal)
+    // Kept until the read ends: a worker restarted meanwhile runs it again.
+    await ctx.store.set(askedKey(role), askedAt ?? now())
     const settings = await rawSettings()
     const cursor = cursorOf(await ctx.store.get<SeenJson>(cursorKey(role), null))
     const since = cursor?.at != null ? cursor.at - OVERLAP_MS : now() - FIRST_READ_MS
@@ -382,8 +407,7 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
     if (running) return running
     const reading = (async () => {
       try {
-        await ctx.store.set(askedKey(role), askedAt ?? now())
-        await read(role)
+        await read(role, askedAt)
       } catch (error) {
         ctx.log(`reading the ${role} log failed: ${error instanceof B2cError ? error.code : 'error'}`)
       } finally {
@@ -399,8 +423,10 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
   }
 
   async function list(role: Role): Promise<RoleErrors> {
-    // Taken first: an answer that says it is not reading holds nothing older than the last read.
+    // Taken first: an answer that says it is not reading holds nothing older than the last read,
+    // and nothing older than its version.
     const reading = reads.has(role)
+    const version = { worker, seq: versions.get(role) ?? 0 }
     const [{ instances }, rows, status, settings, root] = await Promise.all([ctx.b2c.instances(), seen.list(role), readStatus(role), rawSettings(), frameRoot()])
     const out: ErrorRow[] = []
     for (const row of rows) {
@@ -426,7 +452,8 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
       error: status.error,
       missedSince: status.missedSince,
       intervalMinutes: role === 'sandbox' ? intervalOf(settings[SETTING_INTERVAL]) : 0,
-      rows: out
+      rows: out,
+      version
     }
   }
 
@@ -467,8 +494,15 @@ function start(ctx: PieceContext, deps: ErrorsDeps): Disposable {
 
   const disposables: Disposable[] = [
     ctx.orca.panels.handle('errors.list', (input) => list(roleOf(input))),
-    ctx.orca.panels.handle('errors.refresh', (input) => {
+    ctx.orca.panels.handle('errors.refresh', async (input) => {
       const role = roleOf(input)
+      // A read that cannot run says why at once, and starts nothing.
+      const refusal = reads.has(role) ? null : refusalOf(await ctx.b2c.instances(), role)
+      if (refusal) {
+        await refused(role, refusal)
+        await changed(role)
+        return list(role)
+      }
       // Started, not awaited: the answer says it is reading, and `errors.changed` brings the rest.
       void refresh(role)
       return list(role)

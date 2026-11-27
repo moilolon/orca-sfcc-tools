@@ -317,6 +317,72 @@ test('two reads in a row both complete and both move the time of the last read, 
   }
 })
 
+test('a read that cannot run with the dw.json read now says why at once, and leaves the last read and no mark behind', async () => {
+  const root = makeWorkspace()
+  try {
+    let clock = NOW
+    // The focus moves to a workspace with no dw.json: the runner reads none.
+    let focusHasNoFile = false
+    const { worker, logsCalls, orca } = await mountPiece(hostFor(root), b2cAnswering(), { now: () => clock }, (b2c) => ({
+      ...b2c,
+      instances: async (options) => (focusHasNoFile ? { config: 'missing', instances: { sandbox: 'absent', development: 'absent', staging: 'absent', production: 'absent' } } : b2c.instances(options))
+    }))
+    const first = await readNow(worker, { role: 'sandbox' })
+    assert.equal(first.lastRead, NOW)
+
+    focusHasNoFile = true
+    clock += 60_000
+    const refused = await worker.request('errors.refresh', { role: 'sandbox' })
+    assert.equal(refused.reading, false, 'answered at once, with nothing running')
+    assert.equal(refused.error, 'role_not_configured')
+    assert.equal(refused.lastRead, NOW, 'the time of the last read is not touched')
+    assert.notEqual(refused.state, 'ready')
+    await settle()
+    assert.equal(logsCalls().length, 1, 'nothing was read')
+    assert.equal(await orca().storage.get('errors.asked.sandbox'), null, 'nothing is left marked as asked')
+    assert.equal((await worker.request('errors.list', { role: 'sandbox' })).error, 'role_not_configured')
+
+    // Back on the workspace: the next read runs, and clears why.
+    focusHasNoFile = false
+    clock += 60_000
+    const again = await readNow(worker, { role: 'sandbox' })
+    assert.equal(again.error, null)
+    assert.equal(again.lastRead, NOW + 120_000)
+    assert.equal(logsCalls().length, 2)
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('every answer is numbered: the one Read now gives while reading is older than the one after the read', async () => {
+  const root = makeWorkspace()
+  try {
+    const pending: SpawnCall[] = []
+    const { worker } = await mountPiece(hostFor(root), (call) => {
+      if (call.args[0] === 'logs' && call.args[1] === 'get') pending.push(call)
+      else b2cAnswering()(call)
+    })
+    const before = await worker.request('errors.list', { role: 'sandbox' })
+    const started = await worker.request('errors.refresh', { role: 'sandbox' })
+    await until(() => pending.length === 1, 'the read started')
+    pending.shift()?.child.finish(0, JSON.stringify(LOGS_GET))
+    const ended = await readEnded(worker, 'sandbox')
+    assert.ok(before.version && started.version && ended.version)
+    assert.equal(started.version.worker, ended.version.worker)
+    assert.ok(before.version.seq < started.version.seq, 'the read starting is a change')
+    assert.ok(started.version.seq < ended.version.seq, 'and so is its end')
+    const marked = await worker.request('errors.mark', { role: 'sandbox', signatures: [ended.rows[0].signature] })
+    assert.ok(marked.version && marked.version.seq > ended.version.seq, 'a mark too')
+    // Each role counts on its own.
+    const other = await worker.request('errors.list', { role: 'development' })
+    assert.equal(other.version?.seq, 0)
+    await worker.deactivate()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('a read a worker restart cut short runs again when the worker starts, and only within its window', async () => {
   const root = makeWorkspace()
   try {
